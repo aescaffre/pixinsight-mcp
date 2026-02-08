@@ -1,8 +1,92 @@
 # MCP Tools Catalog
 
-The tools the MCP server will expose to AI assistants. Organized by processing stage, from highest to lowest priority.
+The tools the MCP server will expose to AI assistants. Organized by category.
 
-## Phase 1 — Core Tools (MVP)
+---
+
+## Category 1 — Recipe Catalog Tools
+
+### `search_recipes`
+Search the local recipe catalog for processing workflows matching an object or criteria.
+
+**Parameters**:
+- `object` (string, optional) — astronomical object name (e.g., "M42", "NGC 7000")
+- `objectType` (string, optional) — "galaxy", "emission_nebula", "planetary_nebula", "cluster", "reflection_nebula", etc.
+- `filters` (string[], optional) — filter set used (e.g., ["L", "R", "G", "B", "Ha"])
+- `tags` (string[], optional) — additional tags to filter on
+- `limit` (number, default: 5)
+
+**Returns**: Array of recipe summaries with `{ id, title, objects, source, resultImageUrl, stepCount, difficulty }`
+
+---
+
+### `get_recipe`
+Get full recipe details by ID, including all steps and parameters.
+
+**Parameters**:
+- `recipeId` (string, required)
+
+**Returns**: Full recipe object (see [recipes-catalog.md](recipes-catalog.md) for schema)
+
+---
+
+### `search_new_recipes`
+Search the web for new processing workflows for a given object. Extracts structured recipes from found content and adds them to the catalog.
+
+**Parameters**:
+- `object` (string, required) — object name to search for
+- `filters` (string[], optional) — filter set to refine search
+- `sources` (string[], optional) — limit to specific platforms ("astrobin", "cloudynights", "webastro", "youtube", "blog")
+
+**Returns**: Array of newly discovered recipe summaries
+
+---
+
+### `add_recipe`
+Add a manually crafted recipe to the catalog.
+
+**Parameters**:
+- `recipe` (object, required) — full recipe object following the schema
+
+**Returns**: `{ id, status: "added" }`
+
+---
+
+### `import_recipe_from_url`
+AI reads a URL (blog post, forum thread, AstroBin page) and extracts a structured processing recipe from it.
+
+**Parameters**:
+- `url` (string, required) — source URL
+- `object` (string, optional) — object name hint (helps extraction)
+
+**Returns**: Extracted recipe (user can review before saving)
+
+---
+
+### `execute_recipe`
+Execute a recipe step-by-step on loaded images in PixInsight.
+
+**Parameters**:
+- `recipeId` (string, required)
+- `channelMapping` (object, required) — maps recipe channels to open views, e.g., `{ "L": "L_master", "R": "R_master", "Ha": "Ha_master" }`
+- `startFromStep` (number, default: 1) — resume from a specific step
+- `interactive` (boolean, default: true) — if true, pause after each step for user review
+
+**Returns**: Progress and result for each step
+
+---
+
+### `rate_recipe`
+Rate a recipe after using it.
+
+**Parameters**:
+- `recipeId` (string, required)
+- `rating` (number, required) — 1-5
+- `notes` (string, optional)
+
+---
+
+## Category 2 — Image Management Tools
 
 ### `list_open_images`
 List all currently open image windows in PixInsight.
@@ -51,6 +135,10 @@ Get statistics for an open image (mean, median, stddev, min, max, per channel).
 
 ---
 
+## Category 3 — Processing Tools (Post-WBPP)
+
+These are the core tools for post-processing. Recipes are composed of these steps.
+
 ### `run_pixelmath`
 Execute a PixelMath expression.
 
@@ -64,7 +152,110 @@ Execute a PixelMath expression.
 
 ---
 
-## Phase 2 — Pre-Processing Pipeline
+### `remove_gradient`
+Remove background gradients using ABE.
+
+**Parameters**:
+- `viewId` (string, required)
+- `polyDegree` (number, default: 4) — polynomial degree (1-6)
+- `tolerance` (number, default: 1.0)
+
+---
+
+### `color_calibrate`
+Calibrate colors using SPCC (if plate-solved) or PCC.
+
+**Parameters**:
+- `viewId` (string, required)
+- `method` (string, default: "spcc") — "spcc", "pcc", "basic"
+
+---
+
+### `remove_green_cast`
+Apply SCNR to remove green cast.
+
+**Parameters**:
+- `viewId` (string, required)
+- `amount` (number, default: 1.0) — 0.0 to 1.0
+
+---
+
+### `stretch_image`
+Apply histogram stretch (linear to non-linear).
+
+**Parameters**:
+- `viewId` (string, required)
+- `method` (string, default: "auto") — "auto" (AutoHistogram), "stf" (use STF values), "manual" (HistogramTransformation)
+- `shadowsClipping` (number, optional) — for manual method
+- `midtones` (number, optional) — for manual method
+
+---
+
+### `apply_curves`
+Apply curves transformation.
+
+**Parameters**:
+- `viewId` (string, required)
+- `curvePoints` (array) — array of [x, y] control points (0.0-1.0)
+- `channel` (string, default: "rgb") — "rgb", "red", "green", "blue", "lightness", "saturation"
+
+---
+
+### `denoise`
+Apply noise reduction (MultiscaleLinearTransform).
+
+**Parameters**:
+- `viewId` (string, required)
+- `layers` (number, default: 4) — number of wavelet layers
+- `strength` (number[], optional) — per-layer noise reduction strength
+
+---
+
+### `sharpen`
+Apply UnsharpMask sharpening.
+
+**Parameters**:
+- `viewId` (string, required)
+- `sigma` (number, default: 2.0)
+- `amount` (number, default: 0.8)
+
+---
+
+### `deconvolve`
+Apply deconvolution to restore detail.
+
+**Parameters**:
+- `viewId` (string, required)
+- `psfSigma` (number, default: 2.5) — PSF sigma estimate
+- `iterations` (number, default: 50)
+
+---
+
+### `combine_lrgb`
+Combine Luminance with RGB color data.
+
+**Parameters**:
+- `luminanceViewId` (string, required)
+- `rgbViewId` (string, required)
+- `luminanceWeight` (number, default: 1.0)
+
+---
+
+### `blend_narrowband`
+Blend narrowband channel into broadband data using PixelMath.
+
+**Parameters**:
+- `targetViewId` (string, required) — the broadband image
+- `narrowbandViewId` (string, required) — the narrowband channel (e.g., Ha)
+- `blendMode` (string, default: "max") — "max", "screen", "add", "custom"
+- `blendStrength` (number, default: 1.0) — 0.0 to 1.0
+- `targetChannel` (string, optional) — "red", "luminance", "all"
+
+---
+
+## Category 4 — Pre-Processing Tools (Direct Use)
+
+Available for direct use, but **not** used in post-WBPP recipes.
 
 ### `calibrate_frames`
 Apply bias, dark, and flat calibration to light frames.
@@ -105,88 +296,7 @@ Stack registered frames using ImageIntegration.
 
 ---
 
-### `debayer`
-Demosaic a CFA/Bayer image.
-
-**Parameters**:
-- `viewId` (string, required)
-- `bayerPattern` (string, default: "auto") — "auto", "RGGB", "BGGR", "GBRG", "GRBG"
-- `method` (string, default: "VNG")
-
----
-
-## Phase 3 — Post-Processing
-
-### `remove_gradient`
-Remove background gradients using ABE.
-
-**Parameters**:
-- `viewId` (string, required)
-- `polyDegree` (number, default: 4) — polynomial degree (1-6)
-- `tolerance` (number, default: 1.0)
-
----
-
-### `color_calibrate`
-Calibrate colors using SPCC (if plate-solved) or PCC.
-
-**Parameters**:
-- `viewId` (string, required)
-- `method` (string, default: "spcc") — "spcc", "pcc", "basic"
-
----
-
-### `remove_green_cast`
-Apply SCNR to remove green cast.
-
-**Parameters**:
-- `viewId` (string, required)
-- `amount` (number, default: 1.0) — 0.0 to 1.0
-
----
-
-### `stretch_image`
-Apply histogram stretch (linear to non-linear).
-
-**Parameters**:
-- `viewId` (string, required)
-- `method` (string, default: "auto") — "auto" (AutoHistogram), "manual" (HistogramTransformation)
-- `shadowsClipping` (number, optional) — for manual method
-- `midtones` (number, optional) — for manual method
-
----
-
-### `apply_curves`
-Apply curves transformation.
-
-**Parameters**:
-- `viewId` (string, required)
-- `curvePoints` (array) — array of [x, y] control points (0.0-1.0)
-- `channel` (string, default: "rgb") — "rgb", "red", "green", "blue", "lightness", "saturation"
-
----
-
-### `denoise`
-Apply noise reduction (MultiscaleLinearTransform).
-
-**Parameters**:
-- `viewId` (string, required)
-- `layers` (number, default: 4) — number of wavelet layers
-- `strength` (number[], optional) — per-layer noise reduction strength
-
----
-
-### `sharpen`
-Apply UnsharpMask sharpening.
-
-**Parameters**:
-- `viewId` (string, required)
-- `sigma` (number, default: 2.0)
-- `amount` (number, default: 0.8)
-
----
-
-## Phase 4 — Advanced Tools
+## Category 5 — Advanced / Utility Tools
 
 ### `plate_solve`
 Solve astrometry for an image (ImageSolver).
