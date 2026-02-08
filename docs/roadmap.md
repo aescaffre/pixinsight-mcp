@@ -62,12 +62,22 @@
 ## Phase 4 — Recipe Import + Discovery
 **Goal**: AI can find and import new recipes from the web.
 
+### On-Demand + Manual Import
 - [ ] Implement `import_recipe_from_url` tool (AI extracts recipe from blog/forum)
 - [ ] Implement `search_new_recipes` tool (web search -> extract -> catalog)
 - [ ] Source URL deduplication
 - [ ] Recipe versioning (updates to existing recipes)
 - [ ] Handle multiple sources for the same object
 - [ ] `rate_recipe` tool
+
+### Proactive Crawler (When Budget Allows)
+- [ ] Define reference object list (Messier, bright NGC/IC, Sharpless highlights)
+- [ ] Implement CLI crawl command (`pixinsight-mcp crawl --objects messier --sources astrobin`)
+- [ ] Per-platform crawl adapters (AstroBin, Cloudy Nights, WebAstro, YouTube, blogs)
+- [ ] AI extraction pipeline (page content -> structured recipe)
+- [ ] Deduplication against existing catalog entries
+- [ ] Budget cap / rate limiting (max N LLM calls per run)
+- [ ] Freshness re-crawl (monthly schedule, optional)
 
 ## Phase 5 — Recipe Execution Engine
 **Goal**: Claude can execute a full recipe on user's data, step by step.

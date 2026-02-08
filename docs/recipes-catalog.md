@@ -124,7 +124,9 @@ A recipe is a structured description of a post-processing workflow — the seque
     "estimatedTime": "45 minutes",
     "pixinsightVersion": "1.8.9",
     "thirdPartyRequired": [],
-    "totalExposure": null
+    "totalExposure": null,
+    "collectedBy": "on-demand",
+    "collectedAt": "2025-01-20T14:30:00Z"
   }
 }
 ```
@@ -199,15 +201,74 @@ Eventually, a shared catalog that users can contribute to and pull from. This is
 
 ## Recipe Lifecycle
 
-### Discovery
-1. **Manual entry**: User or contributor writes a recipe from a tutorial
-2. **AI-assisted collection**: Claude reads a blog post/tutorial URL and extracts a structured recipe
-3. **Online search**: When a user asks about an object, Claude searches for tutorials and creates new recipes
+### Discovery — Three Modes
+
+#### Mode 1: On-Demand (Default — Zero Cost When Idle)
+
+When a user asks to process an object, Claude searches the web *at that moment* for tutorials and extracts recipes. This is the baseline — it costs nothing until someone actually needs it.
+
+```
+User asks about M82 -> search web -> extract recipes -> cache in catalog -> present options
+```
+
+**Pros**: No ongoing cost, always fresh results, only pays for what's used.
+**Cons**: Slower first-time experience for a given object, depends on web search quality.
+
+#### Mode 2: Manual / AI-Assisted Entry
+
+A user or contributor provides a URL and the AI extracts a structured recipe from it:
+
+```
+User: "Import this tutorial: https://astro-blog.com/m42-processing"
+Claude: [reads page, extracts steps, creates recipe, asks user to review]
+```
+
+#### Mode 3: Proactive Crawler (Future — Budget Required)
+
+A background intelligence process that systematically builds the catalog by crawling known sources for a reference list of deep sky objects. This is the "dream mode" that makes the catalog rich before any user asks for a specific object.
+
+**How it works:**
+
+1. **Reference object list** — A curated list of ~200-500 popular deep sky targets (Messier catalog, bright NGC/IC objects, Sharpless nebulae, well-known targets). Prioritized by popularity in the astrophotography community.
+
+2. **Source crawl schedule** — For each object, periodically search known platforms:
+   - AstroBin: search for the object, read processing details from top-rated images
+   - Cloudy Nights / WebAstro / PI Forum: search for "[object] processing" threads
+   - Blogs: web search for "[object] PixInsight processing tutorial"
+   - YouTube: search for "[object] PixInsight" (extract from descriptions/transcripts)
+
+3. **AI extraction** — For each found source, the AI reads the content and extracts a structured recipe. This is the expensive step (LLM calls).
+
+4. **Deduplication** — Compare against existing recipes by source URL and content similarity. Only add genuinely new approaches.
+
+5. **Freshness check** — Re-crawl periodically (monthly?) to find new tutorials for objects already in the catalog.
+
+**Cost structure:**
+- Web searches: cheap (or free with search APIs)
+- Page fetches: cheap
+- AI extraction (LLM calls): **this is where the cost is** — one call per source page to extract a structured recipe
+- Rough estimate: ~2-5 LLM calls per object per source platform = ~1,000-5,000 calls for an initial crawl of 200 objects across 5 platforms
+
+**Crawl priorities:**
+| Priority | Objects | Rationale |
+|---|---|---|
+| P0 | Messier catalog (110 objects) | Most commonly photographed |
+| P1 | Bright NGC (NGC 7000, 2024, 6992...) | Popular extended targets |
+| P2 | Sharpless / IC highlights (Sh2-129, IC 1805...) | Popular narrowband targets |
+| P3 | Long tail (lesser-known objects) | On-demand is fine here |
+
+**Implementation options:**
+- **CLI command**: `pixinsight-mcp crawl --objects messier --sources astrobin,cloudynights` — run manually when you want to build the catalog
+- **Scheduled job**: cron/launchd that runs the crawler weekly/monthly
+- **Budget cap**: stop after N LLM calls per run to control costs
+
+**Recommendation**: Start with Mode 1 (on-demand) and Mode 2 (manual import). Add Mode 3 later when the project has momentum and you want to pre-populate the catalog. The catalog schema and storage are the same regardless of how recipes get in — so nothing is lost by deferring the crawler.
 
 ### Curation
 - Recipes can be **rated** after use (did the result look good?)
 - Recipes can be **versioned** (updated with better parameters)
 - Duplicate/similar recipes for the same object give the user options
+- Crawler-imported recipes are marked `"collectedBy": "crawler"` vs `"collectedBy": "manual"` or `"collectedBy": "on-demand"`
 
 ### Usage Flow
 ```
