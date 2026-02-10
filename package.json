@@ -1,0 +1,29 @@
+{
+  "name": "pixinsight-mcp",
+  "version": "0.1.0",
+  "description": "MCP server bridging AI assistants with PixInsight for astrophotography processing",
+  "type": "module",
+  "main": "build/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node build/index.js",
+    "setup-bridge": "mkdir -p ~/.pixinsight-mcp/bridge/{commands,results,logs} ~/.pixinsight-mcp/catalog/recipes"
+  },
+  "keywords": [
+    "pixinsight",
+    "mcp",
+    "astrophotography",
+    "model-context-protocol"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}
