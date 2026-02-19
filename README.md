@@ -1,94 +1,161 @@
 # PixInsight MCP Server
 
-A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) Desktop server that enables AI assistants (Claude Desktop, Claude Code, VS Code) to control [PixInsight](https://pixinsight.com/) for astrophotography image processing — powered by a community-built catalog of processing recipes.
+An AI-driven automated deep sky astrophotography processing pipeline for [PixInsight](https://pixinsight.com/). Uses [Claude Code](https://claude.com/claude-code) to drive PixInsight's PJSR scripting engine via a file-based IPC bridge, processing astronomical images through a configurable, branching pipeline with iterative tuning.
 
-## Vision
+## What It Does
 
-**Two pillars:**
-
-1. **AI-driven PixInsight automation** — Use natural language to execute post-processing workflows in PixInsight, starting after WBPP (pre-processing).
-
-2. **Processing recipes catalog** — A growing, searchable database of processing workflows indexed by astronomical object. Each recipe references its source (blog posts, AstroBin, WebAstro, forums...) and, when available, the resulting image. The AI uses this catalog to suggest proven approaches for your target.
-
-### Example Flow
+You provide integrated master frames (post-WBPP) and a JSON config describing your processing workflow. The pipeline handles everything else — channel combination, gradient removal, color calibration, deconvolution, noise reduction, star separation, stretching, Ha/narrowband injection, luminance processing, local contrast enhancement, and star recombination.
 
 ```
-You: "I want to process M82 and M81. I have 9h each of R, G, B,
-      50h of L and 35h of Ha. Data is already integrated via WBPP."
+You: "Process NGC 891 LRGB — edge-on galaxy, 180s subs, Astronomik Deep Sky filters"
 
-Claude:
-  1. Searches the recipe catalog for M82/M81 workflows
-  2. Searches online for new approaches (blogs, AstroBin, forums)
-  3. Presents 2-3 recipes with source links and result images
-  4. You pick one
-  5. Claude pilots PixInsight step-by-step through the workflow
+Claude Code:
+  1. Creates a pipeline config (branches for RGB, stars, luminance)
+  2. Runs the full pipeline with intelligent decisions:
+     - Compares ABE vs GradientCorrection, picks the most uniform background
+     - Creates luminance masks to protect background during LHE/HDRMT
+     - Applies screen-blend star recombination (no halos)
+  3. Exports preview JPGs at each step for visual review
+  4. You review, give feedback, Claude adjusts parameters
+  5. Resume from checkpoint — no need to re-run the whole pipeline
 ```
+
+### Example Result
+
+NGC 891 processed through 8 iterations of automated pipeline tuning — from raw integrated masters to final output:
+
+**Pipeline steps**: Channel alignment → RGB combine → Gradient removal (auto ABE/GC) → BXT → Plate solve → SPCC → SCNR → BXT sharpening → NXT → SXT → Star stretch → L processing → Stretch (HT+GHS) → NXT → Curves → LRGB combine → LHE (masked) → HDRMT (masked) → NXT final → Curves → Star addition
+
+## Key Features
+
+### Intelligent Gradient Removal
+Automatically compares GradientCorrection vs AutomaticBackgroundExtractor (multiple polynomial degrees), measures background uniformity via corner median sampling, and picks the winner.
+
+### Branching Pipeline
+Config-driven branches for parallel processing:
+- **Main** (RGB): gradient removal → calibration → stretch → curves → local contrast
+- **Stars**: SXT extraction → Seti linear stretch → saturation → screen-blend recombination
+- **Luminance**: separate stretch → NXT → BXT → LRGB combine
+- **H-alpha** (optional): SXT → stretch → curves → injection into RGB
+
+### Checkpoint & Resume
+Auto-saves checkpoints at key stages (SXT, stretch, curves). Resume from any checkpoint after a crash or parameter change — skip hours of reprocessing:
+```bash
+node scripts/run-pipeline.mjs --config config.json --restart-from curves_main
+```
+
+### Memory Management
+Automatic undo history purging, image cleanup after merge points, and memory monitoring with configurable thresholds (warn at 4GB, auto-checkpoint and abort at 8GB).
+
+### Luminance Masks
+Creates luminance masks from Ha (when available) or the main image to protect background during LHE and HDRMT. Masks are automatically cleaned up after use.
+
+### Preview Export
+Exports JPG previews at every pipeline step (with auto-stretch for linear data) for visual review without opening PixInsight.
+
+### Iterative Tuning
+Each run generates a detailed markdown report (`iteration_XX.md`) with parameters, memory profile, warnings, and assessment. Feed observations back to Claude Code for the next iteration.
 
 ## Architecture
 
 ```
-Claude Desktop / Claude Code / VS Code
-    |  (stdio JSON-RPC)
+Claude Code (conversation + vision)
     |
-MCP Server (TypeScript, local process)
-    |            |
-    |            +-- Processing Recipes Catalog (local JSON/SQLite)
-    |            |     indexed by object, tags, filter set
-    |            |     sources: blogs, AstroBin, WebAstro, forums
-    |            |
-    |            +-- Web search (discover new recipes)
+    |  drives
     |
-    |  (file-based command bridge)
+Pipeline Script (Node.js — scripts/run-pipeline.mjs)
     |
-PixInsight (running in automation mode)
-    └── Watcher script (PJSR) polls for commands, executes, writes results
+    |  file-based IPC (JSON commands/results)
+    |
+PixInsight (PJSR watcher script polls for commands)
+    |
+    +-- MCP Server (TypeScript) — lower-level tool interface
+    +-- Web Editor (editor/) — visual config editor
 ```
 
-## Status
+## Pipeline Config Format
 
-- **MCP Server**: Working — 17 tools + PJSR watcher for interactive control
-- **Pipeline Script**: Working — config-driven branching pipeline (`scripts/run-pipeline.mjs`)
-- **Web Editor**: Working — visual config editor (`editor/`)
-- **Recipes Catalog**: Not started
+JSON v2 format with branches and per-step parameters:
 
-## Pipeline Script
+```json
+{
+  "version": 2,
+  "name": "NGC891 LRGB",
+  "files": {
+    "L": "/path/to/master_L.xisf",
+    "R": "/path/to/master_R.xisf",
+    "G": "/path/to/master_G.xisf",
+    "B": "/path/to/master_B.xisf",
+    "Ha": "",
+    "outputDir": "/path/to/output"
+  },
+  "branches": {
+    "main": { "label": "RGB" },
+    "stars": { "label": "Stars", "forkAfter": "sxt" },
+    "lum": { "label": "Luminance", "forkAfter": "sxt" }
+  },
+  "steps": [
+    { "id": "combine_rgb", "branch": "main", "enabled": true, "params": {} },
+    { "id": "gc", "branch": "main", "enabled": true,
+      "params": { "method": "auto", "abePolyDegree": 3, "maxAttempts": 3 } },
+    { "id": "nxt_pass1", "branch": "main", "enabled": true,
+      "params": { "denoise": 0.25, "detail": 0.15 } },
+    ...
+  ]
+}
+```
 
-`scripts/run-pipeline.mjs` is a Node.js script that drives PixInsight through a complete deep sky processing workflow. It supports HaRGB, HaLRGB, and LRGB configurations with branching (stars, Ha, luminance), checkpoints, and iterative tuning.
-
-### Inspired By / References
-
-The pipeline implements techniques from the PixInsight community:
-
-| Technique | Inspired By | Implementation |
-|-----------|-------------|----------------|
-| **Star Stretch (Seti method)** | [Seti Astro](https://www.setiastro.com) (Bill Blanshan) — MTF-based star stretching that progressively lifts faint stars without bloating bright ones | `starMethod: "linear"` in star_stretch params. Applies N iterations of `MTF(m, x) = (1-m)*x / ((1-2m)*x + m)` via PixelMath on linear star residuals. |
-| **Generalized Hyperbolic Stretch (GHS)** | [GHS Script](https://ghsastro.co.uk) by Mike Cranfield & Mark Shelley — PixInsight script at `src/scripts/GeneralisedHyperbolicStretch/` | Coefficients computed in Node.js (`computeGHSCoefficients`), applied via PixelMath piecewise expression. Fallback because GHS .dylib module is not installed. |
-| **Non-linear star extraction** | PixInsight community technique — stretch pre-SXT image identically, then SXT with unscreen | `starMethod: "nonlinear"` (default). Avoids halo bloating from stretching linear star residuals. |
-| **Screen blend star recombination** | Standard astrophotography technique: `1-(1-A)*(1-B)` | PixelMath `~(~$T*~(strength*stars))` |
-| **Ha injection (3-part)** | Combination of community techniques for narrowband enhancement | Conditional R-channel injection + LRGBCombination luminance boost + high-frequency detail layer |
-| **STF Auto-stretch** | PixInsight's built-in STF algorithm: `shadows = median - 2.8*MAD`, midtone transfer function | Replicated in `autoStretch()` for programmatic HT application |
-
-### Running
+## Running
 
 ```bash
+# Prerequisites: Node.js 22+, PixInsight with PJSR watcher running
+
 # Full pipeline
 node scripts/run-pipeline.mjs --config path/to/config.json
 
 # Resume from checkpoint
 node scripts/run-pipeline.mjs --config path/to/config.json --restart-from stretch
+
+# Start web editor
+node editor/server.mjs
+```
+
+## Supported Workflows
+
+- **LRGB** — Broadband luminance + color (galaxies, star clusters)
+- **HaRGB** — Narrowband Ha + broadband color (emission nebulae)
+- **HaLRGB** — Narrowband Ha + luminance + broadband color (full narrowband/broadband blend)
+
+## Processing Techniques
+
+| Technique | Source | Implementation |
+|-----------|--------|----------------|
+| **Seti Star Stretch** | [Seti Astro](https://www.setiastro.com) (Bill Blanshan) | MTF iterations on linear star residuals via PixelMath |
+| **GHS Stretch** | [GHS Script](https://ghsastro.co.uk) (Cranfield & Shelley) | PixelMath piecewise fallback (no .dylib needed) |
+| **Non-linear star extraction** | PixInsight community | Identical stretch on pre-SXT checkpoint, then SXT with unscreen |
+| **Screen blend recombination** | Standard technique | `~(~$T*~(strength*stars))` — eliminates star halos |
+| **Ha 3-part injection** | Community techniques | R-channel injection + luminance boost + detail layer |
+| **Intelligent gradient removal** | Original | ABE vs GC comparison via corner uniformity metric |
+| **STF Auto-stretch** | PixInsight STF algorithm | `shadows = median - 2.8*MAD`, midtone transfer function |
+
+## Project Structure
+
+```
+scripts/run-pipeline.mjs    — Main pipeline script (~2000 lines)
+editor/                     — Web UI for pipeline config editing
+src/                        — MCP server TypeScript source
+pjsr/                       — PixInsight watcher script
+.claude/skills/             — Processing knowledge base (PJSR reference, gotchas, techniques)
+docs/                       — Architecture, bridge protocol, roadmap
 ```
 
 ## Quick Links
 
+- [Pipeline Skill Reference](.claude/skills/pixinsight-pipeline/SKILL.md)
 - [Architecture & Design](docs/architecture.md)
-- [Processing Recipes Catalog](docs/recipes-catalog.md)
-- [PJSR Scripting Reference](docs/pjsr-reference.md)
-- [PixInsight Processes Catalog](docs/processes.md)
 - [Command Bridge Protocol](docs/bridge-protocol.md)
 - [MCP Tools Catalog](docs/mcp-tools.md)
 - [Implementation Roadmap](docs/roadmap.md)
-- [Development Setup](docs/dev-setup.md)
-- [Pipeline Skill Reference](.claude/skills/pixinsight-pipeline/SKILL.md)
 
 ## Astro ARO — Remote Observatory
 
