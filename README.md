@@ -159,9 +159,9 @@ docs/                       — Architecture, bridge protocol, roadmap
 
 ## Astro ARO — Remote Observatory
 
-This project is developed by the operator of [**Astro ARO**](https://astrolentejo.fr), a remote observatory located in the **Alentejo Dark Sky Reserve** (Portugal) — one of Europe's darkest sites at **Bortle 2-3**.
+This project is developed by a member of [**Astro ARO**](https://astrolentejo.fr), a remote observatory located in the **Alentejo Dark Sky Reserve** (Portugal) — one of Europe's darkest sites at **Bortle 2-3**.
 
-Seats are regularly available for remote observation. Visit the [Teams section](https://astrolentejo.fr) to see images taken from the observatory, and use the [Contact page](https://astrolentejo.fr) if you are interested in joining.
+Seats are regularly available for remote observation. Visit the [Teams section](https://astrolentejo.fr/teams) to see images taken from the observatory, and use the [Contact page](https://astrolentejo.fr) if you are interested in joining.
 
 ## License
 
