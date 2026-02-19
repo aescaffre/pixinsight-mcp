@@ -22,7 +22,13 @@ Claude Code:
 
 ### Example Result
 
-NGC 891 processed through 8 iterations of automated pipeline tuning — from raw integrated masters to final output:
+NGC 891 processed through iterative automated pipeline tuning — from raw integrated masters to final output:
+
+<p align="center">
+  <img src="docs/images/ngc891_example.jpg" alt="NGC 891 — Edge-on spiral galaxy processed with PixInsight MCP pipeline" width="600">
+  <br>
+  <em>NGC 891 (LRGB) — Processed entirely by the automated pipeline from integrated master frames. Astro ARO, Alentejo Dark Sky Reserve.</em>
+</p>
 
 **Pipeline steps**: Channel alignment → RGB combine → Gradient removal (auto ABE/GC) → BXT → Plate solve → SPCC → SCNR → BXT sharpening → NXT → SXT → Star stretch → L processing → Stretch (HT+GHS) → NXT → Curves → LRGB combine → LHE (masked) → HDRMT (masked) → NXT final → Curves → Star addition
 
