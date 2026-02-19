@@ -46,9 +46,37 @@ PixInsight (running in automation mode)
 
 ## Status
 
-**Phase: Knowledge Base / Design** — Not yet implemented.
+- **MCP Server**: Working — 17 tools + PJSR watcher for interactive control
+- **Pipeline Script**: Working — config-driven branching pipeline (`scripts/run-pipeline.mjs`)
+- **Web Editor**: Working — visual config editor (`editor/`)
+- **Recipes Catalog**: Not started
 
-See [docs/](docs/) for the full knowledge base and implementation plan.
+## Pipeline Script
+
+`scripts/run-pipeline.mjs` is a Node.js script that drives PixInsight through a complete deep sky processing workflow. It supports HaRGB, HaLRGB, and LRGB configurations with branching (stars, Ha, luminance), checkpoints, and iterative tuning.
+
+### Inspired By / References
+
+The pipeline implements techniques from the PixInsight community:
+
+| Technique | Inspired By | Implementation |
+|-----------|-------------|----------------|
+| **Star Stretch (Seti method)** | [Seti Astro](https://www.setiastro.com) (Bill Blanshan) — MTF-based star stretching that progressively lifts faint stars without bloating bright ones | `starMethod: "linear"` in star_stretch params. Applies N iterations of `MTF(m, x) = (1-m)*x / ((1-2m)*x + m)` via PixelMath on linear star residuals. |
+| **Generalized Hyperbolic Stretch (GHS)** | [GHS Script](https://ghsastro.co.uk) by Mike Cranfield & Mark Shelley — PixInsight script at `src/scripts/GeneralisedHyperbolicStretch/` | Coefficients computed in Node.js (`computeGHSCoefficients`), applied via PixelMath piecewise expression. Fallback because GHS .dylib module is not installed. |
+| **Non-linear star extraction** | PixInsight community technique — stretch pre-SXT image identically, then SXT with unscreen | `starMethod: "nonlinear"` (default). Avoids halo bloating from stretching linear star residuals. |
+| **Screen blend star recombination** | Standard astrophotography technique: `1-(1-A)*(1-B)` | PixelMath `~(~$T*~(strength*stars))` |
+| **Ha injection (3-part)** | Combination of community techniques for narrowband enhancement | Conditional R-channel injection + LRGBCombination luminance boost + high-frequency detail layer |
+| **STF Auto-stretch** | PixInsight's built-in STF algorithm: `shadows = median - 2.8*MAD`, midtone transfer function | Replicated in `autoStretch()` for programmatic HT application |
+
+### Running
+
+```bash
+# Full pipeline
+node scripts/run-pipeline.mjs --config path/to/config.json
+
+# Resume from checkpoint
+node scripts/run-pipeline.mjs --config path/to/config.json --restart-from stretch
+```
 
 ## Quick Links
 
@@ -60,6 +88,13 @@ See [docs/](docs/) for the full knowledge base and implementation plan.
 - [MCP Tools Catalog](docs/mcp-tools.md)
 - [Implementation Roadmap](docs/roadmap.md)
 - [Development Setup](docs/dev-setup.md)
+- [Pipeline Skill Reference](.claude/skills/pixinsight-pipeline/SKILL.md)
+
+## Astro ARO — Remote Observatory
+
+This project is developed by the operator of [**Astro ARO**](https://astrolentejo.fr), a remote observatory located in the **Alentejo Dark Sky Reserve** (Portugal) — one of Europe's darkest sites at **Bortle 2-3**.
+
+Seats are regularly available for remote observation. Visit the [Teams section](https://astrolentejo.fr) to see images taken from the observatory, and use the [Contact page](https://astrolentejo.fr) if you are interested in joining.
 
 ## License
 
