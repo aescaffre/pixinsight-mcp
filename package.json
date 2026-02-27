@@ -8,7 +8,8 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node build/index.js",
-    "setup-bridge": "mkdir -p ~/.pixinsight-mcp/bridge/{commands,results,logs} ~/.pixinsight-mcp/catalog/recipes"
+    "setup-bridge": "mkdir -p ~/.pixinsight-mcp/bridge/{commands,results,logs} ~/.pixinsight-mcp/catalog/recipes",
+    "editor": "node editor/server.mjs"
   },
   "keywords": [
     "pixinsight",

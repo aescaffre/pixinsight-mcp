@@ -3,6 +3,50 @@
 // Polls the bridge directory for commands, executes them, writes results.
 
 // ============================================================================
+// ImageSolver Library (loaded at preprocessor time for plate solving)
+// ============================================================================
+
+#define __PJSR_USE_STAR_DETECTOR_V2
+
+#include <pjsr/BRQuadTree.jsh>
+#include <pjsr/ColorSpace.jsh>
+#include <pjsr/DataType.jsh>
+#include <pjsr/FrameStyle.jsh>
+#include <pjsr/LinearTransformation.jsh>
+#include <pjsr/NumericControl.jsh>
+#include <pjsr/SectionBar.jsh>
+#include <pjsr/Sizer.jsh>
+#include <pjsr/StarDetector.jsh>
+#include <pjsr/StdButton.jsh>
+#include <pjsr/StdCursor.jsh>
+#include <pjsr/StdIcon.jsh>
+#include <pjsr/TextAlign.jsh>
+#include <pjsr/UndoFlag.jsh>
+#include <pjsr/PropertyType.jsh>
+#include <pjsr/PropertyAttribute.jsh>
+#include <pjsr/RBFType.jsh>
+#include <pjsr/APASSFlag.jsh>
+#include <pjsr/GaiaFlag.jsh>
+#include <pjsr/ReadTextOptions.jsh>
+
+#define TITLE           "Image Solver"
+#define SETTINGS_MODULE "SOLVER"
+#define STAR_CSV_FILE   (File.systemTempDirectory + "/stars-mcp.csv")
+
+// Include AdP dependencies then ImageSolver in library mode
+#include "/Applications/PixInsight/src/scripts/AdP/Projections.js"
+#include "/Applications/PixInsight/src/scripts/AdP/WCSmetadata.jsh"
+#include "/Applications/PixInsight/src/scripts/AdP/AstronomicalCatalogs.jsh"
+#include "/Applications/PixInsight/src/scripts/AdP/CommonUIControls.js"
+#include "/Applications/PixInsight/src/scripts/AdP/SearchCoordinatesDialog.js"
+#include "/Applications/PixInsight/src/scripts/AdP/CatalogDownloader.js"
+
+#define USE_SOLVER_LIBRARY
+#include "/Applications/PixInsight/src/scripts/AdP/ImageSolver.js"
+
+#define SETTINGS_MODULE_SCRIPT "SOLVER"
+
+// ============================================================================
 // Configuration
 // ============================================================================
 

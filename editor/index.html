@@ -1,0 +1,1175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PixInsight Pipeline Editor</title>
+<style>
+:root {
+  --bg: #1a1a2e;
+  --bg2: #16213e;
+  --bg3: #0f3460;
+  --card: #1e2746;
+  --card-disabled: #151a2a;
+  --border: #2a3a5c;
+  --accent: #e94560;
+  --accent2: #0f3460;
+  --text: #e0e0e0;
+  --text2: #8892a8;
+  --green: #4ecca3;
+  --yellow: #f5c542;
+  --line: #3a4a6c;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+/* Header */
+.header {
+  position: sticky; top: 0; z-index: 100;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 24px;
+  display: flex; align-items: center; gap: 16px;
+}
+.header h1 { font-size: 16px; color: var(--accent); white-space: nowrap; }
+.header input.name-input {
+  background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  padding: 6px 12px; border-radius: 4px; font: inherit; font-size: 14px; flex: 1; max-width: 300px;
+}
+.header .spacer { flex: 1; }
+.btn {
+  padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer;
+  font: inherit; font-size: 13px; font-weight: 600; transition: all 0.15s;
+}
+.btn-save { background: var(--green); color: #111; }
+.btn-save:hover { background: #3db88a; }
+.btn-run { background: var(--accent); color: #fff; }
+.btn-run:hover { background: #d63050; }
+.btn-reset { background: var(--border); color: var(--text); }
+.btn-reset:hover { background: var(--line); }
+.btn-stop { background: var(--yellow); color: #111; }
+
+/* Status bar */
+.status {
+  padding: 6px 24px; font-size: 12px; color: var(--text2);
+  background: var(--bg); border-bottom: 1px solid var(--border);
+}
+.status.saved { color: var(--green); }
+.status.error { color: var(--accent); }
+
+/* Main layout */
+.main { display: flex; max-width: 1200px; margin: 0 auto; padding: 24px; gap: 24px; }
+.pipeline { flex: 1; }
+.sidebar { width: 320px; flex-shrink: 0; }
+
+/* Files panel */
+.files-panel {
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  padding: 16px; margin-bottom: 20px;
+}
+.files-panel h3 { font-size: 13px; color: var(--accent); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 1px; }
+.file-row { margin-bottom: 10px; }
+.file-row label { display: block; font-size: 11px; color: var(--text2); margin-bottom: 4px; text-transform: uppercase; }
+.file-row input {
+  width: 100%; background: var(--bg); border: 1px solid var(--border);
+  color: var(--text); padding: 6px 8px; border-radius: 4px; font: inherit; font-size: 12px;
+}
+
+/* Pipeline cards */
+.step-card {
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  margin-bottom: 4px; position: relative; transition: all 0.2s;
+}
+.step-card.disabled { background: var(--card-disabled); opacity: 0.6; }
+.step-card.disabled .step-params { display: none; }
+
+/* Connector line */
+.connector { width: 2px; height: 16px; background: var(--line); margin: 0 auto; }
+.connector:last-child { display: none; }
+
+/* Branch groups */
+.branch-group {
+  margin: 6px 0 6px 20px;
+  border-left: 3px solid var(--branch-color, var(--line));
+  padding: 10px 0 10px 14px;
+  position: relative;
+  border-radius: 0 0 0 8px;
+}
+.branch-group::before {
+  content: '';
+  position: absolute;
+  top: 0; left: -20px;
+  width: 17px; height: 2px;
+  background: var(--branch-color, var(--line));
+}
+.branch-group::after {
+  content: '';
+  position: absolute;
+  bottom: 0; left: -20px;
+  width: 17px; height: 2px;
+  background: var(--branch-color, var(--line));
+}
+.branch-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.branch-icon { font-size: 10px; }
+.branch-group .step-card { margin-bottom: 4px; }
+.branch-group .connector {
+  height: 12px;
+  margin: 0 auto;
+}
+
+/* Fork / merge badges */
+.fork-badge, .merge-badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.fork-badge { background: rgba(245,197,66,0.15); }
+.merge-badge { background: rgba(78,204,163,0.15); }
+
+.step-header {
+  display: flex; align-items: center; padding: 12px 16px; cursor: pointer;
+  user-select: none; gap: 10px;
+}
+.step-number {
+  width: 28px; height: 28px; border-radius: 50%; background: var(--accent2);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; flex-shrink: 0;
+}
+.step-card.disabled .step-number { color: var(--text2); }
+.step-name { flex: 1; font-size: 14px; font-weight: 600; }
+.step-id { font-size: 11px; color: var(--text2); }
+.expand-icon { color: var(--text2); font-size: 14px; transition: transform 0.2s; }
+.step-card.expanded .expand-icon { transform: rotate(90deg); }
+
+/* Toggle switch */
+.toggle { position: relative; width: 36px; height: 20px; flex-shrink: 0; }
+.toggle input { opacity: 0; width: 0; height: 0; }
+.toggle .slider {
+  position: absolute; inset: 0; background: var(--border); border-radius: 10px;
+  cursor: pointer; transition: 0.2s;
+}
+.toggle .slider::before {
+  content: ''; position: absolute; width: 16px; height: 16px; border-radius: 50%;
+  background: var(--text2); left: 2px; top: 2px; transition: 0.2s;
+}
+.toggle input:checked + .slider { background: var(--green); }
+.toggle input:checked + .slider::before { transform: translateX(16px); background: #fff; }
+
+/* Parameters panel */
+.step-params {
+  display: none; padding: 0 16px 16px 56px;
+  border-top: 1px solid var(--border);
+}
+.step-card.expanded .step-params { display: block; padding-top: 12px; }
+
+/* Parameter controls */
+.param-group { margin-bottom: 12px; }
+.param-label {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 12px; color: var(--text2); margin-bottom: 4px;
+}
+.param-value { color: var(--green); font-weight: 600; min-width: 40px; text-align: right; }
+input[type="range"] {
+  -webkit-appearance: none; width: 100%; height: 6px; border-radius: 3px;
+  background: var(--border); outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
+  background: var(--green); cursor: pointer;
+}
+select {
+  width: 100%; background: var(--bg); border: 1px solid var(--border);
+  color: var(--text); padding: 6px 8px; border-radius: 4px; font: inherit; font-size: 12px;
+}
+.checkbox-row {
+  display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text2);
+}
+.checkbox-row input[type="checkbox"] { accent-color: var(--green); }
+
+/* Curve editor */
+.curve-editor { margin-bottom: 12px; }
+.curve-editor label { font-size: 11px; color: var(--text2); text-transform: uppercase; display: block; margin-bottom: 4px; }
+.curve-canvas {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+  cursor: crosshair; display: block;
+}
+.curve-hint { font-size: 10px; color: var(--text2); margin-top: 2px; }
+
+/* GHS pass list */
+.ghs-pass {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  padding: 10px; margin-bottom: 8px;
+}
+.ghs-pass-header {
+  display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;
+}
+.ghs-pass-label {
+  background: var(--bg2); border: 1px solid var(--border); color: var(--text);
+  padding: 3px 8px; border-radius: 3px; font: inherit; font-size: 12px; flex: 1; margin-right: 8px;
+}
+.btn-small {
+  padding: 3px 8px; font-size: 11px; border: none; border-radius: 3px;
+  cursor: pointer; font: inherit;
+}
+.btn-add { background: var(--green); color: #111; }
+.btn-remove { background: var(--accent); color: #fff; }
+
+/* Run console */
+.console-panel {
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  padding: 16px; position: sticky; top: 80px;
+}
+.console-panel h3 { font-size: 13px; color: var(--accent); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 1px; }
+.console-output {
+  background: #0a0a14; border: 1px solid var(--border); border-radius: 4px;
+  padding: 8px; height: 400px; overflow-y: auto; font-size: 11px;
+  line-height: 1.5; color: var(--green); white-space: pre-wrap; word-break: break-all;
+}
+
+/* Preview thumbnails */
+.step-preview {
+  width: 48px; height: 32px; border-radius: 3px; border: 1px solid var(--border);
+  overflow: hidden; cursor: pointer; flex-shrink: 0; background: var(--bg);
+  display: flex; align-items: center; justify-content: center;
+  transition: border-color 0.2s;
+}
+.step-preview:hover { border-color: var(--green); }
+.step-preview img {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+}
+.step-preview .no-preview {
+  font-size: 8px; color: var(--text2); text-align: center; line-height: 1.2;
+}
+.step-preview.has-new { border-color: var(--green); box-shadow: 0 0 6px rgba(78,204,163,0.4); }
+
+/* Expanded preview in params area */
+.preview-full {
+  margin-bottom: 12px; border-radius: 6px; overflow: hidden;
+  border: 1px solid var(--border); background: var(--bg);
+}
+.preview-full img {
+  width: 100%; display: block; cursor: pointer;
+}
+.preview-full .no-preview-msg {
+  padding: 16px; text-align: center; font-size: 12px; color: var(--text2);
+}
+
+/* Lightbox overlay */
+.lightbox {
+  display: none; position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0,0,0,0.9); align-items: center; justify-content: center;
+  cursor: zoom-out;
+}
+.lightbox.active { display: flex; }
+.lightbox img {
+  max-width: 95vw; max-height: 95vh; border-radius: 8px;
+  box-shadow: 0 0 40px rgba(0,0,0,0.8);
+}
+.lightbox-label {
+  position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+  background: rgba(0,0,0,0.7); color: var(--green); padding: 6px 16px;
+  border-radius: 4px; font-size: 13px; font-weight: 600;
+}
+
+/* Checkpoint toggle */
+.checkpoint-toggle {
+  display: flex; align-items: center; cursor: pointer; flex-shrink: 0;
+}
+.checkpoint-toggle .checkpoint-input { display: none; }
+.checkpoint-toggle .cp-icon {
+  font-size: 14px; color: var(--text2); opacity: 0.4; transition: all 0.2s;
+}
+.checkpoint-toggle .checkpoint-input:checked + .cp-icon {
+  color: var(--yellow); opacity: 1; text-shadow: 0 0 6px rgba(245,197,66,0.5);
+}
+
+/* Restart button */
+.btn-restart {
+  display: none;
+  padding: 3px 8px; font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.5px;
+  background: rgba(245,197,66,0.15); color: var(--yellow);
+  border: 1px solid rgba(245,197,66,0.3); border-radius: 3px;
+  cursor: pointer; white-space: nowrap; flex-shrink: 0;
+  transition: all 0.15s;
+}
+.btn-restart:hover { background: rgba(245,197,66,0.25); border-color: var(--yellow); }
+.btn-restart.visible { display: inline-block; }
+
+/* Clear checkpoints button */
+.btn-clear-cp { background: var(--border); color: var(--text2); font-size: 11px; padding: 4px 10px; }
+.btn-clear-cp:hover { color: var(--text); }
+
+/* Responsive */
+@media (max-width: 900px) {
+  .main { flex-direction: column; }
+  .sidebar { width: 100%; }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>PI Pipeline</h1>
+  <input class="name-input" id="configName" placeholder="Pipeline name...">
+  <div class="spacer"></div>
+  <button class="btn btn-clear-cp" onclick="clearCheckpoints()">Clear CP</button>
+  <button class="btn btn-reset" onclick="resetConfig()">Reset</button>
+  <button class="btn btn-save" onclick="saveConfig()">Save</button>
+  <button class="btn btn-run" id="runBtn" onclick="runPipeline()">Run</button>
+</div>
+<div class="status" id="status">Ready</div>
+
+<div class="main">
+  <div class="pipeline">
+    <div class="files-panel" id="filesPanel"></div>
+    <div id="pipelineContainer"></div>
+  </div>
+  <div class="sidebar">
+    <div class="console-panel">
+      <h3>Console</h3>
+      <div class="console-output" id="consoleOutput">Waiting for pipeline run...</div>
+    </div>
+  </div>
+</div>
+
+<div class="lightbox" id="lightbox" onclick="closeLightbox()">
+  <div class="lightbox-label" id="lightboxLabel"></div>
+  <img id="lightboxImg" src="">
+</div>
+
+<script>
+// ========== State ==========
+let config = null;
+let pollTimer = null;
+let previewTimestamps = {};
+let checkpointData = {};
+
+// ========== Load / Save ==========
+async function loadConfig() {
+  const res = await fetch('/api/config');
+  config = await res.json();
+  render();
+}
+
+async function saveConfig() {
+  updateConfigFromUI();
+  const res = await fetch('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config, null, 2)
+  });
+  const r = await res.json();
+  if (r.ok) setStatus('Saved to ' + r.path, 'saved');
+  else setStatus('Error: ' + r.error, 'error');
+}
+
+async function resetConfig() {
+  if (!confirm('Reset all parameters to defaults?')) return;
+  const res = await fetch('/api/reset', { method: 'POST' });
+  config = await res.json();
+  render();
+  setStatus('Reset to defaults', 'saved');
+}
+
+async function runPipeline() {
+  await saveConfig();
+  const res = await fetch('/api/run', { method: 'POST' });
+  const r = await res.json();
+  if (r.error) { setStatus('Error: ' + r.error, 'error'); return; }
+  setStatus('Pipeline running...', '');
+  document.getElementById('runBtn').textContent = 'Stop';
+  document.getElementById('runBtn').className = 'btn btn-stop';
+  document.getElementById('runBtn').onclick = stopPipeline;
+  document.getElementById('consoleOutput').textContent = 'Starting...\n';
+  startPolling();
+}
+
+async function stopPipeline() {
+  await fetch('/api/run', { method: 'DELETE' });
+  stopPolling();
+  resetRunBtn();
+}
+
+function resetRunBtn() {
+  const btn = document.getElementById('runBtn');
+  btn.textContent = 'Run';
+  btn.className = 'btn btn-run';
+  btn.onclick = runPipeline;
+}
+
+function startPolling() {
+  pollTimer = setInterval(async () => {
+    const [runRes, prevRes] = await Promise.all([
+      fetch('/api/run'),
+      fetch('/api/previews')
+    ]);
+    const r = await runRes.json();
+    const el = document.getElementById('consoleOutput');
+    el.textContent = r.output || 'Starting...\n';
+    el.scrollTop = el.scrollHeight;
+
+    const prevData = await prevRes.json();
+    if (prevData.previews) {
+      for (const [stepId, info] of Object.entries(prevData.previews)) {
+        if (!previewTimestamps[stepId] || info.mtime > previewTimestamps[stepId]) {
+          previewTimestamps[stepId] = info.mtime;
+          updatePreviewUI(stepId);
+        }
+      }
+    }
+
+    if (!r.running) {
+      stopPolling();
+      resetRunBtn();
+      setStatus('Pipeline finished', 'saved');
+      loadCheckpoints();
+    }
+  }, 1500);
+}
+
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+async function restartFromStep(stepId) {
+  await saveConfig();
+  const res = await fetch('/api/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ restartFrom: stepId })
+  });
+  const r = await res.json();
+  if (r.error) { setStatus('Error: ' + r.error, 'error'); return; }
+  setStatus('Pipeline restarting from ' + stepId + '...', '');
+  document.getElementById('runBtn').textContent = 'Stop';
+  document.getElementById('runBtn').className = 'btn btn-stop';
+  document.getElementById('runBtn').onclick = stopPipeline;
+  document.getElementById('consoleOutput').textContent = 'Restarting from ' + stepId + '...\n';
+  startPolling();
+}
+
+async function loadCheckpoints() {
+  try {
+    const res = await fetch('/api/checkpoints');
+    const data = await res.json();
+    checkpointData = data.checkpoints || {};
+    // Update restart button visibility
+    for (const step of (config?.steps || [])) {
+      const btn = document.getElementById('restart-' + step.id);
+      if (!btn) continue;
+      if (checkpointData[step.id]) {
+        btn.classList.add('visible');
+        const ts = new Date(checkpointData[step.id].timestamp);
+        btn.title = 'Restart from checkpoint (' + ts.toLocaleString() + ')';
+      } else {
+        btn.classList.remove('visible');
+      }
+    }
+  } catch (e) { /* ignore */ }
+}
+
+async function clearCheckpoints() {
+  if (!confirm('Delete all checkpoint files?')) return;
+  await fetch('/api/checkpoints', { method: 'DELETE' });
+  await loadCheckpoints();
+  setStatus('Checkpoints cleared', 'saved');
+}
+
+function setStatus(msg, cls) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = 'status' + (cls ? ' ' + cls : '');
+}
+
+// ========== Update config from UI ==========
+function updateConfigFromUI() {
+  config.name = document.getElementById('configName').value;
+  config.files.sourceFolder = document.getElementById('file-sourceFolder').value;
+  config.files.L = document.getElementById('file-L').value;
+  config.files.R = document.getElementById('file-R').value;
+  config.files.G = document.getElementById('file-G').value;
+  config.files.B = document.getElementById('file-B').value;
+  config.files.Ha = document.getElementById('file-Ha').value;
+  config.files.outputDir = document.getElementById('file-outputDir').value;
+  config.files.targetName = document.getElementById('file-targetName').value;
+
+  for (const step of config.steps) {
+    const card = document.getElementById('card-' + step.id);
+    if (!card) continue;
+    step.enabled = card.querySelector('.toggle input').checked;
+    const cpInput = card.querySelector('.checkpoint-input');
+    step.checkpoint = cpInput ? cpInput.checked : false;
+
+    // Read param values from DOM
+    card.querySelectorAll('[data-param]').forEach(el => {
+      const key = el.dataset.param;
+      if (el.type === 'range' || el.type === 'number') step.params[key] = parseFloat(el.value);
+      else if (el.type === 'checkbox') step.params[key] = el.checked;
+      else if (el.tagName === 'SELECT') {
+        const v = el.value;
+        step.params[key] = v === 'true' ? true : v === 'false' ? false : (isNaN(+v) ? v : +v);
+      }
+      else step.params[key] = el.value;
+    });
+
+    // Read GHS passes
+    if (step.id === 'stretch') {
+      const passes = [];
+      card.querySelectorAll('.ghs-pass').forEach(passEl => {
+        passes.push({
+          label: passEl.querySelector('.ghs-pass-label').value,
+          D: parseFloat(passEl.querySelector('[data-ghs="D"]').value),
+          B: parseFloat(passEl.querySelector('[data-ghs="B"]').value),
+          LP: parseFloat(passEl.querySelector('[data-ghs="LP"]').value),
+          HP: parseFloat(passEl.querySelector('[data-ghs="HP"]').value)
+        });
+      });
+      step.params.ghsPasses = passes;
+    }
+
+    // Read curve data from canvas data attributes
+    card.querySelectorAll('.curve-canvas').forEach(canvas => {
+      const key = canvas.dataset.curveParam;
+      if (key && canvas._points) {
+        step.params[key] = canvas._points.map(p => [round3(p[0]), round3(p[1])]);
+      }
+    });
+
+    // Read ha GHS sub-params (for ha_ghs step)
+    if (step.id === 'ha_ghs') {
+      const haGhsEl = card.querySelector('.ha-ghs-group');
+      if (haGhsEl) {
+        step.params.haGHS = {
+          D: parseFloat(haGhsEl.querySelector('[data-haghs="D"]').value),
+          B: parseFloat(haGhsEl.querySelector('[data-haghs="B"]').value),
+          LP: parseFloat(haGhsEl.querySelector('[data-haghs="LP"]').value),
+          HP: parseFloat(haGhsEl.querySelector('[data-haghs="HP"]').value)
+        };
+      }
+    }
+  }
+}
+
+function round3(v) { return Math.round(v * 1000) / 1000; }
+
+// ========== Rendering ==========
+function render() {
+  document.getElementById('configName').value = config.name || '';
+  renderFiles();
+  renderPipeline();
+}
+
+function renderFiles() {
+  const el = document.getElementById('filesPanel');
+  const f = config.files;
+  el.innerHTML = `<h3>Source Files</h3>` +
+    `<div class="file-row" style="display:flex;gap:8px;align-items:end">
+      <div style="flex:1"><label>Source Folder</label><input id="file-sourceFolder" value="${f.sourceFolder || ''}"></div>
+      <button class="btn btn-save" style="margin-bottom:0;height:30px;font-size:12px" onclick="scanFolder()">Scan</button>
+    </div>` +
+    ['L', 'R', 'G', 'B', 'Ha'].map(k =>
+      `<div class="file-row" style="margin-left:16px"><label>${k}</label><input id="file-${k}" value="${f[k] || ''}"></div>`
+    ).join('') +
+    ['outputDir', 'targetName'].map(k =>
+      `<div class="file-row"><label>${k}</label><input id="file-${k}" value="${f[k] || ''}"></div>`
+    ).join('');
+}
+
+async function scanFolder() {
+  const folder = document.getElementById('file-sourceFolder').value;
+  if (!folder) { setStatus('Enter a source folder path first', 'error'); return; }
+  try {
+    const res = await fetch('/api/scan-folder?path=' + encodeURIComponent(folder));
+    const data = await res.json();
+    if (data.error) { setStatus('Scan error: ' + data.error, 'error'); return; }
+    const a = data.assignments;
+    if (a.L) document.getElementById('file-L').value = a.L;
+    if (a.R) document.getElementById('file-R').value = a.R;
+    if (a.G) document.getElementById('file-G').value = a.G;
+    if (a.B) document.getElementById('file-B').value = a.B;
+    if (a.Ha) document.getElementById('file-Ha').value = a.Ha;
+    setStatus('Found ' + data.totalFiles + ' files, assigned: ' + Object.keys(a).filter(k => a[k]).join(', '), 'saved');
+  } catch (e) { setStatus('Scan failed: ' + e.message, 'error'); }
+}
+
+// ========== Branch-aware pipeline rendering ==========
+function renderPipeline() {
+  const container = document.getElementById('pipelineContainer');
+  container.innerHTML = '';
+  const branches = config.branches || {};
+
+  // Build fork map: stepId -> [branchId, ...] that fork from this step
+  const forkMap = {};
+  for (const [bid, binfo] of Object.entries(branches)) {
+    if (bid === 'main' || !binfo.forkAfter) continue;
+    if (!forkMap[binfo.forkAfter]) forkMap[binfo.forkAfter] = [];
+    forkMap[binfo.forkAfter].push(bid);
+  }
+
+  let mainNum = 0;
+  const branchCounters = {};
+  let i = 0;
+
+  while (i < config.steps.length) {
+    const step = config.steps[i];
+    const branch = step.branch || 'main';
+
+    if (branch === 'main') {
+      mainNum++;
+      const binfo = branches.main || { label: 'RGB', color: '#4a9eff' };
+      const forks = forkMap[step.id] || [];
+      const merges = step.merges || [];
+
+      const card = createStepCard(step, mainNum, binfo.color, forks, merges, branches);
+      container.appendChild(card);
+
+      // Check if next step(s) are on side branches (may be multiple consecutive branches)
+      while (i + 1 < config.steps.length && (config.steps[i + 1].branch || 'main') !== 'main') {
+        const branchId = config.steps[i + 1].branch;
+        const branchInfo = branches[branchId] || { label: branchId, color: '#888' };
+
+        const group = document.createElement('div');
+        group.className = 'branch-group';
+        group.style.setProperty('--branch-color', branchInfo.color);
+
+        group.innerHTML =
+          `<div class="branch-label" style="color:${branchInfo.color}">` +
+          `<span class="branch-icon">&#9656;</span> ${branchInfo.label}</div>` +
+          `<div class="branch-steps"></div>`;
+
+        const stepsContainer = group.querySelector('.branch-steps');
+        if (!branchCounters[branchId]) branchCounters[branchId] = 0;
+
+        let j = i + 1;
+        while (j < config.steps.length && (config.steps[j].branch || 'main') === branchId) {
+          branchCounters[branchId]++;
+          const bStep = config.steps[j];
+          const bCard = createStepCard(bStep, branchCounters[branchId], branchInfo.color, [], [], branches, branchId);
+          stepsContainer.appendChild(bCard);
+
+          // Connector between branch steps
+          if (j + 1 < config.steps.length && (config.steps[j + 1].branch || 'main') === branchId) {
+            const conn = document.createElement('div');
+            conn.className = 'connector';
+            conn.style.background = branchInfo.color;
+            stepsContainer.appendChild(conn);
+          }
+          j++;
+        }
+
+        container.appendChild(group);
+        i = j - 1; // outer while will check i+1 again
+      }
+
+      // Add connector to next step
+      if (i + 1 < config.steps.length) {
+        const conn = document.createElement('div');
+        conn.className = 'connector';
+        container.appendChild(conn);
+      }
+      i++;
+    } else {
+      // Shouldn't happen (handled above), skip gracefully
+      i++;
+    }
+  }
+
+  // Init curve canvases
+  document.querySelectorAll('.curve-canvas').forEach(initCurveCanvas);
+}
+
+function createStepCard(step, num, color, forks, merges, branches, branchId) {
+  const card = document.createElement('div');
+  card.className = 'step-card' + (step.enabled ? '' : ' disabled');
+  card.id = 'card-' + step.id;
+
+  // Number label: main gets sequential, branches get prefix
+  let numLabel;
+  if (branchId) {
+    const prefix = (branches[branchId]?.label || branchId).charAt(0).toUpperCase();
+    numLabel = prefix + num;
+  } else {
+    numLabel = '' + num;
+  }
+
+  // Build badges HTML
+  let badgesHtml = '';
+  if (forks && forks.length > 0) {
+    for (const fid of forks) {
+      const fb = branches[fid] || {};
+      badgesHtml += `<span class="fork-badge" style="color:${fb.color || '#888'}">&#9654; ${fb.label || fid}</span>`;
+    }
+  }
+  if (merges && merges.length > 0) {
+    for (const mid of merges) {
+      const mb = branches[mid] || {};
+      badgesHtml += `<span class="merge-badge" style="color:${mb.color || '#888'}">&#9664; ${mb.label || mid}</span>`;
+    }
+  }
+
+  card.innerHTML = `
+    <div class="step-header">
+      <div class="step-number" style="color:${color}">${numLabel}</div>
+      <div class="step-name">${step.name}</div>
+      ${badgesHtml}
+      <div class="step-id">${step.id}</div>
+      <div class="step-preview" id="thumb-${step.id}" onclick="event.stopPropagation(); openLightbox('${step.id}', '${step.name}')">
+        <div class="no-preview">--</div>
+      </div>
+      <button class="btn-restart" id="restart-${step.id}" onclick="event.stopPropagation(); restartFromStep('${step.id}')" title="Restart pipeline from this step">Restart</button>
+      <label class="checkpoint-toggle" title="Checkpoint" onclick="event.stopPropagation()">
+        <input type="checkbox" class="checkpoint-input" ${step.checkpoint ? 'checked' : ''}>
+        <span class="cp-icon">\u2691</span>
+      </label>
+      <label class="toggle" onclick="event.stopPropagation()">
+        <input type="checkbox" ${step.enabled ? 'checked' : ''} onchange="toggleStep('${step.id}', this.checked)">
+        <div class="slider"></div>
+      </label>
+      <div class="expand-icon">&#9654;</div>
+    </div>
+    <div class="step-params">
+      <div class="preview-full" id="preview-${step.id}">
+        <div class="no-preview-msg">No preview yet</div>
+      </div>
+      ${renderParams(step)}
+    </div>
+  `;
+
+  card.querySelector('.step-header').addEventListener('click', (e) => {
+    if (e.target.closest('.toggle')) return;
+    card.classList.toggle('expanded');
+  });
+
+  return card;
+}
+
+function toggleStep(id, checked) {
+  const step = config.steps.find(s => s.id === id);
+  if (step) step.enabled = checked;
+  const card = document.getElementById('card-' + id);
+  card.classList.toggle('disabled', !checked);
+}
+
+// ========== Parameter renderers ==========
+function renderParams(step) {
+  const p = step.params;
+  switch (step.id) {
+    case 'combine_rgb':
+      return '<div class="param-group" style="color:var(--text2);font-size:12px">No parameters — combines R, G, B channels into RGB composite.</div>';
+
+    case 'gc':
+      return '<div class="param-group" style="color:var(--text2);font-size:12px">GradientCorrection with default settings.</div>';
+
+    case 'plate_solve':
+      return '<div class="param-group" style="color:var(--text2);font-size:12px">ImageSolver with default settings — required for SPCC.</div>';
+
+    case 'bxt_correct':
+    case 'bxt_sharpen':
+      return renderSlider('sharpenStars', 'Sharpen Stars', p.sharpenStars, 0, 1, 0.01) +
+             renderSlider('sharpenNonstellar', 'Sharpen Nonstellar', p.sharpenNonstellar, 0, 1, 0.01) +
+             renderSlider('adjustStarHalos', 'Adjust Star Halos', p.adjustStarHalos, -1, 1, 0.01);
+
+    case 'spcc':
+      return renderDropdown('whiteReferenceName', 'White Reference', p.whiteReferenceName, [
+               'Average Spiral Galaxy', 'Photon Flux', 'Equal Energy']) +
+             renderDropdown('sensorQE', 'Sensor QE', p.sensorQE, [
+               'Sony IMX411/455/461/533/571', 'Sony IMX571', 'Sony IMX455', 'Ideal QE']) +
+             renderDropdown('filterSet', 'Filter Set', p.filterSet, [
+               'Astronomik Deep Sky', 'Baader CMOS-Optimized', 'Chroma', 'ZWO', 'None (OSC)']) +
+             renderCheckbox('narrowbandMode', 'Narrowband mode', p.narrowbandMode) +
+             renderCheckbox('generateGraphs', 'Generate graphs', p.generateGraphs);
+
+    case 'scnr':
+      return renderSlider('amount', 'Amount', p.amount, 0, 1, 0.01);
+
+    case 'nxt_pass1':
+    case 'nxt_pass2':
+      return renderSlider('denoise', 'Denoise', p.denoise, 0, 1, 0.01) +
+             renderSlider('detail', 'Detail', p.detail, 0, 1, 0.01);
+
+    case 'sxt':
+    case 'ha_sxt':
+      return renderSlider('overlap', 'Overlap', p.overlap, 0, 0.50, 0.01);
+
+    case 'stretch':
+      return renderSlider('targetBg', 'Target Background', p.targetBg, 0.1, 0.4, 0.01) +
+             '<div class="param-label"><span>GHS Passes</span><button class="btn-small btn-add" onclick="addGHSPass()">+ Add</button></div>' +
+             '<div id="ghsPasses">' + (p.ghsPasses || []).map((pass, i) => renderGHSPass(pass, i)).join('') + '</div>';
+
+    case 'curves_main':
+      return renderCurve('contrastCurve', 'Contrast (K)', p.contrastCurve) +
+             renderCurve('saturationCurve', 'Saturation (S)', p.saturationCurve);
+
+    // Ha branch steps
+    case 'ha_curves':
+      return renderCurve('haCurve', 'Ha Detail Curve (K)', p.haCurve);
+
+    case 'ha_ghs':
+      return '<div class="ha-ghs-group">' +
+             '<div class="param-label"><span>Ha GHS Parameters</span></div>' +
+             renderGHSSliders('haghs', p.haGHS || { D: 0.5, B: -1.0, LP: 0.02, HP: 0.95 }) +
+             '</div>';
+
+    case 'ha_linearfit':
+      return renderSlider('linearFitRejectHigh', 'LinearFit Reject High', p.linearFitRejectHigh, 0.5, 1.0, 0.01);
+
+    case 'ha_inject':
+      return renderSlider('injectionStrength', 'Injection Strength', p.injectionStrength, 0, 1, 0.01);
+
+    case 'curves_final':
+      return renderCurve('lightnessCurve', 'Lightness (K)', p.lightnessCurve) +
+             renderCurve('saturationCurve', 'Saturation (S)', p.saturationCurve);
+
+    // Stars branch steps
+    case 'star_saturate':
+      return renderCurve('starSaturationCurve', 'Star Saturation (S)', p.starSaturationCurve);
+
+    case 'star_stretch':
+      return renderSlider('targetBg', 'Target Background (higher = gentler)', p.targetBg ?? 0.50, 0.2, 0.8, 0.01);
+
+    case 'star_add':
+      return renderSlider('starStrength', 'Star Strength', p.starStrength ?? 0.20, 0, 1, 0.01);
+
+    case 'ha_stretch':
+    case 'l_stretch':
+      return renderSlider('targetBg', 'Target Background', p.targetBg ?? 0.25, 0.1, 0.4, 0.01);
+
+    case 'l_nxt':
+      return renderSlider('denoise', 'Denoise', p.denoise, 0, 1, 0.01) +
+             renderSlider('detail', 'Detail', p.detail, 0, 1, 0.01);
+
+    case 'l_bxt':
+      return renderSlider('sharpenStars', 'Sharpen Stars', p.sharpenStars, 0, 1, 0.01) +
+             renderSlider('sharpenNonstellar', 'Sharpen Nonstellar', p.sharpenNonstellar, 0, 1, 0.01) +
+             renderSlider('adjustStarHalos', 'Adjust Star Halos', p.adjustStarHalos, -1, 1, 0.01);
+
+    case 'lrgb_combine':
+      return renderSlider('lightness', 'Lightness', p.lightness ?? 0.50, 0, 1, 0.01) +
+             renderSlider('saturation', 'Saturation', p.saturation ?? 0.50, 0, 1, 0.01);
+
+    default:
+      return '<div style="color:var(--text2);font-size:12px">No editable parameters</div>';
+  }
+}
+
+function renderSlider(key, label, value, min, max, step) {
+  const id = `sl_${key}_${Math.random().toString(36).slice(2,8)}`;
+  return `<div class="param-group">
+    <div class="param-label"><span>${label}</span><span class="param-value" id="${id}_v">${value}</span></div>
+    <input type="range" data-param="${key}" min="${min}" max="${max}" step="${step}" value="${value}"
+      oninput="document.getElementById('${id}_v').textContent=this.value">
+  </div>`;
+}
+
+function renderSelect(key, label, value, options) {
+  return `<div class="param-group">
+    <div class="param-label"><span>${label}</span></div>
+    <select data-param="${key}">
+      ${options.map(o => `<option value="${o}" ${o == value ? 'selected' : ''}>${o}</option>`).join('')}
+    </select>
+  </div>`;
+}
+
+function renderDropdown(key, label, value, options) {
+  return renderSelect(key, label, value, options);
+}
+
+function renderCheckbox(key, label, value) {
+  return `<div class="param-group">
+    <label class="checkbox-row">
+      <input type="checkbox" data-param="${key}" ${value ? 'checked' : ''}> ${label}
+    </label>
+  </div>`;
+}
+
+function renderCurve(key, label, points) {
+  const dataPoints = JSON.stringify(points || [[0,0],[1,1]]);
+  return `<div class="curve-editor">
+    <label>${label}</label>
+    <canvas class="curve-canvas" width="280" height="180" data-curve-param="${key}" data-points='${dataPoints}'></canvas>
+    <div class="curve-hint">Drag points | Double-click to add | Right-click to remove</div>
+  </div>`;
+}
+
+function renderGHSPass(pass, idx) {
+  return `<div class="ghs-pass">
+    <div class="ghs-pass-header">
+      <input class="ghs-pass-label" value="${pass.label || 'Pass ' + (idx+1)}">
+      <button class="btn-small btn-remove" onclick="removeGHSPass(${idx})">X</button>
+    </div>
+    ${ghsSliderRow('D', 'Stretch (D)', pass.D, 0, 3, 0.1)}
+    ${ghsSliderRow('B', 'Symmetry (B)', pass.B, -5, 5, 0.1)}
+    ${ghsSliderRow('LP', 'Shadow Prot (LP)', pass.LP, 0, 0.5, 0.01)}
+    ${ghsSliderRow('HP', 'Highlight Prot (HP)', pass.HP, 0.5, 1, 0.01)}
+  </div>`;
+}
+
+function ghsSliderRow(key, label, value, min, max, step) {
+  const id = `ghs_${key}_${Math.random().toString(36).slice(2,8)}`;
+  return `<div class="param-group">
+    <div class="param-label"><span>${label}</span><span class="param-value" id="${id}_v">${value}</span></div>
+    <input type="range" data-ghs="${key}" min="${min}" max="${max}" step="${step}" value="${value}"
+      oninput="document.getElementById('${id}_v').textContent=parseFloat(this.value).toFixed(2)">
+  </div>`;
+}
+
+function renderGHSSliders(prefix, ghs) {
+  const row = (key, label, val, min, max, step) => {
+    const id = `${prefix}_${key}_${Math.random().toString(36).slice(2,8)}`;
+    return `<div class="param-group">
+      <div class="param-label"><span>${label}</span><span class="param-value" id="${id}_v">${val}</span></div>
+      <input type="range" data-${prefix}="${key}" min="${min}" max="${max}" step="${step}" value="${val}"
+        oninput="document.getElementById('${id}_v').textContent=parseFloat(this.value).toFixed(2)">
+    </div>`;
+  };
+  return row('D', 'Stretch (D)', ghs.D, 0, 3, 0.1) +
+         row('B', 'Symmetry (B)', ghs.B, -5, 5, 0.1) +
+         row('LP', 'Shadow Prot (LP)', ghs.LP, 0, 0.5, 0.01) +
+         row('HP', 'Highlight Prot (HP)', ghs.HP, 0.5, 1, 0.01);
+}
+
+function addGHSPass() {
+  const step = config.steps.find(s => s.id === 'stretch');
+  if (!step) return;
+  if (!step.params.ghsPasses) step.params.ghsPasses = [];
+  step.params.ghsPasses.push({ label: 'New pass', D: 0.5, B: -1.0, LP: 0.02, HP: 0.95 });
+  updateConfigFromUI();
+  render();
+}
+
+function removeGHSPass(idx) {
+  updateConfigFromUI();
+  const step = config.steps.find(s => s.id === 'stretch');
+  if (step && step.params.ghsPasses) {
+    step.params.ghsPasses.splice(idx, 1);
+  }
+  render();
+}
+
+// ========== Curve Canvas Widget ==========
+function initCurveCanvas(canvas) {
+  const points = JSON.parse(canvas.dataset.points || '[[0,0],[1,1]]');
+  canvas._points = points.map(p => [p[0], p[1]]);
+  canvas._dragging = -1;
+
+  drawCurve(canvas);
+
+  canvas.addEventListener('mousedown', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = 1 - (e.clientY - rect.top) / rect.height;
+
+    if (e.button === 2) {
+      e.preventDefault();
+      const idx = findNearestPoint(canvas._points, x, y, 0.05);
+      if (idx > 0 && idx < canvas._points.length - 1) {
+        canvas._points.splice(idx, 1);
+        drawCurve(canvas);
+      }
+      return;
+    }
+
+    const idx = findNearestPoint(canvas._points, x, y, 0.04);
+    if (idx >= 0) {
+      canvas._dragging = idx;
+    }
+  });
+
+  canvas.addEventListener('mousemove', (e) => {
+    if (canvas._dragging < 0) return;
+    const rect = canvas.getBoundingClientRect();
+    let x = (e.clientX - rect.left) / rect.width;
+    let y = 1 - (e.clientY - rect.top) / rect.height;
+    x = Math.max(0, Math.min(1, x));
+    y = Math.max(0, Math.min(1, y));
+    const idx = canvas._dragging;
+    if (idx === 0) x = 0;
+    if (idx === canvas._points.length - 1) x = 1;
+    if (idx > 0) x = Math.max(canvas._points[idx-1][0] + 0.005, x);
+    if (idx < canvas._points.length - 1) x = Math.min(canvas._points[idx+1][0] - 0.005, x);
+    canvas._points[idx] = [x, y];
+    drawCurve(canvas);
+  });
+
+  canvas.addEventListener('mouseup', () => { canvas._dragging = -1; });
+  canvas.addEventListener('mouseleave', () => { canvas._dragging = -1; });
+
+  canvas.addEventListener('dblclick', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = 1 - (e.clientY - rect.top) / rect.height;
+    let insertIdx = canvas._points.length;
+    for (let i = 0; i < canvas._points.length; i++) {
+      if (canvas._points[i][0] > x) { insertIdx = i; break; }
+    }
+    canvas._points.splice(insertIdx, 0, [Math.max(0,Math.min(1,x)), Math.max(0,Math.min(1,y))]);
+    drawCurve(canvas);
+  });
+
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+}
+
+function findNearestPoint(points, x, y, threshold) {
+  let best = -1, bestDist = Infinity;
+  for (let i = 0; i < points.length; i++) {
+    const dx = points[i][0] - x, dy = points[i][1] - y;
+    const d = Math.sqrt(dx*dx + dy*dy);
+    if (d < bestDist) { bestDist = d; best = i; }
+  }
+  return bestDist < threshold ? best : -1;
+}
+
+function drawCurve(canvas) {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  const pts = canvas._points;
+
+  ctx.clearRect(0, 0, w, h);
+
+  // Grid
+  ctx.strokeStyle = '#1a2040';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const pos = (i / 4) * w;
+    ctx.beginPath(); ctx.moveTo(pos, 0); ctx.lineTo(pos, h); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, pos * h / w); ctx.lineTo(w, pos * h / w); ctx.stroke();
+  }
+
+  // Diagonal reference
+  ctx.strokeStyle = '#2a3050';
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath(); ctx.moveTo(0, h); ctx.lineTo(w, 0); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Catmull-Rom spline
+  if (pts.length >= 2) {
+    ctx.strokeStyle = '#4ecca3';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+
+    const steps = 200;
+    for (let s = 0; s <= steps; s++) {
+      const t = s / steps;
+      const [px, py] = evalCatmullRom(pts, t);
+      const sx = px * w, sy = (1 - py) * h;
+      if (s === 0) ctx.moveTo(sx, sy);
+      else ctx.lineTo(sx, sy);
+    }
+    ctx.stroke();
+  }
+
+  // Points
+  for (const p of pts) {
+    ctx.fillStyle = '#e94560';
+    ctx.beginPath();
+    ctx.arc(p[0] * w, (1 - p[1]) * h, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+}
+
+function evalCatmullRom(points, t) {
+  const n = points.length;
+  if (n < 2) return points[0] || [0, 0];
+
+  const x = points[0][0] + t * (points[n-1][0] - points[0][0]);
+
+  let seg = 0;
+  for (let i = 0; i < n - 1; i++) {
+    if (x >= points[i][0] && x <= points[i+1][0]) { seg = i; break; }
+    if (i === n - 2) seg = i;
+  }
+
+  const x0 = points[seg][0], x1 = points[seg+1][0];
+  const localT = (x1 === x0) ? 0 : (x - x0) / (x1 - x0);
+
+  const p0 = seg > 0 ? points[seg-1][1] : 2 * points[seg][1] - points[seg+1][1];
+  const p1 = points[seg][1];
+  const p2 = points[seg+1][1];
+  const p3 = seg + 2 < n ? points[seg+2][1] : 2 * points[seg+1][1] - points[seg][1];
+
+  const tt = localT, tt2 = tt * tt, tt3 = tt2 * tt;
+  const y = 0.5 * (
+    (2 * p1) +
+    (-p0 + p2) * tt +
+    (2*p0 - 5*p1 + 4*p2 - p3) * tt2 +
+    (-p0 + 3*p1 - 3*p2 + p3) * tt3
+  );
+  return [x, Math.max(0, Math.min(1, y))];
+}
+
+// ========== Preview System ==========
+function updatePreviewUI(stepId) {
+  const bust = '?t=' + Date.now();
+  const url = '/api/preview/' + stepId + bust;
+
+  const thumb = document.getElementById('thumb-' + stepId);
+  if (thumb) {
+    thumb.innerHTML = `<img src="${url}" alt="${stepId}">`;
+    thumb.classList.add('has-new');
+    setTimeout(() => thumb.classList.remove('has-new'), 2000);
+  }
+
+  const full = document.getElementById('preview-' + stepId);
+  if (full) {
+    full.innerHTML = `<img src="${url}" alt="${stepId}" onclick="openLightbox('${stepId}', '')">`;
+  }
+}
+
+function openLightbox(stepId, label) {
+  const url = '/api/preview/' + stepId + '?t=' + Date.now();
+  const img = document.getElementById('lightboxImg');
+  img.src = url;
+  img.onerror = () => { closeLightbox(); };
+  document.getElementById('lightboxLabel').textContent = label || stepId;
+  document.getElementById('lightbox').classList.add('active');
+}
+
+function closeLightbox() {
+  document.getElementById('lightbox').classList.remove('active');
+  document.getElementById('lightboxImg').src = '';
+}
+
+async function loadExistingPreviews() {
+  try {
+    const res = await fetch('/api/previews');
+    const data = await res.json();
+    if (data.previews) {
+      for (const [stepId, info] of Object.entries(data.previews)) {
+        previewTimestamps[stepId] = info.mtime;
+        updatePreviewUI(stepId);
+      }
+    }
+  } catch (e) { /* ignore */ }
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeLightbox();
+});
+
+// ========== Init ==========
+loadConfig().then(() => { loadExistingPreviews(); loadCheckpoints(); });
+</script>
+</body>
+</html>

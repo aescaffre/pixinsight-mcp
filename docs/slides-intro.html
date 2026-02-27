@@ -1,0 +1,839 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PixInsight MCP — Introduction</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  :root {
+    --bg-deep: #0a0a1a;
+    --bg-card: #111128;
+    --bg-glass: rgba(17, 17, 40, 0.7);
+    --accent: #6c5ce7;
+    --accent2: #a29bfe;
+    --cyan: #00cec9;
+    --pink: #fd79a8;
+    --orange: #fdcb6e;
+    --green: #55efc4;
+    --red: #ff7675;
+    --text: #f0f0f8;
+    --text-dim: #8888aa;
+    --text-muted: #555577;
+    --glow: 0 0 60px rgba(108, 92, 231, 0.15);
+    --glow-cyan: 0 0 40px rgba(0, 206, 201, 0.1);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    font-family: 'Inter', -apple-system, sans-serif;
+    background: var(--bg-deep);
+    color: var(--text);
+  }
+
+  /* ---- Starfield background ---- */
+  .starfield {
+    position: fixed; inset: 0; z-index: 0;
+    overflow: hidden;
+  }
+  .starfield::before, .starfield::after {
+    content: '';
+    position: absolute; inset: -50%;
+    background-image:
+      radial-gradient(1px 1px at 10% 20%, rgba(255,255,255,0.6), transparent),
+      radial-gradient(1px 1px at 30% 60%, rgba(255,255,255,0.4), transparent),
+      radial-gradient(1.5px 1.5px at 50% 10%, rgba(255,255,255,0.7), transparent),
+      radial-gradient(1px 1px at 70% 40%, rgba(255,255,255,0.3), transparent),
+      radial-gradient(1px 1px at 90% 80%, rgba(255,255,255,0.5), transparent),
+      radial-gradient(1px 1px at 15% 85%, rgba(255,255,255,0.4), transparent),
+      radial-gradient(1.5px 1.5px at 45% 45%, rgba(255,255,255,0.6), transparent),
+      radial-gradient(1px 1px at 80% 15%, rgba(255,255,255,0.3), transparent),
+      radial-gradient(1px 1px at 25% 35%, rgba(255,255,255,0.5), transparent),
+      radial-gradient(1px 1px at 65% 70%, rgba(255,255,255,0.4), transparent),
+      radial-gradient(1px 1px at 5% 50%, rgba(255,255,255,0.3), transparent),
+      radial-gradient(1.5px 1.5px at 55% 90%, rgba(255,255,255,0.5), transparent),
+      radial-gradient(1px 1px at 85% 55%, rgba(255,255,255,0.6), transparent),
+      radial-gradient(1px 1px at 40% 25%, rgba(255,255,255,0.3), transparent),
+      radial-gradient(1px 1px at 95% 35%, rgba(255,255,255,0.4), transparent);
+    background-size: 400px 400px;
+    animation: drift 120s linear infinite;
+  }
+  .starfield::after {
+    background-size: 600px 600px;
+    opacity: 0.5;
+    animation-duration: 180s;
+    animation-direction: reverse;
+  }
+  @keyframes drift {
+    from { transform: translateY(0) translateX(0); }
+    to { transform: translateY(200px) translateX(-100px); }
+  }
+
+  /* Nebula glow overlays */
+  .nebula {
+    position: fixed; z-index: 0;
+    border-radius: 50%;
+    filter: blur(120px);
+    opacity: 0.08;
+    pointer-events: none;
+  }
+  .nebula-1 { width: 600px; height: 600px; background: var(--accent); top: -200px; right: -100px; }
+  .nebula-2 { width: 500px; height: 500px; background: var(--cyan); bottom: -200px; left: -100px; }
+  .nebula-3 { width: 400px; height: 400px; background: var(--pink); top: 40%; left: 50%; transform: translate(-50%, -50%); }
+
+  /* ---- Slide system ---- */
+  .slides-container {
+    position: relative; z-index: 1;
+    width: 100%; height: 100%;
+  }
+
+  .slide {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    padding: 60px 80px;
+    opacity: 0;
+    transform: translateX(40px);
+    transition: opacity 0.5s ease, transform 0.5s ease;
+    pointer-events: none;
+  }
+  .slide.active {
+    opacity: 1; transform: translateX(0);
+    pointer-events: all;
+  }
+  .slide.exit-left {
+    opacity: 0; transform: translateX(-40px);
+  }
+
+  /* ---- Navigation ---- */
+  .nav-bar {
+    position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
+    z-index: 100;
+    display: flex; align-items: center; gap: 12px;
+    background: var(--bg-glass);
+    backdrop-filter: blur(20px);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 40px;
+    padding: 10px 24px;
+  }
+  .nav-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--text-muted);
+    border: none; cursor: pointer;
+    transition: all 0.3s;
+  }
+  .nav-dot.active { background: var(--cyan); box-shadow: 0 0 12px var(--cyan); transform: scale(1.3); }
+  .nav-dot:hover { background: var(--accent2); }
+  .slide-counter {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px; color: var(--text-dim);
+    margin-left: 8px;
+  }
+  .nav-arrow {
+    background: none; border: none; color: var(--text-dim);
+    font-size: 20px; cursor: pointer; padding: 4px 8px;
+    transition: color 0.2s;
+  }
+  .nav-arrow:hover { color: var(--text); }
+
+  /* ---- Typography ---- */
+  .slide-title {
+    font-size: 52px; font-weight: 800;
+    letter-spacing: -1px;
+    line-height: 1.15;
+    margin-bottom: 24px;
+    text-align: center;
+  }
+  .slide-title .highlight { color: var(--cyan); }
+  .slide-title .highlight-purple { color: var(--accent2); }
+  .slide-title .highlight-pink { color: var(--pink); }
+
+  .slide-subtitle {
+    font-size: 22px; font-weight: 300;
+    color: var(--text-dim);
+    text-align: center;
+    max-width: 700px;
+    line-height: 1.6;
+    margin-bottom: 32px;
+  }
+
+  .tag {
+    display: inline-block;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px; font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--cyan);
+    border: 1px solid rgba(0, 206, 201, 0.3);
+    background: rgba(0, 206, 201, 0.06);
+    padding: 6px 16px;
+    border-radius: 20px;
+    margin-bottom: 20px;
+  }
+
+  /* ---- Cards ---- */
+  .card-grid {
+    display: grid;
+    gap: 20px;
+    margin-top: 16px;
+    width: 100%;
+    max-width: 1000px;
+  }
+  .card-grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
+  .card-grid.cols-2 { grid-template-columns: repeat(2, 1fr); }
+
+  .card {
+    background: var(--bg-glass);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 16px;
+    padding: 28px;
+    transition: transform 0.3s, border-color 0.3s;
+  }
+  .card:hover {
+    transform: translateY(-4px);
+    border-color: rgba(255,255,255,0.12);
+  }
+  .card-icon {
+    font-size: 32px;
+    margin-bottom: 14px;
+    display: block;
+  }
+  .card-title {
+    font-size: 17px; font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .card-text {
+    font-size: 14px; font-weight: 300;
+    color: var(--text-dim);
+    line-height: 1.6;
+  }
+
+  /* ---- Architecture diagram ---- */
+  .arch-diagram {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin-top: 24px;
+    flex-wrap: nowrap;
+  }
+  .arch-box {
+    background: var(--bg-glass);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 14px;
+    padding: 24px 28px;
+    text-align: center;
+    min-width: 180px;
+    position: relative;
+  }
+  .arch-box-label {
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 1.5px;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+  .arch-box-name {
+    font-size: 18px; font-weight: 700;
+  }
+  .arch-box-detail {
+    font-size: 12px; color: var(--text-dim);
+    margin-top: 6px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .arch-box.claude { border-color: rgba(108, 92, 231, 0.4); }
+  .arch-box.claude .arch-box-name { color: var(--accent2); }
+  .arch-box.pipeline { border-color: rgba(0, 206, 201, 0.4); }
+  .arch-box.pipeline .arch-box-name { color: var(--cyan); }
+  .arch-box.bridge { border-color: rgba(253, 203, 110, 0.4); }
+  .arch-box.bridge .arch-box-name { color: var(--orange); }
+  .arch-box.pi { border-color: rgba(253, 121, 168, 0.4); }
+  .arch-box.pi .arch-box-name { color: var(--pink); }
+
+  .arch-arrow {
+    font-size: 28px;
+    color: var(--text-muted);
+    padding: 0 12px;
+    flex-shrink: 0;
+  }
+
+  /* ---- Pipeline flow ---- */
+  .pipeline-flow {
+    display: flex;
+    align-items: flex-start;
+    gap: 0;
+    margin-top: 20px;
+    max-width: 1000px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .pf-step {
+    display: flex; flex-direction: column;
+    align-items: center; text-align: center;
+    min-width: 80px;
+  }
+  .pf-dot {
+    width: 40px; height: 40px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 700;
+    border: 2px solid;
+    margin-bottom: 8px;
+  }
+  .pf-dot.main { border-color: #4a9eff; color: #4a9eff; background: rgba(74, 158, 255, 0.1); }
+  .pf-dot.stars { border-color: var(--orange); color: var(--orange); background: rgba(253, 203, 110, 0.1); }
+  .pf-dot.ha { border-color: var(--red); color: var(--red); background: rgba(255, 118, 117, 0.1); }
+  .pf-dot.lum { border-color: var(--accent2); color: var(--accent2); background: rgba(162, 155, 254, 0.1); }
+  .pf-label {
+    font-size: 10px; font-weight: 500;
+    color: var(--text-dim);
+    max-width: 70px;
+    line-height: 1.3;
+  }
+  .pf-arrow {
+    color: var(--text-muted);
+    font-size: 18px;
+    padding: 8px 4px 0;
+    align-self: flex-start;
+  }
+  .pf-branch-group {
+    display: flex;
+    gap: 12px;
+    padding: 12px;
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 12px;
+    background: rgba(255,255,255,0.02);
+    margin: 0 4px;
+  }
+
+  /* ---- Conversation mockup ---- */
+  .conversation {
+    max-width: 700px; width: 100%;
+    margin-top: 16px;
+  }
+  .msg {
+    display: flex; gap: 14px;
+    margin-bottom: 16px;
+    animation: fadeUp 0.3s ease backwards;
+  }
+  .msg:nth-child(2) { animation-delay: 0.1s; }
+  .msg:nth-child(3) { animation-delay: 0.2s; }
+  .msg:nth-child(4) { animation-delay: 0.3s; }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .msg-avatar {
+    width: 36px; height: 36px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px; flex-shrink: 0;
+    font-weight: 700;
+  }
+  .msg-avatar.user { background: rgba(108, 92, 231, 0.2); color: var(--accent2); border: 1px solid rgba(108, 92, 231, 0.3); }
+  .msg-avatar.ai { background: rgba(0, 206, 201, 0.15); color: var(--cyan); border: 1px solid rgba(0, 206, 201, 0.3); }
+  .msg-body {
+    background: var(--bg-glass);
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 12px;
+    padding: 14px 18px;
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--text-dim);
+    flex: 1;
+  }
+  .msg-body strong { color: var(--text); font-weight: 600; }
+  .msg-body code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    background: rgba(0, 206, 201, 0.1);
+    color: var(--cyan);
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+
+  /* ---- Feature list ---- */
+  .feature-list {
+    list-style: none;
+    max-width: 700px;
+    width: 100%;
+  }
+  .feature-list li {
+    display: flex; align-items: flex-start; gap: 16px;
+    padding: 14px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+  }
+  .feature-list li:last-child { border-bottom: none; }
+  .feature-bullet {
+    width: 32px; height: 32px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px; flex-shrink: 0;
+    background: rgba(0, 206, 201, 0.1);
+    border: 1px solid rgba(0, 206, 201, 0.2);
+  }
+  .feature-content {}
+  .feature-content strong { font-size: 15px; display: block; margin-bottom: 2px; }
+  .feature-content span { font-size: 13px; color: var(--text-dim); line-height: 1.5; }
+
+  /* ---- Title slide specifics ---- */
+  .title-logo {
+    font-size: 80px; margin-bottom: 16px;
+    filter: drop-shadow(0 0 30px rgba(0, 206, 201, 0.3));
+  }
+  .title-main {
+    font-size: 64px; font-weight: 800;
+    letter-spacing: -2px;
+    background: linear-gradient(135deg, var(--text) 0%, var(--cyan) 50%, var(--accent2) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 16px;
+  }
+  .title-tagline {
+    font-size: 22px; font-weight: 300;
+    color: var(--text-dim);
+    margin-bottom: 32px;
+  }
+  .title-badges {
+    display: flex; gap: 12px; flex-wrap: wrap; justify-content: center;
+  }
+  .badge {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; font-weight: 500;
+    padding: 6px 14px;
+    border-radius: 6px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    color: var(--text-dim);
+  }
+  .badge .b-accent { color: var(--cyan); }
+  .badge .b-purple { color: var(--accent2); }
+  .badge .b-pink { color: var(--pink); }
+
+  /* ---- Problem slide pain points ---- */
+  .pain-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px;
+    max-width: 800px;
+    width: 100%;
+    margin-top: 16px;
+  }
+  .pain-card {
+    background: rgba(255, 118, 117, 0.04);
+    border: 1px solid rgba(255, 118, 117, 0.12);
+    border-radius: 14px;
+    padding: 22px;
+  }
+  .pain-card .pain-num {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 28px; font-weight: 700;
+    color: rgba(255, 118, 117, 0.3);
+    margin-bottom: 6px;
+  }
+  .pain-card .pain-title {
+    font-size: 16px; font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .pain-card .pain-desc {
+    font-size: 13px; color: var(--text-dim); line-height: 1.5;
+  }
+
+  /* ---- Closing slide ---- */
+  .closing-links {
+    display: flex; gap: 20px; margin-top: 24px;
+  }
+  .closing-link {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--bg-glass);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+    padding: 14px 24px;
+    text-decoration: none;
+    color: var(--text);
+    font-size: 14px;
+    transition: border-color 0.3s, transform 0.3s;
+  }
+  .closing-link:hover { border-color: var(--cyan); transform: translateY(-2px); }
+  .closing-link .cl-icon { font-size: 20px; }
+
+  /* ---- Keyboard hint ---- */
+  .kbd-hint {
+    position: fixed; bottom: 80px; right: 30px;
+    z-index: 100;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--text-muted);
+    opacity: 0.5;
+  }
+  .kbd-hint kbd {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-family: inherit;
+  }
+</style>
+</head>
+<body>
+
+<!-- Background -->
+<div class="starfield"></div>
+<div class="nebula nebula-1"></div>
+<div class="nebula nebula-2"></div>
+<div class="nebula nebula-3"></div>
+
+<div class="slides-container" id="slides">
+
+  <!-- ============================================================ -->
+  <!-- SLIDE 1: Title -->
+  <!-- ============================================================ -->
+  <div class="slide active" data-slide="0">
+    <div class="title-logo">&#127776;</div>
+    <div class="title-main">PixInsight MCP</div>
+    <div class="title-tagline">AI-driven automated deep sky astrophotography processing</div>
+    <div class="title-badges">
+      <div class="badge"><span class="b-accent">Claude Code</span> + <span class="b-pink">PixInsight</span></div>
+      <div class="badge">LRGB &middot; HaRGB &middot; HaLRGB</div>
+      <div class="badge"><span class="b-purple">Open Source</span> &middot; MIT</div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- SLIDE 2: The Problem -->
+  <!-- ============================================================ -->
+  <div class="slide" data-slide="1">
+    <div class="tag">The Problem</div>
+    <div class="slide-title">Processing deep sky images<br>is <span class="highlight-pink">painfully complex</span></div>
+    <div class="pain-grid">
+      <div class="pain-card">
+        <div class="pain-num">01</div>
+        <div class="pain-title">Dozens of steps</div>
+        <div class="pain-desc">Gradient removal, calibration, deconvolution, noise reduction, stretching, star handling, narrowband blending, curves, local contrast...</div>
+      </div>
+      <div class="pain-card">
+        <div class="pain-num">02</div>
+        <div class="pain-title">Parameter overload</div>
+        <div class="pain-desc">Each process has 10-50 parameters. A single wrong value ruins the result. Tuning requires deep expertise and endless trial-and-error.</div>
+      </div>
+      <div class="pain-card">
+        <div class="pain-num">03</div>
+        <div class="pain-title">Hours of manual work</div>
+        <div class="pain-desc">A full processing session takes 2-6 hours. Re-doing it with different parameters means starting from scratch.</div>
+      </div>
+      <div class="pain-card">
+        <div class="pain-num">04</div>
+        <div class="pain-title">Steep learning curve</div>
+        <div class="pain-desc">PixInsight is the gold standard but intimidates newcomers. Knowledge lives in scattered tutorials and forum posts.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- SLIDE 3: The Vision -->
+  <!-- ============================================================ -->
+  <div class="slide" data-slide="2">
+    <div class="tag">The Vision</div>
+    <div class="slide-title">Tell the AI <span class="highlight">what you want</span>,<br>not how to get there</div>
+    <div class="conversation">
+      <div class="msg">
+        <div class="msg-avatar user">You</div>
+        <div class="msg-body">
+          <strong>Process NGC 891 LRGB</strong> &mdash; edge-on galaxy, 180s subs, Astronomik Deep Sky filters. I want natural colors, visible dust lane, tight stars.
+        </div>
+      </div>
+      <div class="msg">
+        <div class="msg-avatar ai">AI</div>
+        <div class="msg-body">
+          Created a pipeline config with <strong>28 processing steps</strong> across 4 branches. Comparing ABE vs GradientCorrection... ABE (degree 2) wins with the most uniform background. Running SPCC calibration, BXT sharpening, SXT star separation, Seti star stretch, LRGB combine with <code>lightness=0.35</code>, <code>saturation=0.70</code>...
+        </div>
+      </div>
+      <div class="msg">
+        <div class="msg-avatar user">You</div>
+        <div class="msg-body">
+          The dust lane could use more contrast. Stars look great.
+        </div>
+      </div>
+      <div class="msg">
+        <div class="msg-avatar ai">AI</div>
+        <div class="msg-body">
+          Increasing LHE amount to 0.25 with <code>slopeLimit=1.3</code>, adding masked HDRMT. Resuming from <code>--restart-from curves_main</code>... Done in 90 seconds.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- SLIDE 4: Architecture -->
+  <!-- ============================================================ -->
+  <div class="slide" data-slide="3">
+    <div class="tag">Architecture</div>
+    <div class="slide-title">Model-agnostic, <span class="highlight-purple">agent-driven</span></div>
+    <div class="slide-subtitle">Any reasoning model or agentic framework can drive the pipeline through a file-based bridge. No plugins, no modifications to PixInsight required.</div>
+    <div class="arch-diagram">
+      <div class="arch-box claude" style="min-width:200px">
+        <div class="arch-box-label">AI Agent</div>
+        <div class="arch-box-name">Any LLM Agent</div>
+        <div class="arch-box-detail" style="line-height:1.6">Claude Code, Codex,<br>Cursor, custom agents...</div>
+      </div>
+      <div class="arch-arrow">&rarr;</div>
+      <div class="arch-box pipeline">
+        <div class="arch-box-label">Orchestrator</div>
+        <div class="arch-box-name">Pipeline</div>
+        <div class="arch-box-detail">Node.js &middot; 2000 lines</div>
+      </div>
+      <div class="arch-arrow">&rarr;</div>
+      <div class="arch-box bridge">
+        <div class="arch-box-label">IPC</div>
+        <div class="arch-box-name">File Bridge</div>
+        <div class="arch-box-detail">JSON commands/results</div>
+      </div>
+      <div class="arch-arrow">&rarr;</div>
+      <div class="arch-box pi">
+        <div class="arch-box-label">Engine</div>
+        <div class="arch-box-name">PixInsight</div>
+        <div class="arch-box-detail">PJSR watcher script</div>
+      </div>
+    </div>
+    <div style="margin-top:24px;display:flex;gap:12px;flex-wrap:wrap;justify-content:center">
+      <div class="badge">The pipeline is a <span class="b-accent">plain Node.js script</span></div>
+      <div class="badge">Any agent that can run <span class="b-purple">shell commands</span> can use it</div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- SLIDE 5: Branching Pipeline -->
+  <!-- ============================================================ -->
+  <div class="slide" data-slide="4">
+    <div class="tag">The Pipeline</div>
+    <div class="slide-title">Config-driven, <span class="highlight">branching</span> pipeline</div>
+    <div class="slide-subtitle">One JSON config describes the full workflow. Branches fork and merge for parallel processing of stars, H-alpha, and luminance data.</div>
+    <div class="card-grid cols-2" style="max-width:860px">
+      <div class="card">
+        <div class="card-icon" style="color:#4a9eff">&#9679;</div>
+        <div class="card-title" style="color:#4a9eff">Main (RGB)</div>
+        <div class="card-text">Channel combine &rarr; Gradient removal &rarr; BXT &rarr; SPCC calibration &rarr; SCNR &rarr; NXT denoise &rarr; SXT star separation &rarr; Stretch (HT+GHS) &rarr; Curves &rarr; LHE &rarr; HDRMT</div>
+      </div>
+      <div class="card">
+        <div class="card-icon" style="color:var(--orange)">&#9679;</div>
+        <div class="card-title" style="color:var(--orange)">Stars</div>
+        <div class="card-text">Forks after SXT &rarr; Seti linear stretch (MTF iterations) &rarr; Saturation boost &rarr; Screen-blend recombination at the end. Tight, colorful, halo-free stars.</div>
+      </div>
+      <div class="card">
+        <div class="card-icon" style="color:var(--red)">&#9679;</div>
+        <div class="card-title" style="color:var(--red)">H-alpha</div>
+        <div class="card-text">SXT on linear Ha &rarr; Stretch &rarr; GHS &rarr; Three-part injection: R-channel conditional, luminance boost, detail layer with nebula mask.</div>
+      </div>
+      <div class="card">
+        <div class="card-icon" style="color:var(--accent2)">&#9679;</div>
+        <div class="card-title" style="color:var(--accent2)">Luminance</div>
+        <div class="card-text">Separate L stretch &rarr; NXT denoise &rarr; BXT sharpening &rarr; LRGB Combination with configurable lightness/saturation weighting.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- SLIDE 6: Key Features -->
+  <!-- ============================================================ -->
+  <div class="slide" data-slide="5">
+    <div class="tag">Key Features</div>
+    <div class="slide-title">Built for <span class="highlight">real-world</span> processing</div>
+    <ul class="feature-list">
+      <li>
+        <div class="feature-bullet" style="color:var(--cyan)">&#9889;</div>
+        <div class="feature-content">
+          <strong>Checkpoint & Resume</strong>
+          <span>Auto-saves at key stages. Resume from any checkpoint after a crash or parameter change &mdash; skip hours of reprocessing.</span>
+        </div>
+      </li>
+      <li>
+        <div class="feature-bullet" style="color:var(--orange)">&#128269;</div>
+        <div class="feature-content">
+          <strong>Intelligent Gradient Removal</strong>
+          <span>Automatically compares ABE vs GradientCorrection across multiple polynomial degrees, measures background uniformity, picks the winner.</span>
+        </div>
+      </li>
+      <li>
+        <div class="feature-bullet" style="color:var(--green)">&#128247;</div>
+        <div class="feature-content">
+          <strong>Preview at Every Step</strong>
+          <span>Exports JPEG previews (with auto-stretch for linear data) so you can review without opening PixInsight. Visual feedback drives the next iteration.</span>
+        </div>
+      </li>
+      <li>
+        <div class="feature-bullet" style="color:var(--accent2)">&#128736;</div>
+        <div class="feature-content">
+          <strong>Web Pipeline Editor</strong>
+          <span>Visual config editor with sliders, curve widgets, GHS pass management, branch visualization, and real-time preview thumbnails.</span>
+        </div>
+      </li>
+      <li>
+        <div class="feature-bullet" style="color:var(--pink)">&#129504;</div>
+        <div class="feature-content">
+          <strong>Iterative Tuning</strong>
+          <span>Each run generates a detailed markdown report. Review results, give natural-language feedback, and the AI adjusts parameters for the next pass.</span>
+        </div>
+      </li>
+    </ul>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- SLIDE 7: Learning System -->
+  <!-- ============================================================ -->
+  <div class="slide" data-slide="6">
+    <div class="tag">Continuous Learning</div>
+    <div class="slide-title">The system <span class="highlight-purple">learns</span> as you use it</div>
+    <div class="slide-subtitle">Skills and memory files are enriched after every session. The AI builds a growing knowledge base of techniques, gotchas, and your personal processing style.</div>
+    <div class="card-grid cols-3" style="max-width:960px">
+      <div class="card" style="border-color:rgba(0,206,201,0.2)">
+        <div class="card-icon" style="color:var(--cyan);font-size:28px">&#128218;</div>
+        <div class="card-title" style="color:var(--cyan)">Skills</div>
+        <div class="card-text">Structured markdown files documenting every PJSR process, parameter range, technique, and gotcha. Updated automatically when new knowledge is validated.</div>
+      </div>
+      <div class="card" style="border-color:rgba(162,155,254,0.2)">
+        <div class="card-icon" style="color:var(--accent2);font-size:28px">&#129504;</div>
+        <div class="card-title" style="color:var(--accent2)">Memory</div>
+        <div class="card-text">Persistent cross-session memory captures your preferences, lessons learned, and target-specific tuning. The AI starts every new session with full context.</div>
+      </div>
+      <div class="card" style="border-color:rgba(253,121,168,0.2)">
+        <div class="card-icon" style="color:var(--pink);font-size:28px">&#127919;</div>
+        <div class="card-title" style="color:var(--pink)">Your Style</div>
+        <div class="card-text">Tight stars or fluffy halos? Aggressive LHE or gentle curves? The more you iterate, the more the system adapts to your aesthetic preferences.</div>
+      </div>
+    </div>
+    <div style="margin-top:28px;max-width:700px;width:100%;background:var(--bg-glass);border:1px solid rgba(255,255,255,0.06);border-radius:14px;padding:20px 28px">
+      <div style="display:flex;align-items:flex-start;gap:16px">
+        <div style="font-size:24px;flex-shrink:0;margin-top:2px">&#128260;</div>
+        <div>
+          <div style="font-size:15px;font-weight:600;margin-bottom:6px">Feedback loop</div>
+          <div style="font-size:13px;color:var(--text-dim);line-height:1.6">
+            Bug found? Documented in <code>pjsr-gotchas.md</code>.
+            New technique validated? Added to <code>SKILL.md</code>.
+            Galaxy processing tuned over 8 iterations? Captured in <code>processing-knowledge.md</code>.
+            <span style="color:var(--text)">Next session starts where this one ended.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- SLIDE 8: Iteration Workflow -->
+  <!-- ============================================================ -->
+  <div class="slide" data-slide="7">
+    <div class="tag">Workflow</div>
+    <div class="slide-title">The <span class="highlight-purple">iteration loop</span></div>
+    <div class="slide-subtitle">Processing is not a one-shot task. It's a conversation between you and the AI, converging toward the image you envision.</div>
+    <div class="card-grid cols-3" style="max-width:900px">
+      <div class="card" style="text-align:center;border-color:rgba(108,92,231,0.2)">
+        <div class="card-icon" style="font-size:40px">1</div>
+        <div class="card-title">Run</div>
+        <div class="card-text">Full pipeline or resume from a checkpoint. All 28 steps execute automatically with JPEG exports at each stage.</div>
+      </div>
+      <div class="card" style="text-align:center;border-color:rgba(0,206,201,0.2)">
+        <div class="card-icon" style="font-size:40px">2</div>
+        <div class="card-title">Review</div>
+        <div class="card-text">Browse step previews in the web editor or the conversation. Identify what needs adjusting &mdash; too much contrast? Noisy background? Weak Ha?</div>
+      </div>
+      <div class="card" style="text-align:center;border-color:rgba(253,121,168,0.2)">
+        <div class="card-icon" style="font-size:40px">3</div>
+        <div class="card-title">Refine</div>
+        <div class="card-text">Give feedback in plain language. The AI updates the config, resumes from the right checkpoint, and delivers a new iteration in minutes.</div>
+      </div>
+    </div>
+    <div style="margin-top:24px;text-align:center">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--text-muted);letter-spacing:1px">
+        NGC 891: <span style="color:var(--cyan)">8 iterations</span> &rarr; from raw masters to publication quality
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- SLIDE 9: Closing -->
+  <!-- ============================================================ -->
+  <div class="slide" data-slide="8">
+    <div class="tag">Let's See It In Action</div>
+    <div class="slide-title">Time for a <span class="highlight">demo</span></div>
+    <div class="slide-subtitle">
+      What you'll see: loading integrated masters, running the full pipeline,
+      reviewing previews, giving feedback, and iterating &mdash; all from a single conversation.
+    </div>
+    <div style="margin-top:20px;padding:24px 32px;background:var(--bg-glass);border:1px solid rgba(255,255,255,0.06);border-radius:14px;max-width:600px;text-align:center">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--text-dim);margin-bottom:8px">github.com</div>
+      <div style="font-size:20px;font-weight:700;color:var(--cyan)">pixinsight-mcp</div>
+      <div style="font-size:13px;color:var(--text-dim);margin-top:8px">Open source &middot; MIT License &middot; Node.js + PJSR</div>
+    </div>
+    <div style="margin-top:32px;display:flex;gap:24px;flex-wrap:wrap;justify-content:center">
+      <div class="badge"><span class="b-accent">Claude Code</span> as the AI agent</div>
+      <div class="badge"><span class="b-pink">PixInsight</span> as the processing engine</div>
+      <div class="badge">Works with any PJSR-compatible process</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Navigation -->
+<div class="nav-bar">
+  <button class="nav-arrow" onclick="prev()">&larr;</button>
+  <button class="nav-dot active" onclick="goTo(0)"></button>
+  <button class="nav-dot" onclick="goTo(1)"></button>
+  <button class="nav-dot" onclick="goTo(2)"></button>
+  <button class="nav-dot" onclick="goTo(3)"></button>
+  <button class="nav-dot" onclick="goTo(4)"></button>
+  <button class="nav-dot" onclick="goTo(5)"></button>
+  <button class="nav-dot" onclick="goTo(6)"></button>
+  <button class="nav-dot" onclick="goTo(7)"></button>
+  <button class="nav-dot" onclick="goTo(8)"></button>
+  <button class="nav-arrow" onclick="next()">&rarr;</button>
+  <span class="slide-counter" id="counter">1 / 9</span>
+</div>
+
+<div class="kbd-hint">
+  <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to navigate
+</div>
+
+<script>
+  let current = 0;
+  const total = document.querySelectorAll('.slide').length;
+  const slides = document.querySelectorAll('.slide');
+  const dots = document.querySelectorAll('.nav-dot');
+
+  function goTo(n) {
+    if (n < 0 || n >= total || n === current) return;
+    slides[current].classList.remove('active');
+    slides[current].classList.add('exit-left');
+    setTimeout(() => slides[current === n ? current : (current < n ? current : current)].classList.remove('exit-left'), 500);
+
+    const prev = current;
+    current = n;
+    slides[current].classList.remove('exit-left');
+    slides[current].classList.add('active');
+
+    // Clean up previous after transition
+    setTimeout(() => { slides[prev].classList.remove('exit-left'); }, 500);
+
+    dots.forEach((d, i) => d.classList.toggle('active', i === current));
+    document.getElementById('counter').textContent = (current + 1) + ' / ' + total;
+  }
+
+  function next() { goTo(current + 1); }
+  function prev() { goTo(current - 1); }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); next(); }
+    if (e.key === 'ArrowLeft') { e.preventDefault(); prev(); }
+  });
+
+  // Touch swipe support
+  let touchStartX = 0;
+  document.addEventListener('touchstart', (e) => { touchStartX = e.touches[0].clientX; });
+  document.addEventListener('touchend', (e) => {
+    const dx = e.changedTouches[0].clientX - touchStartX;
+    if (Math.abs(dx) > 50) { dx < 0 ? next() : prev(); }
+  });
+</script>
+
+</body>
+</html>
