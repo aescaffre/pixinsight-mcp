@@ -3269,6 +3269,101 @@ async function run() {
     log('\n==== PHASE 12: FINAL CURVES (SKIPPED) ====');
   }
 
+  // ==== PHASE 12a0: GALAXY BRIGHTEN (spatial mask + gamma boost) ====
+  // Two-stage mask: (1) binary seed from bright pixels, (2) huge Gaussian blur to spread
+  // spatially, (3) rescale amplification so the galaxy halo gets meaningful mask values.
+  // This covers the full galaxy+halo while keeping background at zero.
+  if (isEnabled('galaxy_brighten') && !shouldSkip('galaxy_brighten')) {
+    const gbP = P('galaxy_brighten');
+    const gbBoostGamma = gbP.boostGamma ?? 2.0;
+    const gbClipLow = gbP.maskClipLow ?? 0.20;
+    const gbBlur = gbP.maskBlur ?? 80;
+    const gbRescale = gbP.maskRescale ?? 3.0;
+    log(`\n==== PHASE 12a0: GALAXY BRIGHTEN (gamma=${gbBoostGamma}, maskClip=${gbClipLow}, blur=${gbBlur}, rescale=${gbRescale}) ====`);
+
+    // Step 1: Create spatial mask — binary seed → huge blur → rescale amplification
+    const dimR2 = await pjsr(`
+      var srcW = ImageWindow.windowById('${targetName}');
+      var img = srcW.mainView.image;
+      JSON.stringify({ w: Math.round(img.width), h: Math.round(img.height), color: img.isColor });
+    `);
+    const dims2 = JSON.parse(dimR2.outputs?.consoleOutput?.trim() || '{}');
+    const lumExpr2 = dims2.color
+      ? `0.2126*${targetName}[0]+0.7152*${targetName}[1]+0.0722*${targetName}[2]`
+      : targetName;
+
+    await pjsr(`
+      var old = ImageWindow.windowById('mask_galaxy_bright');
+      if (!old.isNull) old.forceClose();
+      var mw = new ImageWindow(${dims2.w}, ${dims2.h}, 1, 32, true, false, 'mask_galaxy_bright');
+      mw.show();
+      // Stage 1: Binary seed — bright pixels = 1, everything else = 0
+      var PM = new PixelMath;
+      PM.expression = 'iif(${lumExpr2}<${gbClipLow},0,1)';
+      PM.useSingleExpression = true;
+      PM.createNewImage = false;
+      PM.executeOn(mw.mainView);
+      // Stage 2: Large Gaussian blur — spreads seed spatially following galaxy shape
+      var C = new Convolution;
+      C.mode = Convolution.prototype.Parametric;
+      C.sigma = ${gbBlur};
+      C.shape = 2;
+      C.aspectRatio = 1;
+      C.rotationAngle = 0;
+      C.executeOn(mw.mainView);
+      // Stage 3: Rescale amplification — boosts mask so halo region gets meaningful values
+      // e.g. rescale=3: halo at 0.15 → 0.45, background at 0.02 → 0.06 (still negligible)
+      var PM2 = new PixelMath;
+      PM2.expression = 'min(1, mask_galaxy_bright * ${gbRescale})';
+      PM2.useSingleExpression = true;
+      PM2.createNewImage = false;
+      PM2.executeOn(mw.mainView);
+      'OK';
+    `);
+    log(`  [mask] Created spatial mask mask_galaxy_bright (clipLow=${gbClipLow}, blur=${gbBlur}, rescale=${gbRescale})`);
+    await applyMask(targetName, 'mask_galaxy_bright', false);
+    await savePreview('mask_galaxy_bright', 'mask_galaxy_bright');
+
+    // Step 2: Gamma boost via PixelMath (preserves color ratios)
+    const preStats = await getStats(targetName);
+    log(`  Pre: median=${preStats.median.toFixed(4)}`);
+    const invGamma = (1.0 / gbBoostGamma).toFixed(6);
+    log(`  Gamma: ${gbBoostGamma} (inv=${invGamma})`);
+    log(`  Example: pixel 0.10 → ${Math.pow(0.10, 1/gbBoostGamma).toFixed(3)}, 0.25 → ${Math.pow(0.25, 1/gbBoostGamma).toFixed(3)}, 0.50 → ${Math.pow(0.50, 1/gbBoostGamma).toFixed(3)}`);
+
+    const Y = '(0.2126*$T[0]+0.7152*$T[1]+0.0722*$T[2])';
+    const Ynew = `exp(${invGamma}*ln(max(${Y},0.00001)))`;
+    const scale = `(${Ynew})/max(${Y},0.00001)`;
+    const exprR = `min($T[0]*${scale},1)`;
+    const exprG = `min($T[1]*${scale},1)`;
+    const exprB = `min($T[2]*${scale},1)`;
+
+    r = await pjsr(`
+      var PM = new PixelMath;
+      PM.expression = '${exprR}';
+      PM.expression1 = '${exprG}';
+      PM.expression2 = '${exprB}';
+      PM.useSingleExpression = false;
+      PM.createNewImage = false;
+      PM.use64BitWorkingImage = true;
+      PM.truncate = true;
+      PM.truncateLower = 0;
+      PM.truncateUpper = 1;
+      PM.executeOn(ImageWindow.windowById('${targetName}').mainView);
+    `);
+    log('  ' + (r.status === 'error' ? 'WARN: ' + r.error.message : 'Done.'));
+    const postStats = await getStats(targetName);
+    log(`  Post: median=${postStats.median.toFixed(4)} (delta=${(postStats.median - preStats.median).toFixed(4)})`);
+
+    // Clean up mask
+    await removeMask(targetName);
+    await closeMask('mask_galaxy_bright');
+    await purgeUndoHistory(targetName);
+    await savePreview(targetName, 'galaxy_brighten');
+  } else if (!isEnabled('galaxy_brighten')) {
+    log('\n==== PHASE 12a0: GALAXY BRIGHTEN (SKIPPED) ====');
+  }
+
   // ==== PHASE 12a: GALAXY SATURATION (masked — boosts color in bright structures only) ====
   if (isEnabled('galaxy_saturate') && !shouldSkip('galaxy_saturate')) {
     const gsP = P('galaxy_saturate');
@@ -3355,6 +3450,41 @@ async function run() {
     log('\n==== PHASE 12a2: HUE-SELECTIVE SATURATION (SKIPPED) ====');
   }
 
+  // ==== PHASE 12_bg: BACKGROUND NEUTRALIZE ====
+  // Forces deep background pixels toward neutral (R=G=B=Y) with smooth transition
+  // Runs AFTER galaxy_saturate and hue_boost so nothing re-introduces color to background
+  if (isEnabled('bg_neutralize') && !shouldSkip('bg_neutralize')) {
+    const bnP = P('bg_neutralize');
+    const bnThresh = bnP.threshold ?? 0.06;
+    const bnTrans = bnP.transition ?? 0.04;
+    log(`\n==== PHASE 12_bg: BACKGROUND NEUTRALIZE (threshold=${bnThresh}, transition=${bnTrans}) ====`);
+    // Y = luminance, f = blend factor (0=neutralize, 1=keep original)
+    // Dark pixels (Y < threshold-transition): fully neutralized to Y
+    // Bright pixels (Y > threshold): keep original color
+    const Y = '(0.2126*$T[0]+0.7152*$T[1]+0.0722*$T[2])';
+    const f = `max(0,min(1,(${Y}-${bnThresh})/${bnTrans}))`;
+    const exprR = `$T[0]*${f}+${Y}*(1-${f})`;
+    const exprG = `$T[1]*${f}+${Y}*(1-${f})`;
+    const exprB = `$T[2]*${f}+${Y}*(1-${f})`;
+    log(`  Expressions built (Y threshold=${bnThresh}, transition width=${bnTrans})`);
+    await pjsr(`
+      var P=new PixelMath;
+      P.expression='${exprR}';
+      P.expression1='${exprG}';
+      P.expression2='${exprB}';
+      P.useSingleExpression=false;
+      P.createNewImage=false;
+      P.use64BitWorkingImage=true;
+      P.truncate=true;P.truncateLower=0;P.truncateUpper=1;
+      P.executeOn(ImageWindow.windowById('${targetName}').mainView);
+    `);
+    log('  Done.');
+    await savePreview(targetName, 'bg_neutralize');
+    await checkMemory('bg_neutralize');
+  } else if (!isEnabled('bg_neutralize')) {
+    log('\n==== PHASE 12_bg: BACKGROUND NEUTRALIZE (SKIPPED) ====');
+  }
+
   // ==== PHASE 12b: STAR REDUCTION (remove smallest stars via threshold + morphological erosion) ====
   if (isEnabled('star_reduce') && starsId && !shouldSkip('star_reduce')) {
     const srP = P('star_reduce');
@@ -3427,8 +3557,8 @@ async function run() {
   log('\n==== PHASE 14: SAVE & CLEANUP ====');
   const outputDir = F.outputDir || '/tmp/pipeline-output';
   const suffix = lOnlyMode ? '_L' : (hasHa ? (hasL ? '_HaLRGB' : '_HaRGB') : (hasL ? '_LRGB' : '_RGB'));
-  // Extract iteration number from config name (e.g., "Iteration 22" → "22", "Iteration 30a" → "30a")
-  const iterMatch = (CFG.name || '').match(/Iteration\s+(\d+[a-z]?)/i);
+  // Extract iteration number from config name (e.g., "Iteration 22" → "22", "v10" → "10")
+  const iterMatch = (CFG.name || '').match(/(?:Iteration\s+|\bv)(\d+[a-z]?)/i);
   const iterNum = iterMatch ? iterMatch[1].padStart(2, '0') : null;
   // Primary output: iteration-numbered if available, otherwise timestamped
   const outputPath = iterNum
@@ -3445,8 +3575,7 @@ async function run() {
     if(File.exists(p)) File.remove(p);
     w.saveAs(p,false,false,false,false);
     var latest='${esc(latestPath)}';
-    if(File.exists(latest)) File.remove(latest);
-    File.copyFile(latest, p);
+    if(latest!==p){if(File.exists(latest)) File.remove(latest);File.copyFile(latest, p);}
     var all=ImageWindow.windows;
     for(var i=all.length-1;i>=0;i--){
       if(all[i].mainView.id!=='${targetName}'){all[i].forceClose();}
