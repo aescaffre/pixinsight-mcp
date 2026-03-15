@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Processing Brief",
+  "description": "Governing contract for an agentic processing run",
+  "type": "object",
+  "required": ["target", "dataDescription", "aestheticIntent", "technicalPriorities", "hardConstraints"],
+  "properties": {
+    "briefId": { "type": "string" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "target": {
+      "type": "object",
+      "required": ["name", "classification"],
+      "properties": {
+        "name": { "type": "string", "description": "E.g. 'NGC 891', 'M81/M82', 'Rosette Nebula'" },
+        "classification": {
+          "type": "string",
+          "enum": ["emission_nebula", "reflection_nebula", "planetary_nebula", "galaxy_spiral", "galaxy_edge_on", "galaxy_elliptical", "star_cluster", "mixed_field"]
+        },
+        "subtype": { "type": "string" },
+        "fieldCharacteristics": {
+          "type": "object",
+          "properties": {
+            "starDensity": { "type": "string", "enum": ["sparse", "moderate", "dense"] },
+            "haSignalStrength": { "type": "string", "enum": ["none", "weak", "moderate", "strong"] },
+            "dustLanes": { "type": "boolean" },
+            "brightCore": { "type": "boolean" },
+            "faintOuterStructure": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "dataDescription": {
+      "type": "object",
+      "required": ["workflow", "channels"],
+      "properties": {
+        "workflow": { "type": "string", "enum": ["RGB", "LRGB", "HaRGB", "HaLRGB", "L_only", "SHO"] },
+        "channels": {
+          "type": "object",
+          "properties": {
+            "L": { "type": "boolean" },
+            "R": { "type": "boolean" },
+            "G": { "type": "boolean" },
+            "B": { "type": "boolean" },
+            "Ha": { "type": "boolean" }
+          }
+        },
+        "sensor": { "type": "string" },
+        "pixelScale": { "type": "number" }
+      }
+    },
+    "aestheticIntent": {
+      "type": "object",
+      "required": ["style"],
+      "properties": {
+        "style": { "type": "string", "enum": ["natural_observational", "enhanced_natural", "dramatic", "scientific"] },
+        "colorSaturation": { "type": "string", "enum": ["restrained", "moderate", "vivid"] },
+        "contrastLevel": { "type": "string", "enum": ["soft", "moderate", "punchy"] },
+        "backgroundTarget": { "type": "string", "enum": ["very_dark", "dark", "medium"] },
+        "starProminence": { "type": "string", "enum": ["subdued", "balanced", "prominent"] },
+        "detailEmphasis": { "type": "string", "enum": ["global_structure", "balanced", "fine_detail"] },
+        "referenceNotes": { "type": "string" }
+      }
+    },
+    "technicalPriorities": {
+      "type": "array",
+      "description": "Ordered list, highest priority first",
+      "items": {
+        "type": "string",
+        "enum": ["signal_preservation", "noise_control", "dynamic_range", "color_accuracy", "resolution", "background_quality", "star_quality", "natural_appearance"]
+      },
+      "minItems": 3,
+      "maxItems": 8
+    },
+    "hardConstraints": {
+      "type": "object",
+      "properties": {
+        "maxPixelValue": { "type": "number", "default": 0.995 },
+        "minBackgroundMedian": { "type": "number", "default": 0.001 },
+        "maxBackgroundMedian": { "type": "number", "default": 0.25 },
+        "maxChannelImbalance": { "type": "number", "default": 0.05 },
+        "maxMemoryMB": { "type": "integer", "default": 8000 },
+        "maxWallClockMinutes": { "type": "integer", "default": 60 },
+        "maxIterationsPerAgent": { "type": "integer", "default": 8 }
+      }
+    },
+    "softGoals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "goal": { "type": "string" },
+          "priority": { "type": "string", "enum": ["low", "medium", "high"] }
+        }
+      }
+    }
+  }
+}
