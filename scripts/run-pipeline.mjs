@@ -94,7 +94,9 @@ function loadConfig() {
 let CFG;
 
 function getStep(id) { return CFG.steps.find(s => s.id === id); }
-function isEnabled(id) { const s = getStep(id); return s ? s.enabled : true; }
+// Steps default to DISABLED if not in config — prevents surprise hardcoded steps from running
+// Only steps explicitly listed in the config with enabled:true will execute
+function isEnabled(id) { const s = getStep(id); return s ? s.enabled : false; }
 function P(id) { const s = getStep(id); return s ? s.params : {}; }
 
 // ============================================================================
@@ -304,6 +306,62 @@ async function removeMask(targetViewId) {
 
 async function closeMask(maskId) {
   await pjsr(`var mw = ImageWindow.windowById('${maskId}'); if (!mw.isNull) mw.forceClose();`);
+}
+
+// Create OIII veil mask from a source view (can be current starless target or external file).
+// Extracts "blue excess" (B - max(R,G)), applies Gaussian blur for smooth transitions,
+// then thresholds/normalizes for a tight mask around the OIII veil only.
+// When sourceViewId is the current starless target, no star contamination is possible.
+async function createOiiiMask(sourceViewId, maskId, blur = 15, clipLow = 0.01) {
+  // Step 1: Get source dimensions
+  const dimR = await pjsr(`
+    var srcW = ImageWindow.windowById('${sourceViewId}');
+    if (srcW.isNull) throw new Error('Source not found: ${sourceViewId}');
+    var img = srcW.mainView.image;
+    JSON.stringify({ w: Math.round(img.width), h: Math.round(img.height), color: img.isColor });
+  `);
+  if (dimR.status === 'error') {
+    log(`  [oiii] WARN: ${dimR.error.message}`);
+    return null;
+  }
+  const dims = JSON.parse(dimR.outputs?.consoleOutput?.trim() || '{}');
+
+  // Step 2: Create mask from blue excess: max(0, B - max(R, G))
+  // On starless data: any blue excess IS real nebulosity (no stars to worry about)
+  const r = await pjsr(`
+    var old = ImageWindow.windowById('${maskId}');
+    if (!old.isNull) old.forceClose();
+    var mw = new ImageWindow(${dims.w}, ${dims.h}, 1, 32, true, false, '${maskId}');
+    mw.show();
+    // Extract blue excess (OIII at 500nm creates B > max(R,G) in broadband)
+    var PM = new PixelMath;
+    PM.expression = 'max(0, ${sourceViewId}[2] - max(${sourceViewId}[0], ${sourceViewId}[1]))';
+    PM.useSingleExpression = true;
+    PM.createNewImage = false;
+    PM.use64BitWorkingImage = true;
+    PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1;
+    PM.executeOn(mw.mainView);
+    // Gaussian blur for smooth mask edges (sigma=${blur})
+    ${blur > 0 ? `var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = ${blur}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(mw.mainView);` : ''}
+    // Clip low values (noise/background) and normalize
+    ${clipLow > 0 ? `var PM2 = new PixelMath; PM2.expression = 'iif($T<${clipLow},0,($T-${clipLow})/${(1 - clipLow).toFixed(6)})'; PM2.useSingleExpression = true; PM2.createNewImage = false; PM2.use64BitWorkingImage = true; PM2.truncate = true; PM2.truncateLower = 0; PM2.truncateUpper = 1; PM2.executeOn(mw.mainView);` : ''}
+    // Rescale to full 0-1 range for maximum mask efficiency
+    var PM3 = new PixelMath;
+    PM3.expression = '${maskId}/max(${maskId})';
+    PM3.useSingleExpression = true;
+    PM3.createNewImage = false;
+    PM3.use64BitWorkingImage = true;
+    PM3.truncate = true; PM3.truncateLower = 0; PM3.truncateUpper = 1;
+    PM3.executeOn(mw.mainView);
+    'OK';
+  `);
+  if (r.status === 'error') {
+    log(`  [oiii] WARN: ${maskId}: ${r.error.message}`);
+    return null;
+  }
+
+  log(`  [oiii] Created OIII veil mask ${maskId} from ${sourceViewId} (blur=${blur}, clipLow=${clipLow}, ${dims.w}x${dims.h})`);
+  return maskId;
 }
 
 // Purge undo history for a view to free memory (each undo = ~300MB for large images)
@@ -1135,6 +1193,20 @@ async function run() {
       if (hasL) idL = viewL2.id;
       rgbW = viewR.width; rgbH = viewR.height;
       log('Identified: R=' + idR + ' G=' + idG + ' B=' + idB + (hasHa ? ' Ha=' + idHa : '') + (hasL ? ' L=' + idL : ''));
+
+      // Channel swap override — fixes mislabeled FITS FILTER keywords
+      // e.g. "channelSwap": "GB" or "GB,RG" for multiple swaps applied in order
+      if (F.channelSwap) {
+        const swaps = F.channelSwap.split(',').map(s => s.trim());
+        log('  Applying channelSwap: ' + F.channelSwap + ' (' + swaps.length + ' swap(s))');
+        for (const sw of swaps) {
+          if (sw === 'GB' || sw === 'BG') { const tmp = idG; idG = idB; idB = tmp; }
+          else if (sw === 'RG' || sw === 'GR') { const tmp = idR; idR = idG; idG = tmp; }
+          else if (sw === 'RB' || sw === 'BR') { const tmp = idR; idR = idB; idB = tmp; }
+          else { log('  WARN: Unknown swap: ' + sw + ' (use GB, RG, or RB)'); }
+        }
+        log('  After swap: R=' + idR + ' G=' + idG + ' B=' + idB);
+      }
     }
   }
 
@@ -1212,6 +1284,17 @@ async function run() {
       if (hasL && vL) idL = vL.id;
       rgbW = vR?.width || rgbW; rgbH = vR?.height || rgbH;
       log('  Re-identified: R=' + idR + ' G=' + idG + ' B=' + idB + (hasHa ? ' Ha=' + idHa : '') + (hasL ? ' L=' + idL : ''));
+
+      // Re-apply channel swap after re-identification
+      if (F.channelSwap) {
+        const swaps = F.channelSwap.split(',').map(s => s.trim());
+        for (const sw of swaps) {
+          if (sw === 'GB' || sw === 'BG') { const tmp = idG; idG = idB; idB = tmp; }
+          else if (sw === 'RG' || sw === 'GR') { const tmp = idR; idR = idG; idG = tmp; }
+          else if (sw === 'RB' || sw === 'BR') { const tmp = idR; idR = idB; idB = tmp; }
+        }
+        log('  After swap: R=' + idR + ' G=' + idG + ' B=' + idB);
+      }
     }
     await checkMemory('align');
   } else if (!isEnabled('align')) {
@@ -3219,6 +3302,305 @@ async function run() {
     log('\n==== PHASE 11h2: HDRMT FINE (SKIPPED) ====');
   }
 
+  // ==== PHASE 11h3: VEIL ENHANCEMENT (mask subtraction technique) ====
+  // Creates two masks — full nebula (captures faint veil) and bright core —
+  // subtracts core from full to isolate the faint outer envelope, then boosts brightness
+  // and saturation through that mask. Supports Ha-based masking (maskSource: "ha")
+  // for targets where the faint veil is primarily Ha emission (e.g., M27 butterfly wings).
+  if (isEnabled('veil_enhance') && !shouldSkip('veil_enhance')) {
+    const veP = P('veil_enhance');
+    const fullClipLow = veP.fullMaskClipLow ?? 0.03;   // low threshold to capture faint veil
+    const coreClipLow = veP.coreMaskClipLow ?? 0.20;   // high threshold for bright core only
+    const fullMaskBlur = veP.maskBlur ?? 15;            // blur for full nebula mask
+    const coreMaskBlur = veP.coreMaskBlur ?? fullMaskBlur; // separate blur for core (tighter = sharper core boundary)
+    const maskGamma = veP.maskGamma ?? 1.0;
+    const lightnessBoost = veP.lightnessBoost ?? 1.30;  // 30% brighter
+    const satBoost = veP.satBoost ?? 1.20;              // 20% more saturated
+    const maskSource = veP.maskSource ?? 'lum';         // 'lum' (from target) or 'ha' (from Ha_work)
+    const binarize = veP.binarize ?? false;             // make veil mask binary after subtraction
+    const binarizeThreshold = veP.binarizeThreshold ?? 0.03; // threshold for binarization
+    const veilFinalBlur = veP.veilFinalBlur ?? 8;       // blur after binarization for smooth edges
+    const haRedBoost = veP.haRedBoost ?? 0;             // inject Ha into R channel through veil mask (0 = disabled)
+    const haBlurSigma = veP.haBlurSigma ?? 0;           // blur Ha before injection (0 = raw Ha; >0 = extend wings via Gaussian)
+
+    // Determine mask source view
+    let maskSourceView = targetName;
+    if (maskSource === 'ha') {
+      const haCheck = await pjsr(`var w = ImageWindow.windowById('Ha_work'); w.isNull ? 'no' : 'yes';`);
+      if (haCheck.outputs?.consoleOutput?.trim() === 'yes') {
+        maskSourceView = 'Ha_work';
+      } else {
+        log(`\n==== PHASE 11h3: VEIL ENHANCEMENT (Ha_work not available — falling back to luminance) ====`);
+      }
+    }
+    log(`\n==== PHASE 11h3: VEIL ENHANCEMENT (source=${maskSourceView === 'Ha_work' ? 'Ha' : 'lum'}, fullClip=${fullClipLow}, coreClip=${coreClipLow}, fullBlur=${fullMaskBlur}, coreBlur=${coreMaskBlur}, binarize=${binarize}, haRed=${haRedBoost}, lum×${lightnessBoost}, sat×${satBoost}) ====`);
+
+    // ---- Create veil mask (binary or continuous) ----
+    let veilMaskId = null;
+
+    if (binarize) {
+      // BINARY MASK APPROACH: Create masks directly from background-subtracted Ha_work.
+      // fullMaskClipLow/coreMaskClipLow = signal ABOVE background (median) for each threshold.
+      // This avoids clipLow rescaling issues — background becomes exactly 0.
+      const dimR = await pjsr(`
+        var srcW = ImageWindow.windowById('${maskSourceView}');
+        if (srcW.isNull) throw new Error('Source not found: ${maskSourceView}');
+        var img = srcW.mainView.image;
+        JSON.stringify({ w: Math.round(img.width), h: Math.round(img.height), med: img.median() });
+      `);
+      const dims = JSON.parse(dimR.outputs?.consoleOutput?.trim() || '{}');
+      const haMed = dims.med;
+      log('  Ha_work median (background): ' + haMed.toFixed(4));
+
+      // Step 1: Binary full mask — subtract bg → blur (smooth noise) → binarize at threshold
+      // Order matters: blur AFTER subtract kills per-pixel noise while preserving coherent nebula signal
+      const fullMaskId = 'mask_veil_full';
+      r = await pjsr(`
+        var old = ImageWindow.windowById('${fullMaskId}');
+        if (!old.isNull) old.forceClose();
+        var mw = new ImageWindow(${dims.w}, ${dims.h}, 1, 32, true, false, '${fullMaskId}');
+        mw.show();
+        // Copy Ha and subtract background
+        var PM = new PixelMath;
+        PM.expression = 'max(0, ${maskSourceView} - ${haMed.toFixed(6)})';
+        PM.useSingleExpression = true;
+        PM.createNewImage = false;
+        PM.use64BitWorkingImage = true;
+        PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1;
+        PM.executeOn(mw.mainView);
+        // Blur to smooth noise (coherent nebula signal survives, random noise averages to ~0)
+        ${fullMaskBlur > 0 ? `var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = ${fullMaskBlur}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(mw.mainView);` : ''}
+        // Binarize: fullClipLow is signal above smoothed noise floor
+        var PM2 = new PixelMath;
+        PM2.expression = 'iif($T > ${fullClipLow.toFixed(6)}, 1, 0)';
+        PM2.useSingleExpression = true;
+        PM2.createNewImage = false;
+        PM2.truncate = true; PM2.truncateLower = 0; PM2.truncateUpper = 1;
+        PM2.executeOn(mw.mainView);
+        var img = mw.mainView.image;
+        'full binary: max=' + img.maximum().toFixed(4) + ' median=' + img.median().toFixed(4);
+      `);
+      log('  Full mask (bg-sub → blur=' + fullMaskBlur + ' → threshold=' + fullClipLow + '): ' + (r.outputs?.consoleOutput || r.error?.message || 'Done.'));
+      await savePreview(fullMaskId, 'mask_veil_full_binary');
+
+      // Step 2: Binary core mask — same approach with higher threshold
+      const coreMaskId = 'mask_veil_core';
+      r = await pjsr(`
+        var old = ImageWindow.windowById('${coreMaskId}');
+        if (!old.isNull) old.forceClose();
+        var mw = new ImageWindow(${dims.w}, ${dims.h}, 1, 32, true, false, '${coreMaskId}');
+        mw.show();
+        var PM = new PixelMath;
+        PM.expression = 'max(0, ${maskSourceView} - ${haMed.toFixed(6)})';
+        PM.useSingleExpression = true;
+        PM.createNewImage = false;
+        PM.use64BitWorkingImage = true;
+        PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1;
+        PM.executeOn(mw.mainView);
+        ${coreMaskBlur > 0 ? `var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = ${coreMaskBlur}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(mw.mainView);` : ''}
+        var PM2 = new PixelMath;
+        PM2.expression = 'iif($T > ${coreClipLow.toFixed(6)}, 1, 0)';
+        PM2.useSingleExpression = true;
+        PM2.createNewImage = false;
+        PM2.truncate = true; PM2.truncateLower = 0; PM2.truncateUpper = 1;
+        PM2.executeOn(mw.mainView);
+        var img = mw.mainView.image;
+        'core binary: max=' + img.maximum().toFixed(4) + ' median=' + img.median().toFixed(4);
+      `);
+      log('  Core mask (bg-sub → blur=' + coreMaskBlur + ' → threshold=' + coreClipLow + '): ' + (r.outputs?.consoleOutput || r.error?.message || 'Done.'));
+      await savePreview(coreMaskId, 'mask_veil_core_binary');
+
+      // Step 3: Subtract binary core from binary full → extensions only
+      r = await pjsr(`
+        var fullW = ImageWindow.windowById('${fullMaskId}');
+        var PM = new PixelMath;
+        PM.expression = 'max(0, ${fullMaskId} - ${coreMaskId})';
+        PM.useSingleExpression = true;
+        PM.createNewImage = false;
+        PM.use64BitWorkingImage = true;
+        PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1;
+        PM.executeOn(fullW.mainView);
+        var img = fullW.mainView.image;
+        'extensions: max=' + img.maximum().toFixed(4) + ' median=' + img.median().toFixed(4);
+      `);
+      log('  Binary subtraction (full - core): ' + (r.outputs?.consoleOutput || r.error?.message || 'Done.'));
+      await closeMask(coreMaskId);
+
+      // Step 4: Smooth extensions mask edges
+      if (veilFinalBlur > 0) {
+        r = await pjsr(`
+          var fullW = ImageWindow.windowById('${fullMaskId}');
+          var conv = new Convolution;
+          conv.mode = Convolution.prototype.Parametric;
+          conv.sigma = ${veilFinalBlur.toFixed(1)};
+          conv.shape = 2.0;
+          conv.aspectRatio = 1.0;
+          conv.rotationAngle = 0;
+          conv.executeOn(fullW.mainView);
+          var img = fullW.mainView.image;
+          'smoothed: max=' + img.maximum().toFixed(4) + ' median=' + img.median().toFixed(4);
+        `);
+        log('  Smooth edges (blur=' + veilFinalBlur + '): ' + (r.outputs?.consoleOutput || r.error?.message || 'Done.'));
+      }
+
+      veilMaskId = fullMaskId;
+      await savePreview(veilMaskId, 'mask_veil');
+
+    } else {
+      // CONTINUOUS MASK APPROACH: createLumMask → subtract → normalize
+      const fullMaskId = await createLumMask(maskSourceView, 'mask_veil_full', fullMaskBlur, fullClipLow, maskGamma);
+      const coreMaskId = await createLumMask(maskSourceView, 'mask_veil_core', coreMaskBlur, coreClipLow, maskGamma);
+      if (fullMaskId && coreMaskId) {
+        await savePreview(coreMaskId, 'mask_veil_core');
+        r = await pjsr(`
+          var fullW = ImageWindow.windowById('${fullMaskId}');
+          var PM = new PixelMath;
+          PM.expression = 'max(0, ${fullMaskId} - ${coreMaskId})';
+          PM.useSingleExpression = true;
+          PM.createNewImage = false;
+          PM.use64BitWorkingImage = true;
+          PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1;
+          PM.executeOn(fullW.mainView);
+          var img = fullW.mainView.image;
+          var mx = img.maximum();
+          if (mx > 0 && mx < 1) {
+            var PM2 = new PixelMath;
+            PM2.expression = '$T/' + mx.toFixed(8);
+            PM2.useSingleExpression = true;
+            PM2.createNewImage = false;
+            PM2.truncate = true; PM2.truncateLower = 0; PM2.truncateUpper = 1;
+            PM2.executeOn(fullW.mainView);
+          }
+          'subtracted+normalized: max=' + img.maximum().toFixed(4) + ' median=' + img.median().toFixed(4);
+        `);
+        log('  Continuous subtraction: ' + (r.outputs?.consoleOutput || r.error?.message || 'Done.'));
+        await closeMask(coreMaskId);
+        veilMaskId = fullMaskId;
+        await savePreview(veilMaskId, 'mask_veil');
+      }
+    }
+
+    // ---- Apply veil mask: Ha injection + lightness/saturation boost ----
+    if (veilMaskId) {
+      // Step 5a: Inject blurred Ha into R channel BEFORE mask (broad, self-tapering)
+      if (haRedBoost > 0 && maskSourceView === 'Ha_work') {
+        let haSourceId = 'Ha_work';
+
+        if (haBlurSigma > 0) {
+          log('  Creating blurred Ha (sigma=' + haBlurSigma + ') for broad wing injection...');
+          r = await pjsr(`
+            var old = ImageWindow.windowById('Ha_blur');
+            if (!old.isNull) old.forceClose();
+            var haW = ImageWindow.windowById('Ha_work');
+            var haImg = haW.mainView.image;
+            var w = Math.round(haImg.width);
+            var h = Math.round(haImg.height);
+            var blurW = new ImageWindow(w, h, 1, 32, true, false, 'Ha_blur');
+            blurW.show();
+            var PM = new PixelMath;
+            PM.expression = 'Ha_work';
+            PM.useSingleExpression = true;
+            PM.createNewImage = false;
+            PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1;
+            PM.executeOn(blurW.mainView);
+            var med = haImg.median();
+            var PM2 = new PixelMath;
+            PM2.expression = 'max(0, $T - ' + med.toFixed(6) + ')';
+            PM2.useSingleExpression = true;
+            PM2.createNewImage = false;
+            PM2.truncate = true; PM2.truncateLower = 0; PM2.truncateUpper = 1;
+            PM2.executeOn(blurW.mainView);
+            var conv = new Convolution;
+            conv.mode = Convolution.prototype.Parametric;
+            conv.sigma = ${haBlurSigma.toFixed(1)};
+            conv.shape = 2.0;
+            conv.aspectRatio = 1.0;
+            conv.rotationAngle = 0;
+            conv.executeOn(blurW.mainView);
+            var blurImg = blurW.mainView.image;
+            var mx = blurImg.maximum();
+            if (mx > 0) {
+              var PM3 = new PixelMath;
+              PM3.expression = '$T / ' + mx.toFixed(8);
+              PM3.useSingleExpression = true;
+              PM3.createNewImage = false;
+              PM3.truncate = true; PM3.truncateLower = 0; PM3.truncateUpper = 1;
+              PM3.executeOn(blurW.mainView);
+            }
+            'Ha_blur created: bg_sub=' + med.toFixed(4) + ' blur=' + ${haBlurSigma.toFixed(1)} + ' max_pre=' + mx.toFixed(4);
+          `);
+          log('  ' + (r.outputs?.consoleOutput || r.error?.message || 'Done.'));
+          await savePreview('Ha_blur', 'ha_blur');
+          haSourceId = 'Ha_blur';
+        }
+
+        r = await pjsr(`
+          var PM = new PixelMath;
+          PM.expression = '$T[0] + ${haRedBoost.toFixed(4)} * ${haSourceId}';
+          PM.expression1 = '$T[1]';
+          PM.expression2 = '$T[2]';
+          PM.useSingleExpression = false;
+          PM.createNewImage = false;
+          PM.use64BitWorkingImage = true;
+          PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1;
+          PM.executeOn(ImageWindow.windowById('${targetName}').mainView);
+        `);
+        log('  Ha red injection (×' + haRedBoost + ' from ' + haSourceId + '): ' + (r.status === 'error' ? 'WARN: ' + r.error.message : 'Done.'));
+
+        if (haBlurSigma > 0) {
+          await pjsr(`var w = ImageWindow.windowById('Ha_blur'); if (!w.isNull) w.forceClose();`);
+        }
+      }
+
+      // Step 5b: Apply veil mask for lightness/sat boost
+      await applyMask(targetName, veilMaskId, false);
+
+      if (lightnessBoost !== 1.0) {
+        const lum = '(0.2126*$T[0]+0.7152*$T[1]+0.0722*$T[2])';
+        const boostExpr = `$T * max(${lum} * ${lightnessBoost.toFixed(4)}, 0.00001) / max(${lum}, 0.00001)`;
+        r = await pjsr(`
+          var PM = new PixelMath;
+          PM.expression = '${boostExpr}';
+          PM.useSingleExpression = true;
+          PM.createNewImage = false;
+          PM.use64BitWorkingImage = true;
+          PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1;
+          PM.executeOn(ImageWindow.windowById('${targetName}').mainView);
+        `);
+        log('  Lightness boost (×' + lightnessBoost + '): ' + (r.status === 'error' ? 'WARN: ' + r.error.message : 'Done.'));
+      }
+
+      if (satBoost !== 1.0) {
+        const lumAfter = '(0.2126*$T[0]+0.7152*$T[1]+0.0722*$T[2])';
+        const satR = `max(0,${lumAfter}+${satBoost.toFixed(4)}*($T[0]-${lumAfter}))`;
+        const satG = `max(0,${lumAfter}+${satBoost.toFixed(4)}*($T[1]-${lumAfter}))`;
+        const satB = `max(0,${lumAfter}+${satBoost.toFixed(4)}*($T[2]-${lumAfter}))`;
+        r = await pjsr(`
+          var PM = new PixelMath;
+          PM.expression = '${satR}';
+          PM.expression1 = '${satG}';
+          PM.expression2 = '${satB}';
+          PM.useSingleExpression = false;
+          PM.createNewImage = false;
+          PM.use64BitWorkingImage = true;
+          PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1;
+          PM.executeOn(ImageWindow.windowById('${targetName}').mainView);
+        `);
+        log('  Saturation boost (×' + satBoost + '): ' + (r.status === 'error' ? 'WARN: ' + r.error.message : 'Done.'));
+      }
+
+      await removeMask(targetName);
+      await closeMask(veilMaskId);
+      await savePreview(targetName, 'veil_enhance');
+    } else {
+      log('  WARN: Could not create veil mask — skipping veil enhancement.');
+    }
+    await purgeUndoHistory(targetName);
+    await checkMemory('veil_enhance');
+  } else if (!isEnabled('veil_enhance')) {
+    log('\n==== PHASE 11h3: VEIL ENHANCEMENT (SKIPPED) ====');
+  }
+
   // ==== PHASE 11i: FINAL NXT (clean up noise amplified by LHE/HDRMT/curves) ====
   if (isEnabled('nxt_final') && !shouldSkip('nxt_final')) {
     const nxtFP = P('nxt_final');
@@ -3483,6 +3865,87 @@ async function run() {
     await checkMemory('bg_neutralize');
   } else if (!isEnabled('bg_neutralize')) {
     log('\n==== PHASE 12_bg: BACKGROUND NEUTRALIZE (SKIPPED) ====');
+  }
+
+  // ==== PHASE 12_oiii: OIII VEIL ENHANCEMENT (self-referencing starless mask) ====
+  // Creates a mask from the CURRENT starless image's blue excess (B - max(R,G)).
+  // Since SXT already removed stars, any blue excess is real nebulosity — no star contamination.
+  // Then applies selective color shift (blue → green/teal for SHO palette) through the mask.
+  if (isEnabled('oiii_enhance') && !shouldSkip('oiii_enhance')) {
+    const oP = P('oiii_enhance');
+    const maskBlur = oP.maskBlur ?? 15;        // moderate blur for smooth edges (no heavy blur needed — starless!)
+    const maskClipLow = oP.maskClipLow ?? 0.01;
+    const greenShift = oP.greenShift ?? 0.40;  // how much to shift G toward B level (0-1)
+    const blueReduce = oP.blueReduce ?? 0.15;  // how much to reduce B (0-1)
+    const satBoost = oP.satBoost ?? 1.30;       // saturation multiplier in masked region
+    log(`\n==== PHASE 12_oiii: OIII VEIL ENHANCEMENT (greenShift=${greenShift}, blueReduce=${blueReduce}, sat=${satBoost}) ====`);
+    log(`  Mask source: ${targetName} (starless — no star contamination)`);
+
+    {
+      // Step 1: Create OIII veil mask from current starless target image
+      const oiiiMaskId = await createOiiiMask(targetName, 'mask_oiii_veil', maskBlur, maskClipLow);
+
+      if (oiiiMaskId) {
+        // Save mask preview
+        await savePreview(oiiiMaskId, 'mask_oiii_veil');
+
+        // Step 2: Apply mask to target
+        await applyMask(targetName, oiiiMaskId, false);
+
+        // Step 3: Color shift — blue toward green/teal (SHO palette style)
+        // G_new = G + greenShift * max(0, B - G)  → shift green toward blue level
+        // B_new = B * (1 - blueReduce)             → reduce blue intensity
+        // Then saturation boost: channel = lum + satBoost * (channel - lum)
+        const lum = '(0.2126*$T[0]+0.7152*$T[1]+0.0722*$T[2])';
+        // First pass: color shift
+        const shiftR = '$T[0]';  // red untouched
+        const shiftG = `$T[1]+${greenShift.toFixed(4)}*max(0,$T[2]-$T[1])`;  // G shifts toward B
+        const shiftB = `$T[2]*${(1 - blueReduce).toFixed(4)}`;  // B reduced
+        log(`  Color shift: G += ${greenShift} * (B-G), B *= ${(1 - blueReduce).toFixed(2)}`);
+
+        r = await pjsr(`
+          var PM = new PixelMath;
+          PM.expression = '${shiftR}';
+          PM.expression1 = '${shiftG}';
+          PM.expression2 = '${shiftB}';
+          PM.useSingleExpression = false;
+          PM.createNewImage = false;
+          PM.use64BitWorkingImage = true;
+          PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1;
+          PM.executeOn(ImageWindow.windowById('${targetName}').mainView);
+        `);
+        log('  Color shift: ' + (r.status === 'error' ? 'WARN: ' + r.error.message : 'Done.'));
+
+        // Second pass: saturation boost in mask region
+        if (satBoost !== 1.0) {
+          const lumAfter = '(0.2126*$T[0]+0.7152*$T[1]+0.0722*$T[2])';
+          const satR = `max(0,${lumAfter}+${satBoost.toFixed(4)}*($T[0]-${lumAfter}))`;
+          const satG = `max(0,${lumAfter}+${satBoost.toFixed(4)}*($T[1]-${lumAfter}))`;
+          const satB = `max(0,${lumAfter}+${satBoost.toFixed(4)}*($T[2]-${lumAfter}))`;
+          log(`  Saturation boost: ×${satBoost}`);
+          r = await pjsr(`
+            var PM = new PixelMath;
+            PM.expression = '${satR}';
+            PM.expression1 = '${satG}';
+            PM.expression2 = '${satB}';
+            PM.useSingleExpression = false;
+            PM.createNewImage = false;
+            PM.use64BitWorkingImage = true;
+            PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1;
+            PM.executeOn(ImageWindow.windowById('${targetName}').mainView);
+          `);
+          log('  Saturation: ' + (r.status === 'error' ? 'WARN: ' + r.error.message : 'Done.'));
+        }
+
+        // Cleanup
+        await removeMask(targetName);
+        await closeMask(oiiiMaskId);
+        await purgeUndoHistory(targetName);
+      }
+      await savePreview(targetName, 'oiii_enhance');
+    }
+  } else if (!isEnabled('oiii_enhance')) {
+    log('\n==== PHASE 12_oiii: OIII VEIL ENHANCEMENT (SKIPPED) ====');
   }
 
   // ==== PHASE 12b: STAR REDUCTION (remove smallest stars via threshold + morphological erosion) ====
