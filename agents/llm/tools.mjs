@@ -830,14 +830,14 @@ const TOOL_CATALOG = {
       }
     },
     handler: async (ctx, _store, _brief, input) => {
-      // Map channel name to CurvesTransformation channel index
-      const channelMap = { R: 0, G: 1, B: 2, RGB: 3, L: 4, S: 5 };
-      const chIdx = channelMap[input.channel] ?? 3;
+      // CurvesTransformation PJSR properties: R, G, B, K (RGB/K combined), L, S
+      // Each is an array of [x, y] control points. Kt, Lt, St etc. set interpolation type.
+      const channelProp = { R: 'R', G: 'G', B: 'B', RGB: 'K', L: 'L', S: 'S' };
+      const prop = channelProp[input.channel] || 'K';
       const pts = input.points.map(p => `[${p[0]},${p[1]}]`).join(',');
       await ctx.pjsr(`
         var P = new CurvesTransformation;
-        P.ct = [[],[],[],[],[],[]];
-        P.ct[${chIdx}] = [${pts}];
+        P.${prop} = [${pts}];
         P.executeOn(ImageWindow.windowById('${input.view_id}').mainView);
       `);
       const stats = await getStats(ctx, input.view_id);
@@ -968,6 +968,75 @@ const TOOL_CATALOG = {
         `${v.variantId}: median=${v.metrics?.median?.toFixed(6) || '?'}, uniformity=${v.metrics?.uniformity?.toFixed(6) || '?'}`
       ).join('\n');
       return { type: 'text', text: summary || 'No variants saved yet.' };
+    }
+  },
+
+  // --- LRGB combine ---
+  lrgb_combine: {
+    category: 'lrgb',
+    definition: {
+      name: 'lrgb_combine',
+      description: 'Combine a processed luminance channel with the RGB image via luminance replacement. This dramatically improves detail and reveals faint structure (IFN). The L channel should be stretched and enhanced before combining. lightness=0.55 for spirals, 0.35 for edge-on. CRITICAL: L must be LinearFit to RGB luminance first to avoid veil effect.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          rgb_id: { type: 'string', description: 'RGB color image view ID' },
+          l_id: { type: 'string', description: 'Processed luminance view ID (must be grayscale, stretched)' },
+          lightness: { type: 'number', description: 'Luminance weight (0.0-1.0, default 0.55 for spirals, 0.35 for edge-on)' },
+          saturation: { type: 'number', description: 'Saturation preservation (0.0-1.0, default 0.80)' }
+        },
+        required: ['rgb_id', 'l_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const lightness = input.lightness ?? 0.55;
+      const saturation = input.saturation ?? 0.80;
+
+      // Step 1: LinearFit L to RGB luminance (prevents veil effect)
+      await ctx.pjsr(`
+        var rgbW = ImageWindow.windowById('${input.rgb_id}');
+        var lW = ImageWindow.windowById('${input.l_id}');
+        if (rgbW.isNull) throw new Error('RGB not found: ${input.rgb_id}');
+        if (lW.isNull) throw new Error('L not found: ${input.l_id}');
+
+        // Extract RGB luminance for LinearFit reference
+        var img = rgbW.mainView.image;
+        var w = img.width, h = img.height;
+        var lumRef = new ImageWindow(w, h, 1, 32, true, false, 'lrgb_lum_ref');
+        lumRef.show();
+        var PM = new PixelMath;
+        PM.expression = '0.2126*${input.rgb_id}[0] + 0.7152*${input.rgb_id}[1] + 0.0722*${input.rgb_id}[2]';
+        PM.useSingleExpression = true;
+        PM.createNewImage = false;
+        PM.executeOn(lumRef.mainView);
+
+        // LinearFit L to RGB luminance
+        var LF = new LinearFit;
+        LF.referenceViewId = 'lrgb_lum_ref';
+        LF.rejectHigh = 0.92;
+        LF.executeOn(lW.mainView);
+
+        lumRef.forceClose();
+        'LinearFit done';
+      `);
+
+      // Step 2: LRGB combine via PixelMath (luminance replacement)
+      // Formula: RGB * max(Y_blend, 0.00001) / max(Y_original, 0.00001)
+      // where Y_blend = (1-lightness)*Y_original + lightness*L
+      await ctx.pjsr(`
+        var l = ${lightness};
+        var PM = new PixelMath;
+        PM.expression = "Y = 0.2126*$T[0] + 0.7152*$T[1] + 0.0722*$T[2]; Y_blend = (1-${lightness})*Y + ${lightness}*${input.l_id}; $T * max(Y_blend, 0.00001) / max(Y, 0.00001)";
+        PM.symbols = "Y, Y_blend";
+        PM.useSingleExpression = true;
+        PM.use64BitWorkingImage = true;
+        PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1;
+        PM.createNewImage = false;
+        PM.executeOn(ImageWindow.windowById('${input.rgb_id}').mainView);
+      `);
+
+      const stats = await getStats(ctx, input.rgb_id);
+      return { type: 'text', text: `LRGB combined (lightness=${lightness}, saturation=${saturation}). Stats: median=${stats.median.toFixed(6)}, max=${(stats.max ?? 0).toFixed(4)}` };
     }
   },
 
@@ -1431,10 +1500,10 @@ const TOOL_CATALOG = {
 const AGENT_TOOL_CATEGORIES = {
   readiness: ['measurement', 'readiness', 'image_mgmt', 'memory', 'control'],
   rgb_cleanliness: ['measurement', 'preview', 'image_mgmt', 'gradient', 'denoise', 'sharpen', 'stretch', 'calibration', 'memory', 'artifacts', 'control'],
-  luminance_detail: ['measurement', 'preview', 'image_mgmt', 'detail', 'masks', 'denoise', 'memory', 'artifacts', 'control'],
+  luminance_detail: ['measurement', 'preview', 'image_mgmt', 'detail', 'masks', 'denoise', 'sharpen', 'stretch', 'gradient', 'calibration', 'readiness', 'memory', 'artifacts', 'control'],
   star_policy: ['measurement', 'preview', 'image_mgmt', 'star_removal', 'stretch', 'curves', 'memory', 'artifacts', 'control'],
   ha_integration: ['measurement', 'preview', 'image_mgmt', 'gradient', 'denoise', 'sharpen', 'stretch', 'masks', 'ha_injection', 'memory', 'artifacts', 'control'],
-  composition: ['measurement', 'preview', 'image_mgmt', 'curves', 'stars', 'memory', 'artifacts', 'control'],
+  composition: ['measurement', 'preview', 'image_mgmt', 'curves', 'stars', 'lrgb', 'memory', 'artifacts', 'control'],
   aesthetic_critic: ['measurement', 'memory', 'control', 'scoring'],
   technical_critic: ['measurement', 'memory', 'control', 'scoring'],
 };

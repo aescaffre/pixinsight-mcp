@@ -7,7 +7,7 @@
     "R": "/Users/aescaffre/Bode II/claude/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-R_mono_autocrop.xisf",
     "G": "/Users/aescaffre/Bode II/claude/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-V_mono_autocrop.xisf",
     "B": "/Users/aescaffre/Bode II/claude/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-B_mono_autocrop.xisf",
-    "Ha": "",
+    "Ha": "/Users/aescaffre/Bode II/claude/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-HAlpha_mono_autocrop.xisf",
     "outputDir": "/Users/aescaffre/Bode II/output/agentic",
     "targetName": "M81"
   }

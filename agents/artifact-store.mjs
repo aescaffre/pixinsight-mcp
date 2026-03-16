@@ -249,6 +249,31 @@ export class ArtifactStore {
   }
 
   /**
+   * Record completion of a pipeline stage for resume support.
+   */
+  recordStageCompletion(stageIndex, agentName, winnerId, artifactId, extras = {}) {
+    if (!this.manifest.stageProgress) this.manifest.stageProgress = [];
+    this.manifest.stageProgress.push({
+      stageIndex,
+      agentName,
+      winnerId,
+      artifactId,
+      ...extras,
+      completedAt: new Date().toISOString()
+    });
+    this._saveManifest();
+  }
+
+  /**
+   * Get the last completed stage for resume.
+   * @returns {{ stageIndex, agentName, winnerId, artifactId, ... } | null}
+   */
+  getLastCompletedStage() {
+    const progress = this.manifest.stageProgress || [];
+    return progress.length > 0 ? progress[progress.length - 1] : null;
+  }
+
+  /**
    * Finalize the run.
    */
   finalize(finalArtifactId) {

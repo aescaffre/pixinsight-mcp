@@ -5,6 +5,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import crypto from 'crypto';
+import { BridgeCrashError } from '../ops/bridge.mjs';
 
 const DEFAULT_MODEL = 'claude-sonnet-4-20250514';
 
@@ -314,8 +315,10 @@ export class LLMAgent {
   async run(initialContent) {
     this.startTime = Date.now();
     this.messages = [{ role: 'user', content: initialContent }];
+    this.crashError = null;
     this._log(`Starting (model=${this.model}, maxTurns=${this.budget.maxTurns})`);
 
+    try { // Crash detection wrapper — BridgeCrashError propagates out
     while (true) {
       // Budget check
       const budgetStatus = this._checkBudget();
@@ -392,11 +395,22 @@ export class LLMAgent {
       }
     }
 
+    } catch (err) {
+      if (err instanceof BridgeCrashError || err?.isCrash) {
+        this._log(`CRASH DETECTED: ${err.message}`);
+        this.crashError = err;
+        // Don't rethrow — return gracefully so orchestrator can handle resume
+      } else {
+        throw err; // Non-crash errors propagate normally
+      }
+    }
+
     const elapsed = Date.now() - this.startTime;
     this._log(`Completed in ${this.turnCount} turns, ${Math.round(elapsed / 1000)}s`);
 
     return {
       finishResult: this.finishResult,
+      crashError: this.crashError,
       transcript: this.transcript,
       turnCount: this.turnCount,
       elapsedMs: elapsed,
@@ -445,6 +459,8 @@ export class LLMAgent {
       if (result && result.type) return [result];
       return [{ type: 'text', text: String(result) }];
     } catch (err) {
+      // Crash errors must propagate — don't swallow them as text
+      if (err instanceof BridgeCrashError || err?.isCrash) throw err;
       this._log(`Tool error (${name}): ${err.message}`);
       return [{ type: 'text', text: `Error: ${err.message}` }];
     }

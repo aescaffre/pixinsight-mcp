@@ -37,7 +37,7 @@ if (fs.existsSync(envPath)) {
   }
 }
 
-import { createBridgeContext } from '../ops/bridge.mjs';
+import { createBridgeContext, BridgeCrashError } from '../ops/bridge.mjs';
 import { getStats, measureUniformity } from '../ops/stats.mjs';
 import { ArtifactStore } from '../artifact-store.mjs';
 import { generateBrief } from '../classifier.mjs';
@@ -97,6 +97,7 @@ function parseArgs() {
     else if (args[i] === '--dry-run') opts.dryRun = true;
     else if (args[i] === '--skip-critics') opts.skipCritics = true;
     else if (args[i] === '--critic-model' && args[i + 1]) opts.criticModel = args[++i];
+    else if (args[i] === '--resume') opts.resume = true;
   }
   return opts;
 }
@@ -182,6 +183,12 @@ Process the image view \`${targetViewId}\` according to the processing brief.
     });
 
     const doerResult = await doer.run(initialContent);
+
+    // Check for PI crash during agent execution
+    if (doerResult.crashError) {
+      throw doerResult.crashError; // Propagate to orchestrator for resume handling
+    }
+
     const doerFinish = doerResult.finishResult;
 
     if (!doerFinish) {
@@ -268,6 +275,7 @@ Target: **${brief.target.name}** (${brief.target.classification})
     });
 
     const aestheticResult = await aestheticCritic.run(criticContent);
+    if (aestheticResult.crashError) throw aestheticResult.crashError;
 
     // Save critic transcript
     fs.writeFileSync(
@@ -388,71 +396,154 @@ async function orchestrate() {
     return;
   }
 
-  // --- Live status header ---
+  const F = config.files;
+  const targetName = F.targetName || 'Target';
   const targetDisplayName = config.files?.targetName || config.name;
+
+  // --- Resume logic ---
+  let resumeFromStage = 0; // 0 = start from scratch
+  let starsViewId = null;
+
+  if (opts.resume) {
+    const lastStage = store.getLastCompletedStage();
+    if (!lastStage) {
+      console.log('  No completed stages found — starting from scratch');
+    } else {
+      resumeFromStage = lastStage.stageIndex + 1;
+      console.log(`  Resuming from stage ${resumeFromStage} (last completed: stage ${lastStage.stageIndex} — ${lastStage.agentName})`);
+
+      // Wait for PixInsight to be ready
+      console.log('  Waiting for PixInsight watcher...');
+      for (let i = 0; i < 60; i++) {
+        if (await ctx.ping(5000)) { console.log('  PixInsight ready!'); break; }
+        if (i === 59) { console.error('  PixInsight not responding after 5 minutes. Exiting.'); process.exit(1); }
+        await new Promise(r => setTimeout(r, 5000));
+      }
+
+      // Load the last completed stage's winner XISF into PixInsight
+      const variants = store.listVariants(lastStage.agentName);
+      if (variants.length > 0) {
+        const lastVariant = variants[variants.length - 1];
+        if (lastVariant.xisfPath && fs.existsSync(lastVariant.xisfPath)) {
+          console.log(`  Loading last variant: ${lastVariant.xisfPath}`);
+          await ctx.send('open_image', '__internal__', { filePath: lastVariant.xisfPath });
+          // Close crop masks
+          const imgs = await ctx.listImages();
+          for (const cm of imgs.filter(i => i.id.includes('crop_mask'))) {
+            await ctx.pjsr(`var w=ImageWindow.windowById('${cm.id}');if(!w.isNull)w.forceClose();`);
+          }
+          // Rename to target name
+          const loaded = await ctx.listImages();
+          const colorLoaded = loaded.find(i => i.isColor) || loaded[0];
+          if (colorLoaded && colorLoaded.id !== targetName) {
+            await ctx.pjsr(`var w = ImageWindow.windowById('${colorLoaded.id}'); if (!w.isNull) w.mainView.id = '${targetName}';`);
+          }
+          console.log(`  Restored: ${targetName}`);
+        } else {
+          console.log('  WARNING: No XISF found for last variant. Starting from scratch.');
+          resumeFromStage = 0;
+        }
+      } else {
+        console.log('  WARNING: No variants found for last stage. Starting from scratch.');
+        resumeFromStage = 0;
+      }
+
+      // Restore starsViewId if star_policy completed
+      const starStage = (store.manifest.stageProgress || []).find(s => s.agentName === 'star_policy');
+      if (starStage?.starsViewId) starsViewId = starStage.starsViewId;
+    }
+  }
+
+  // --- Live status header ---
   const statusLines = [
     `# ${targetDisplayName} — Live Status`,
     `> Run: ${store.runId}  `,
     `> Started: ${new Date().toISOString()}  `,
     `> Model: ${opts.model || 'claude-sonnet-4-20250514'}`,
+    resumeFromStage > 0 ? `> **RESUMED** from stage ${resumeFromStage}` : '',
     '',
-  ];
+  ].filter(Boolean);
+  // Re-add completed stage lines from manifest
+  if (resumeFromStage > 0) {
+    for (const s of (store.manifest.stageProgress || [])) {
+      statusLines.push(`## Stage ${s.stageIndex}: ${s.agentName.replace(/_/g, ' ')} ✅ (resumed)`);
+    }
+  }
   updateLiveStatus(store, statusLines);
 
   // --- Stage 1: Readiness Agent ---
-  // The readiness agent opens masters, inspects them, aligns if needed, and combines RGB.
-  // It decides what to do based on what it sees — no hardcoded workflow.
-  console.log('\n--- Stage 1: Readiness Agent ---');
-  const F = config.files;
-  const targetName = F.targetName || 'Target';
-
-  statusLines.push('## Stage 1: Readiness — running');
-  updateLiveStatus(store, statusLines);
-  statusLines.pop();
-
-  const readinessAgent = new LLMAgent('readiness', {
-    systemPrompt: buildReadinessPrompt(brief, config),
-    tools: buildToolSet('readiness'),
-    model: opts.model,
-    budget: { maxTurns: 15, maxWallClockMs: 15 * 60_000 },
-    store,
-    brief,
-    ctx,
-  });
-
-  const readinessResult = await readinessAgent.run([{
-    type: 'text',
-    text: `Prepare the input masters for processing. The target view name should be \`${targetName}\`. Open the files, inspect them, handle any issues, and produce a combined RGB color image.`
-  }]);
-
-  // Save transcript
-  const transcriptDir0 = path.join(store.baseDir, 'transcripts');
-  fs.mkdirSync(transcriptDir0, { recursive: true });
-  fs.writeFileSync(
-    path.join(transcriptDir0, 'readiness.json'),
-    JSON.stringify(readinessResult.transcript, null, 2)
-  );
-
-  // Verify we have a combined color image
-  const allImgs = await ctx.listImages();
-  const colorImg = allImgs.find(i => i.isColor);
-  if (!colorImg) {
-    console.error('  Readiness failed — no color image produced');
-    console.error('  Available:', allImgs.map(i => `${i.id}(color=${i.isColor})`).join(', '));
-    statusLines.push('## Stage 1: Readiness ❌ FAILED — no color image produced');
+  if (resumeFromStage <= 1) {
+    console.log('\n--- Stage 1: Readiness Agent ---');
+    statusLines.push('## Stage 1: Readiness — running');
     updateLiveStatus(store, statusLines);
-    process.exit(1);
+    statusLines.pop();
+
+    const readinessAgent = new LLMAgent('readiness', {
+      systemPrompt: buildReadinessPrompt(brief, config),
+      tools: buildToolSet('readiness'),
+      model: opts.model,
+      budget: { maxTurns: 25, maxWallClockMs: 15 * 60_000 },
+      store,
+      brief,
+      ctx,
+    });
+
+    const readinessResult = await readinessAgent.run([{
+      type: 'text',
+      text: `Prepare the input masters for processing. The target view name should be \`${targetName}\`. Open the files, inspect them, handle any issues, and produce a combined RGB color image.`
+    }]);
+
+    if (readinessResult.crashError) {
+      statusLines.push('## Stage 1: Readiness ❌ CRASHED');
+      statusLines.push(`> Resume: \`--resume --run-id ${store.runId}\``);
+      updateLiveStatus(store, statusLines);
+      process.exit(77);
+    }
+
+    const transcriptDir0 = path.join(store.baseDir, 'transcripts');
+    fs.mkdirSync(transcriptDir0, { recursive: true });
+    fs.writeFileSync(path.join(transcriptDir0, 'readiness.json'), JSON.stringify(readinessResult.transcript, null, 2));
+
+    const allImgs = await ctx.listImages();
+    const colorImg = allImgs.find(i => i.isColor);
+    if (!colorImg) {
+      console.error('  Readiness failed — no color image produced');
+      statusLines.push('## Stage 1: Readiness ❌ FAILED — no color image produced');
+      updateLiveStatus(store, statusLines);
+      process.exit(1);
+    }
+    if (colorImg.id !== targetName) {
+      await ctx.pjsr(`var w = ImageWindow.windowById('${colorImg.id}'); if (!w.isNull) w.mainView.id = '${targetName}';`);
+    }
+    console.log(`  Readiness complete: ${targetName} (${colorImg.width}x${colorImg.height})`);
+    statusLines.push(`## Stage 1: Readiness ✅ (${readinessResult.turnCount} turns, ${fmtTime(readinessResult.elapsedMs)})`);
+    updateLiveStatus(store, statusLines);
+    store.recordStageCompletion(1, 'readiness', targetName, null);
+  } else {
+    console.log('\n--- Stage 1: Readiness — skipped (resumed) ---');
   }
-  if (colorImg.id !== targetName) {
-    await ctx.pjsr(`var w = ImageWindow.windowById('${colorImg.id}'); if (!w.isNull) w.mainView.id = '${targetName}';`);
+
+  // Close individual channel windows to free memory (if they're still open)
+  for (const id of ['FILTER_R', 'FILTER_G', 'FILTER_B', 'FILTER_Ha']) {
+    await ctx.pjsr(`var w=ImageWindow.windowById('${id}');if(!w.isNull)w.forceClose();`).catch(() => {});
   }
-  console.log(`  Readiness complete: ${targetName} (${colorImg.width}x${colorImg.height})`);
-  statusLines.push(`## Stage 1: Readiness ✅ (${readinessResult.turnCount} turns, ${fmtTime(readinessResult.elapsedMs)})`);
-  updateLiveStatus(store, statusLines);
+
+  // --- Crash-resilient stage runner ---
+  function handleCrash(stageIndex, stageName, err) {
+    console.error(`\n  CRASH at Stage ${stageIndex} (${stageName}): ${err.message}`);
+    statusLines.push(`## ❌ Stage ${stageIndex}: ${stageName} — CRASHED`);
+    statusLines.push(`> PixInsight crashed. Restart PI + watcher, then resume:`);
+    statusLines.push(`> \`node agents/llm/orchestrator.mjs --config ${opts.configPath} --resume --run-id ${store.runId}\``);
+    updateLiveStatus(store, statusLines);
+    process.exit(77); // Distinct exit code for crash (vs 1 for errors)
+  }
 
   // --- Stage 2: RGB Cleanliness Agent ---
+  let rgbResult;
+  if (resumeFromStage <= 2) {
   console.log('\n--- Stage 2: RGB Cleanliness Agent ---');
-  const rgbResult = await runDoerWithCritics(ctx, store, brief, {
+  try {
+  rgbResult = await runDoerWithCritics(ctx, store, brief, {
     doerName: 'rgb_cleanliness',
     doerPromptBuilder: buildRGBCleanlinessPrompt,
     targetViewId: targetName,
@@ -464,7 +555,9 @@ async function orchestrate() {
     stageIndex: 2,
     statusLines,
   });
+  } catch (err) { if (err?.isCrash) handleCrash(2, 'RGB Cleanliness', err); throw err; }
   console.log(`  Winner: ${rgbResult.winnerId} (score=${rgbResult.winnerScore?.toFixed(1) || 'N/A'}, attempts=${rgbResult.attempts})`);
+  store.recordStageCompletion(2, 'rgb_cleanliness', rgbResult.winnerId, null, { score: rgbResult.winnerScore });
 
   // Early abort: if RGB cleanliness exhausted all attempts with a bad score, stop
   const RGB_EARLY_ABORT_THRESHOLD = 50;
@@ -479,10 +572,14 @@ async function orchestrate() {
     process.exit(1);
   }
 
+  } else { rgbResult = { winnerId: targetName, winnerScore: null, attempts: 0 }; }
+
   // --- Stage 3: Star Policy Agent ---
-  // Decides whether to separate stars (SXT) or keep them. Binary decision.
+  if (resumeFromStage <= 3) {
   console.log('\n--- Stage 3: Star Policy Agent ---');
-  const starResult = await runDoerWithCritics(ctx, store, brief, {
+  let starResult;
+  try {
+  starResult = await runDoerWithCritics(ctx, store, brief, {
     doerName: 'star_policy',
     doerPromptBuilder: buildStarPolicyPrompt,
     targetViewId: rgbResult.winnerId || targetName,
@@ -493,18 +590,23 @@ async function orchestrate() {
     stageIndex: 3,
     statusLines,
   });
+  } catch (err) { if (err?.isCrash) handleCrash(3, 'Star Policy', err); throw err; }
   console.log(`  Winner: ${starResult.winnerId} (attempts=${starResult.attempts})`);
+  store.recordStageCompletion(3, 'star_policy', starResult.winnerId, null);
   // Check if stars were separated (look for a stars view)
   const postStarImgs = await ctx.listImages();
   const starsView = postStarImgs.find(i => i.id.includes('stars') || i.id.includes('star'));
   const starsViewId = starsView?.id || null;
   if (starsViewId) console.log(`  Stars image: ${starsViewId}`);
 
+  } else { starResult = { winnerId: targetName, attempts: 0 }; }
+
   // --- Stage 4: Ha Integration Agent (if Ha data available) ---
   const hasHa = !!(F.Ha?.trim());
   let haResult = null;
-  if (hasHa) {
+  if (hasHa && resumeFromStage <= 4) {
     console.log('\n--- Stage 4: Ha Integration Agent ---');
+    try {
     haResult = await runDoerWithCritics(ctx, store, brief, {
       doerName: 'ha_integration',
       doerPromptBuilder: (b) => buildHaIntegrationPrompt(b, config),
@@ -517,18 +619,23 @@ async function orchestrate() {
       stageIndex: 4,
       statusLines,
     });
+    } catch (err) { if (err?.isCrash) handleCrash(4, 'Ha Integration', err); throw err; }
     console.log(`  Winner: ${haResult?.winnerId} (attempts=${haResult?.attempts})`);
-  } else {
+    store.recordStageCompletion(4, 'ha_integration', haResult?.winnerId, null);
+  } else if (!hasHa) {
     console.log('\n--- Stage 4: Ha Integration — skipped (no Ha data) ---');
     statusLines.push('## Stage 4: Ha Integration — skipped (no Ha data)');
     updateLiveStatus(store, statusLines);
   }
 
-  const postHaViewId = haResult?.winnerId || starResult.winnerId || targetName;
+  const postHaViewId = haResult?.winnerId || starResult?.winnerId || targetName;
 
   // --- Stage 5: Luminance Detail Agent ---
+  let lumResult;
+  if (resumeFromStage <= 5) {
   console.log('\n--- Stage 5: Luminance Detail Agent ---');
-  const lumResult = await runDoerWithCritics(ctx, store, brief, {
+  try {
+  lumResult = await runDoerWithCritics(ctx, store, brief, {
     doerName: 'luminance_detail',
     doerPromptBuilder: buildLuminanceDetailPrompt,
     targetViewId: postHaViewId,
@@ -539,11 +646,18 @@ async function orchestrate() {
     stageIndex: 5,
     statusLines,
   });
+  } catch (err) { if (err?.isCrash) handleCrash(5, 'Luminance Detail', err); throw err; }
   console.log(`  Winner: ${lumResult.winnerId} (score=${lumResult.winnerScore?.toFixed(1) || 'N/A'}, attempts=${lumResult.attempts})`);
+  store.recordStageCompletion(5, 'luminance_detail', lumResult.winnerId, null, { score: lumResult.winnerScore });
+
+  } else { lumResult = { winnerId: targetName, winnerScore: null, attempts: 0 }; }
 
   // --- Stage 6: Composition Agent ---
+  let compResult;
+  if (resumeFromStage <= 6) {
   console.log('\n--- Stage 6: Composition Agent ---');
-  const compResult = await runDoerWithCritics(ctx, store, brief, {
+  try {
+  compResult = await runDoerWithCritics(ctx, store, brief, {
     doerName: 'composition',
     doerPromptBuilder: buildCompositionPrompt,
     targetViewId: lumResult.winnerId || targetName,
@@ -555,7 +669,11 @@ async function orchestrate() {
     stageIndex: 6,
     statusLines,
   });
+  } catch (err) { if (err?.isCrash) handleCrash(6, 'Composition', err); throw err; }
   console.log(`  Winner: ${compResult.winnerId} (score=${compResult.winnerScore?.toFixed(1) || 'N/A'}, attempts=${compResult.attempts})`);
+  store.recordStageCompletion(6, 'composition', compResult.winnerId, null, { score: compResult.winnerScore });
+
+  } else { compResult = { winnerId: targetName, winnerScore: null, attempts: 0 }; }
 
   // --- Stage 7: Technical Critic (final gate) ---
   console.log('\n--- Stage 7: Final Technical Review ---');

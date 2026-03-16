@@ -47,6 +47,13 @@ ${brief.aestheticIntent.referenceNotes ? `User notes: ${brief.aestheticIntent.re
 
 ## Your operations
 
+0. **LRGB Combine** (if processed L channel is available)
+   - Check if a processed \`FILTER_L\` view exists (use \`list_open_images\`)
+   - If yes, use \`lrgb_combine\` to blend L into RGB — this dramatically improves detail + IFN
+   - lightness=0.55 for face-on spirals, 0.35 for edge-on
+   - saturation=0.80 (preserves color)
+   - Do LRGB combine BEFORE curves/saturation adjustments
+
 1. **Contrast curves** (CurvesTransformation on L/RGB channel)
    - Always anchor endpoints: [0,0] and [1,1]
    - S-curve for contrast: pull shadows down slightly, push highlights up
