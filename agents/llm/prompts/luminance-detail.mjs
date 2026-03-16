@@ -50,7 +50,7 @@ A separate luminance channel (\`FILTER_L\`) should be open in PixInsight. This i
    - BXT correct (\`run_bxt\` with correct_only=true on FILTER_L)
    - Copy WCS from R master (\`copy_astrometric_solution\` — BXT strips it)
    - NXT linear (\`run_nxt\` denoise=0.20 on FILTER_L)
-   - Seti stretch (\`seti_stretch\` target=0.12, headroom=0.08 on FILTER_L)
+   - Seti stretch (\`seti_stretch\` target=0.12, headroom=0.10 on FILTER_L) — headroom=0.10 is critical for HDRMT core detail
    - LHE on L (with luminance mask, amount=0.25, r=64)
    - Inverted HDRMT on L (6 layers, 1 iteration)
    - NXT final on L (denoise=0.25)
@@ -93,8 +93,9 @@ ${brief.aestheticIntent.referenceNotes ? `User notes: ${brief.aestheticIntent.re
    - Use DIFFERENT masks per pass — finer radius needs tighter mask` : ''}
    ${isNebula ? `- Nebula recommended: r=96 a=0.25 slope=1.5, then r=48 a=0.20 slope=1.8` : ''}
 
-3. **HDRMT (HDRMultiscaleTransform)** — Optional, for dynamic range control.
+3. **HDRMT (HDRMultiscaleTransform)** — ESSENTIAL for galaxy core detail, not optional.
    - **Inverted mode** (invertedIterations=true): enhances local detail. Preferred for luminance.
+   - This is the PRIMARY tool for resolving spiral arm structure and core detail.
    - layers=5-7, iterations=1 for inverted (2 is too aggressive, clips to 1.0)
    - HDRMT cannot recover clipped data. Ensure headroom exists.
    - ALWAYS check for ringing on bright cores after HDRMT.
