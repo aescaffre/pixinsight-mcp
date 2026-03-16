@@ -69,8 +69,10 @@ Call \`list_open_images\` to locate the stars image (name contains "stars").
 ### If stars view exists and is LINEAR (median very low, < 0.01):
 - **MUST use \`stretch_stars\`** — this clips background to zero and rescales only star peaks.
 - **NEVER use \`auto_stretch\` or \`seti_stretch\` on stars** — they lift the background and amplify SXT residuals into green/purple blobs!
-- After stretching, apply gentle saturation curve: S channel [[0,0],[0.50,0.58],[1,1]]
-- Show preview to verify: stars should be small bright points on BLACK background, no colored blobs
+- After stretching, apply STRONG saturation curve to restore star colors: S channel [[0,0],[0.40,0.65],[0.70,0.90],[1,1]]
+- The Seti stretch desaturates stars — you MUST compensate aggressively. Apply the saturation curve TWICE if stars still look white.
+- Stars should have visible colors: warm orange/yellow for K/M types, blue-white for hot stars.
+- Show preview to verify: stars should be small bright COLORFUL points on BLACK background
 
 ### If NO stars view found:
 - Run SXT on the current image (\`is_linear=false\` if stretched) as fallback

@@ -27,12 +27,20 @@ Your future self will thank you.
  * Build the system prompt for the Ha Integration agent.
  * @param {object} brief - Processing brief
  * @param {object} config - Pipeline config
+ * @param {object} [options] - Additional options
+ * @param {string} [options.advisorFeedback] - Accumulated advisor feedback from previous stages
  * @returns {string} System prompt
  */
-export function buildHaIntegrationPrompt(brief, config) {
+export function buildHaIntegrationPrompt(brief, config, options = {}) {
   const isGalaxy = brief.target.classification.startsWith('galaxy');
   const isNebula = brief.target.classification.includes('nebula');
   const haPath = config?.files?.Ha || '';
+
+  const advisorSection = options.advisorFeedback ? `
+## Advisor feedback from previous stages
+${options.advisorFeedback}
+Use this feedback to inform your Ha integration decisions.
+` : '';
 
   return `You are the Ha Integration Agent of an autonomous astrophotography processing system.
 
@@ -43,6 +51,7 @@ Your mission is to determine whether Halpha data should be integrated, and if so
 You are processing: **${brief.target.name}** (${brief.target.classification})
 Ha file: ${haPath ? `\`${haPath}\`` : 'NOT AVAILABLE'}
 ${brief.aestheticIntent.referenceNotes ? `User notes: ${brief.aestheticIntent.referenceNotes}` : ''}
+${advisorSection}
 
 ${!haPath ? '## No Ha data available\nCall finish immediately — Ha integration is not possible without Ha data.' : `
 ## Ha assessment criteria

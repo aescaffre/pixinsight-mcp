@@ -167,7 +167,7 @@ Skip for edge-on galaxies (no visible arms/HII).` : 'Skip — not applicable to 
 Stars go on LAST, after all curve work.
 - Find the stars view (use \`list_open_images\`, name contains "stars")
 - Screen blend formula: ~(~target * ~(stars * strength))
-- strength=0.85 for natural star prominence
+- strength=1.00 for natural star prominence (v14 stars were too faint at 0.85)
 - ${brief.aestheticIntent.starProminence === 'subdued' ? 'User wants subdued stars: strength=0.65' : ''}
 - ${brief.aestheticIntent.starProminence === 'prominent' ? 'User wants prominent stars: strength=1.00' : ''}
 - Show preview after star blend — verify no SXT residual rims visible
