@@ -261,9 +261,59 @@ Do NOT reject — just advise.`;
     }
   }
 
+  // --- Advisor-driven refinement pass ---
+  // If the advisor gave actionable feedback AND the doer is a creative agent (not glue-only),
+  // send the feedback back to the doer for one focused refinement pass.
+  let refinementResult = null;
+  const creativeAgents = ['rgb_cleanliness', 'luminance_detail', 'composition'];
+  if (advisorFeedback && creativeAgents.includes(doerName)) {
+    console.log(`  --- Refinement pass: applying advisor feedback ---`);
+    if (statusLines) {
+      statusLines.push(`## ${stageLabel} — refinement pass`);
+      updateLiveStatus(store, statusLines);
+      statusLines.pop();
+    }
+
+    const refinementText = `## Refinement pass — apply advisor feedback
+
+The advisor reviewed your work and has specific improvement suggestions:
+
+${advisorFeedback}
+
+You have the same tools available. The image is in the state you left it.
+Apply the advisor's suggestions — focus on the TOP 1-2 most impactful changes.
+Clone before experimenting. Show a preview after each change.
+Call finish when done.`;
+
+    const refinementDoer = new LLMAgent(doerName, {
+      systemPrompt: doerPromptBuilder(brief, config, promptOptions || {}),
+      tools: doerTools,
+      model,
+      budget: { maxTurns: 10, maxWallClockMs: 5 * 60_000 },
+      store, brief, ctx,
+    });
+
+    refinementResult = await refinementDoer.run([{ type: 'text', text: refinementText }]);
+    if (refinementResult.crashError) throw refinementResult.crashError;
+
+    if (refinementResult.finishResult) {
+      doerFinish = refinementResult.finishResult;
+    }
+
+    fs.writeFileSync(
+      path.join(transcriptDir, `${doerName}_refinement.json`),
+      JSON.stringify(refinementResult.transcript, null, 2)
+    );
+
+    console.log(`  Refinement: ${refinementResult.turnCount} turns, ${fmtTime(refinementResult.elapsedMs)}`);
+  }
+
+  const totalTurns = turns + (refinementResult?.turnCount || 0);
+  const totalElapsed = elapsed + (refinementResult?.elapsedMs || 0);
+
   // Update live status
   if (statusLines) {
-    statusLines.push(`## ${stageLabel} ✅ (${turns} turns, ${fmtTime(elapsed)}${scoreStr})`);
+    statusLines.push(`## ${stageLabel} ✅ (${totalTurns} turns, ${fmtTime(totalElapsed)}${scoreStr}${refinementResult ? ' +refinement' : ''})`);
     if (advisorFeedback) {
       statusLines.push(`> Advisor: ${advisorFeedback.slice(0, 200)}`);
     }
