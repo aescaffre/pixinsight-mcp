@@ -138,20 +138,19 @@ class GoogleProvider {
         if (parts.length > 0) history.push({ role: 'model', parts });
       } else if (msg.role === 'user') {
         // Separate tool_result blocks from regular content.
-        // In Gemini, functionResponse must be in a 'user' message but ONLY contain functionResponse parts.
+        // In Gemini, functionResponse parts must use role 'function', not 'user'.
         if (Array.isArray(msg.content)) {
           const toolResults = msg.content.filter(b => b.type === 'tool_result');
           const otherContent = msg.content.filter(b => b.type !== 'tool_result');
 
           if (toolResults.length > 0) {
-            // Convert tool results to functionResponse parts
             const frParts = toolResults.map(tr => ({
               functionResponse: {
                 name: tr._toolName || 'unknown',
                 response: { result: this._extractText(tr.content) },
               }
             }));
-            history.push({ role: 'user', parts: frParts });
+            history.push({ role: 'function', parts: frParts });
           }
           if (otherContent.length > 0) {
             const parts = this._convertContent(otherContent);

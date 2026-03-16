@@ -444,8 +444,18 @@ async function orchestrate() {
           resumeFromStage = 0;
         }
       } else {
-        console.log('  WARNING: No variants found for last stage. Starting from scratch.');
-        resumeFromStage = 0;
+        // No variants saved, but check if PI still has the image open
+        const currentImgs = await ctx.listImages();
+        const targetInPI = currentImgs.find(i => i.id === lastStage.winnerId || i.isColor);
+        if (targetInPI) {
+          console.log(`  No saved variants, but PI still has ${targetInPI.id} open. Resuming.`);
+          if (targetInPI.id !== targetName) {
+            await ctx.pjsr(`var w = ImageWindow.windowById('${targetInPI.id}'); if (!w.isNull) w.mainView.id = '${targetName}';`);
+          }
+        } else {
+          console.log('  WARNING: No variants and no images in PI. Starting from scratch.');
+          resumeFromStage = 0;
+        }
       }
 
       // Restore starsViewId if star_policy completed
@@ -575,9 +585,9 @@ async function orchestrate() {
   } else { rgbResult = { winnerId: targetName, winnerScore: null, attempts: 0 }; }
 
   // --- Stage 3: Star Policy Agent ---
+  let starResult;
   if (resumeFromStage <= 3) {
   console.log('\n--- Stage 3: Star Policy Agent ---');
-  let starResult;
   try {
   starResult = await runDoerWithCritics(ctx, store, brief, {
     doerName: 'star_policy',
@@ -595,9 +605,8 @@ async function orchestrate() {
   store.recordStageCompletion(3, 'star_policy', starResult.winnerId, null);
   // Check if stars were separated (look for a stars view)
   const postStarImgs = await ctx.listImages();
-  const starsView = postStarImgs.find(i => i.id.includes('stars') || i.id.includes('star'));
-  const starsViewId = starsView?.id || null;
-  if (starsViewId) console.log(`  Stars image: ${starsViewId}`);
+  const starsViewFound = postStarImgs.find(i => i.id.includes('stars') || i.id.includes('star'));
+  if (starsViewFound) { starsViewId = starsViewFound.id; console.log(`  Stars image: ${starsViewId}`); }
 
   } else { starResult = { winnerId: targetName, attempts: 0 }; }
 
