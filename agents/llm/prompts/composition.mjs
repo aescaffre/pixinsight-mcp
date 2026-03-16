@@ -77,7 +77,15 @@ Call \`recall_memory\` first. Check for winning curve/saturation parameters from
 - Do LRGB combine BEFORE any curves/saturation
 - Single pass — do not iterate.
 
-## A3. Create baseline clone
+## A3. Star screen blend
+Stars go on EARLY — before curves, so curve adjustments affect the complete image.
+- Find the stars view (use \`list_open_images\`, name contains "stars")
+- Use \`star_screen_blend\` with target_id=your working image, stars_id=the stars view
+- strength=1.00 for natural prominence
+- ${brief.aestheticIntent.starProminence === 'subdued' ? 'User wants subdued stars: strength=0.70' : ''}
+- If no stars view found, skip this step.
+
+## A4. Create baseline clone
 Clone the result as your revert point for all Phase B experiments.
 
 **After Phase A**: Show a preview. Note the current tonal character. Phase B begins.
@@ -132,6 +140,8 @@ ${isGalaxy ? 'Center the S-curve around the subject median (~0.10-0.15 for galax
 **Iteration target: S-channel curve midpoint**
 
 The RGB agent already applied initial saturation. Here you refine further.
+
+**IMPORTANT**: Revert to checkpoint BEFORE each new test. Curves are NOT cumulative — each step must be tested independently from the same baseline.
 
 | Step | S-curve midpoint | Curve                           |
 |------|------------------|---------------------------------|

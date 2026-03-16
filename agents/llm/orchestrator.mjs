@@ -320,6 +320,19 @@ async function orchestrate() {
   console.log(`  Workflow: ${brief.dataDescription.workflow}`);
   console.log(`  Style: ${brief.aestheticIntent.style}`);
 
+  // Auto-clean old runs to prevent disk full (keep only 2 most recent)
+  const runsDir = path.join(home, '.pixinsight-mcp', 'runs');
+  if (fs.existsSync(runsDir)) {
+    const oldRuns = fs.readdirSync(runsDir).filter(d => d.startsWith('run_')).sort().reverse();
+    if (oldRuns.length > 2) {
+      for (const old of oldRuns.slice(2)) {
+        console.log(`  Cleaning old run: ${old}`);
+        fs.rmSync(path.join(runsDir, old), { recursive: true, force: true });
+      }
+      console.log(`  Cleaned ${oldRuns.length - 2} old run(s)`);
+    }
+  }
+
   const store = new ArtifactStore(opts.runId);
   store.saveBrief(brief);
   console.log(`  Run ID: ${store.runId}`);
@@ -633,7 +646,7 @@ async function orchestrate() {
     doerName: 'composition',
     doerPromptBuilder: buildCompositionPrompt,
     targetViewId: lumResult.winnerId || targetName,
-    model: opts.model,
+    model: 'claude-sonnet-4-20250514', // Composition needs strong tool-use reasoning for push-until-rejection
     criticModel: opts.criticModel,
     maxTurns: opts.maxTurns || 30, // Phase A glue (~4-5 turns) + Phase B contrast/saturation iteration (~20-25 turns)
     skipCritics: opts.skipCritics,
