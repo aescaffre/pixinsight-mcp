@@ -1078,12 +1078,12 @@ const TOOL_CATALOG = {
       `);
 
       // Step 2: LRGB combine via PixelMath (luminance replacement)
-      // Formula: RGB * max(Y_blend, 0.00001) / max(Y_original, 0.00001)
-      // where Y_blend = (1-lightness)*Y_original + lightness*L
+      // Formula: RGB * min(ratio, 3.0) where ratio = Y_blend / Y_original
+      // Capping at 3.0 prevents color washout when L is much brighter than RGB luminance
       await ctx.pjsr(`
         var l = ${lightness};
         var PM = new PixelMath;
-        PM.expression = "Y = 0.2126*$T[0] + 0.7152*$T[1] + 0.0722*$T[2]; Y_blend = (1-${lightness})*Y + ${lightness}*${input.l_id}; $T * max(Y_blend, 0.00001) / max(Y, 0.00001)";
+        PM.expression = "Y = 0.2126*$T[0] + 0.7152*$T[1] + 0.0722*$T[2]; Y_blend = (1-${lightness})*Y + ${lightness}*${input.l_id}; ratio = min(max(Y_blend, 0.00001) / max(Y, 0.00001), 3.0); $T * ratio";
         PM.symbols = "Y, Y_blend";
         PM.useSingleExpression = true;
         PM.use64BitWorkingImage = true;
