@@ -235,6 +235,9 @@ Process the image view \`${targetViewId}\` according to the processing brief.
     const criticDiagDir = path.join(store.baseDir, 'diagnostics', `${doerName}_critic_${attempt}`);
     const criticViewId = doerFinish?.view_id || targetViewId;
     const criticDiagPaths = await generateDiagnosticViews(ctx, criticViewId, criticDiagDir);
+    // Send only overview + crops to critic — NOT the background-stretched view.
+    // The stretched view amplifies invisible gradients 100x and causes false rejections.
+    const criticImagePaths = criticDiagPaths.filter(p => !p.includes('bg_stretch'));
 
     const criticStats = await getStats(ctx, criticViewId);
     const criticUni = await measureUniformity(ctx, criticViewId);
@@ -249,12 +252,11 @@ Target: **${brief.target.name}** (${brief.target.classification})
 - Background uniformity: ${criticUni.score.toFixed(6)}
 
 ### Diagnostic views
-1. Overview
-2. Center 1:1 crop
-3. Corner 1:1 crop
-4. Background-stretched view`;
+1. Overview — full image resized
+2. Center 1:1 crop — subject detail
+3. Corner 1:1 crop — background quality`;
 
-    const criticContent = buildImageMessage(criticText, criticDiagPaths);
+    const criticContent = buildImageMessage(criticText, criticImagePaths);
 
     // Update live status: critic running
     if (statusLines) {
@@ -719,7 +721,8 @@ This is the FINAL image before output. Your job is to verify it passes all hard 
       ctx,
     });
 
-    const techResult = await techCritic.run(buildImageMessage(techText, techDiagPaths));
+    const techImagePaths = techDiagPaths.filter(p => !p.includes('bg_stretch'));
+    const techResult = await techCritic.run(buildImageMessage(techText, techImagePaths));
     const techVerdict = techResult.finishResult?.verdict || 'accept';
     console.log(`  Technical critic verdict: ${techVerdict}`);
 

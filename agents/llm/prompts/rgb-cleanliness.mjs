@@ -71,15 +71,21 @@ ${config?.files?.R ? `\nOriginal R master (has WCS for SPCC): \`${config.files.R
 5. **NXT linear** — First denoise pass on linear data. Keep it gentle.
    - denoise=0.15-0.25. Multiple light passes is better than one heavy pass.
 
-6. **Seti stretch** — Convert linear to non-linear.
+6. **SXT star extraction** — Run StarXTerminator on LINEAR data BEFORE stretch.
+   - Use \`run_sxt\` with \`is_linear=true\` — this extracts stars via subtraction (cleanest method).
+   - The stars image stays open in PixInsight for later screen blend by composition agent.
+   - **Why linear**: SXT on linear data produces sharp star profiles. SXT on stretched data creates halos/blobs around bright stars.
+   - After SXT, the working image is starless. All downstream processing happens starless.
+
+7. **Seti stretch** — Convert starless linear to non-linear.
    - ${isGalaxy ? 'Galaxies: target_median=0.10-0.12, headroom=0.12 (NOT 0.05 — cores MUST NOT clip!)' : ''}
    - ${isNebula ? 'Nebulae: target_median=0.20-0.25, headroom=0.05' : ''}
    - **CRITICAL**: After stretch, check max pixel. If max > 0.95, INCREASE headroom and re-stretch from clone. Burnt cores cannot be recovered by any downstream process.
    - ALWAYS show preview after stretch — this is the most critical visual checkpoint.
 
-7. **NXT post-stretch** — Second denoise pass (0.25-0.30).
+8. **NXT post-stretch** — Second denoise pass (0.25-0.30).
 
-8. **Initial saturation** — After SPCC, colors look undersaturated. Apply a moderate saturation boost: S channel curve [[0,0],[0.50,0.60],[1,1]]. Don't be shy — the composition agent will fine-tune later but needs a good base to work from.
+9. **Initial saturation** — After SPCC, colors look undersaturated. Apply a moderate saturation boost: S channel curve [[0,0],[0.50,0.60],[1,1]]. Don't be shy — the composition agent will fine-tune later but needs a good base to work from.
 
 6. **NXT post-stretch** — Second denoise pass. Can be slightly stronger (0.20-0.30).
 
