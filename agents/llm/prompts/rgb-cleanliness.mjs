@@ -78,9 +78,8 @@ ${config?.files?.R ? `\nOriginal R master (has WCS for SPCC): \`${config.files.R
    - After SXT, the working image is starless. All downstream processing happens starless.
 
 7. **Seti stretch** — Convert starless linear to non-linear.
-   - ${isGalaxy ? 'Galaxies: target_median=0.10-0.12, headroom=0.12 (NOT 0.05 — cores MUST NOT clip!)' : ''}
+   - ${isGalaxy ? 'Galaxies: target_median=0.10-0.12, headroom=0.05' : ''}
    - ${isNebula ? 'Nebulae: target_median=0.20-0.25, headroom=0.05' : ''}
-   - **CRITICAL**: After stretch, check max pixel. If max > 0.95, INCREASE headroom and re-stretch from clone. Burnt cores cannot be recovered by any downstream process.
    - ALWAYS show preview after stretch — this is the most critical visual checkpoint.
 
 8. **NXT post-stretch** — Second denoise pass (0.25-0.30).

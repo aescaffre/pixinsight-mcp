@@ -107,32 +107,27 @@ function parseArgs() {
 // ============================================================================
 
 /**
- * Run a doer agent with optional critic review loop.
+ * Run a doer agent with critic as ADVISOR (not gatekeeper).
+ * Single pass — no retries. Critic feedback is logged for provenance and next-run memory.
  */
 async function runDoerWithCritics(ctx, store, brief, {
   doerName, doerPromptBuilder, targetViewId, model, criticModel, maxTurns, skipCritics, starsViewId, config,
   stageIndex, statusLines,
 }) {
-  const maxRejections = 2;
-  let attempt = 0;
-  let criticFeedback = null;
+  console.log(`\n  --- ${doerName} ---`);
 
-  while (attempt <= maxRejections) {
-    attempt++;
-    console.log(`\n  --- ${doerName} (attempt ${attempt}/${maxRejections + 1}) ---`);
+  // Build doer tools and prompt
+  const doerTools = buildToolSet(doerName);
+  const systemPrompt = doerPromptBuilder(brief, config);
 
-    // Build doer tools and prompt
-    const doerTools = buildToolSet(doerName);
-    const systemPrompt = doerPromptBuilder(brief, config);
+  // Generate diagnostic previews
+  const diagDir = path.join(store.baseDir, 'diagnostics', doerName);
+  const diagPaths = await generateDiagnosticViews(ctx, targetViewId, diagDir);
 
-    // Generate diagnostic previews
-    const diagDir = path.join(store.baseDir, 'diagnostics', `${doerName}_attempt_${attempt}`);
-    const diagPaths = await generateDiagnosticViews(ctx, targetViewId, diagDir);
-
-    // Build initial message
-    const stats = await getStats(ctx, targetViewId);
-    const uni = await measureUniformity(ctx, targetViewId);
-    let initialText = `## Your task
+  // Build initial message
+  const stats = await getStats(ctx, targetViewId);
+  const uni = await measureUniformity(ctx, targetViewId);
+  let initialText = `## Your task
 
 Process the image view \`${targetViewId}\` according to the processing brief.
 
@@ -142,208 +137,144 @@ Process the image view \`${targetViewId}\` according to the processing brief.
 - Min: ${(stats.min ?? 0).toFixed(6)}, Max: ${(stats.max ?? 0).toFixed(4)}
 - Background uniformity: ${uni.score.toFixed(6)} (${uni.score < 0.002 ? 'excellent' : uni.score < 0.005 ? 'acceptable' : 'poor'})`;
 
-    if (stats.perChannel) {
-      initialText += `\n- Per-channel medians: R=${stats.perChannel.R.median.toFixed(6)}, G=${stats.perChannel.G.median.toFixed(6)}, B=${stats.perChannel.B.median.toFixed(6)}`;
-    }
+  if (stats.perChannel) {
+    initialText += `\n- Per-channel medians: R=${stats.perChannel.R.median.toFixed(6)}, G=${stats.perChannel.G.median.toFixed(6)}, B=${stats.perChannel.B.median.toFixed(6)}`;
+  }
 
-    if (starsViewId) {
-      initialText += `\n\n### Stars image available: \`${starsViewId}\``;
-    }
+  if (starsViewId) {
+    initialText += `\n\n### Stars image available: \`${starsViewId}\``;
+  }
 
-    if (criticFeedback) {
-      initialText += `\n\n### CRITIC FEEDBACK FROM PREVIOUS ATTEMPT\nThe critic rejected your previous result with this feedback:\n\n${criticFeedback}\n\nPlease address these specific issues in this attempt.`;
-    }
-
-    initialText += `\n\n### Diagnostic views attached
+  initialText += `\n\n### Diagnostic views attached
 1. Overview — full image resized
 2. Center 1:1 crop — subject detail quality
 3. Corner 1:1 crop — background quality
 4. Background-stretched — reveals faint gradients/structure`;
 
-    const initialContent = buildImageMessage(initialText, diagPaths);
+  const initialContent = buildImageMessage(initialText, diagPaths);
 
-    // Update live status: doer starting
-    const stageLabel = `Stage ${stageIndex}: ${doerName.replace(/_/g, ' ')}`;
-    if (statusLines) {
-      statusLines.push(`## ${stageLabel} — running (attempt ${attempt}/${maxRejections + 1})`);
-      updateLiveStatus(store, statusLines);
-      // Remove the "running" line so we can replace it with the final one
-      statusLines.pop();
+  // Update live status: doer starting
+  const stageLabel = `Stage ${stageIndex}: ${doerName.replace(/_/g, ' ')}`;
+  if (statusLines) {
+    statusLines.push(`## ${stageLabel} — running`);
+    updateLiveStatus(store, statusLines);
+    statusLines.pop();
+  }
+
+  // Create and run the doer
+  const doer = new LLMAgent(doerName, {
+    systemPrompt,
+    tools: doerTools,
+    model,
+    budget: { maxTurns: maxTurns || 20, maxWallClockMs: 30 * 60_000 },
+    store,
+    brief,
+    ctx,
+  });
+
+  const doerResult = await doer.run(initialContent);
+
+  // Check for PI crash
+  if (doerResult.crashError) throw doerResult.crashError;
+
+  let doerFinish = doerResult.finishResult;
+  if (!doerFinish) {
+    const variants = store.listVariants(doerName);
+    if (variants.length > 0) {
+      const lastVariant = variants[variants.length - 1];
+      console.log(`  Using last saved variant: ${lastVariant.viewId}`);
+      doerFinish = doerResult.finishResult = { type: 'finish', view_id: lastVariant.viewId, rationale: 'Budget exhausted — using last saved variant' };
     }
+  }
 
-    // Create and run the doer
-    const doer = new LLMAgent(doerName, {
-      systemPrompt,
-      tools: doerTools,
-      model,
-      budget: { maxTurns: maxTurns || 20, maxWallClockMs: 30 * 60_000 },
-      store,
-      brief,
-      ctx,
-    });
+  // Save transcript
+  const transcriptDir = path.join(store.baseDir, 'transcripts');
+  fs.mkdirSync(transcriptDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(transcriptDir, `${doerName}.json`),
+    JSON.stringify(doerResult.transcript, null, 2)
+  );
 
-    const doerResult = await doer.run(initialContent);
+  // Compute scores
+  const finalViewId = doerFinish?.view_id || targetViewId;
+  const finalStats = await getStats(ctx, finalViewId);
+  const finalUni = await measureUniformity(ctx, finalViewId);
+  const autoScores = statsToScores(finalStats, finalUni, brief);
+  const autoAgg = computeAggregate(autoScores, brief.target.classification);
 
-    // Check for PI crash during agent execution
-    if (doerResult.crashError) {
-      throw doerResult.crashError; // Propagate to orchestrator for resume handling
-    }
+  const elapsed = doerResult?.elapsedMs || 0;
+  const turns = doerResult?.turnCount || 0;
+  const scoreStr = autoAgg.aggregate != null ? `, score ${autoAgg.aggregate.toFixed(1)}` : '';
 
-    const doerFinish = doerResult.finishResult;
-
-    if (!doerFinish) {
-      console.log(`  WARNING: ${doerName} did not call finish. Checking for saved variants...`);
-      // If the agent saved variants but didn't call finish, use the last variant's view
-      const variants = store.listVariants(doerName);
-      if (variants.length > 0) {
-        const lastVariant = variants[variants.length - 1];
-        console.log(`  Using last saved variant: ${lastVariant.viewId}`);
-        doerResult.finishResult = { type: 'finish', view_id: lastVariant.viewId, rationale: 'Budget exhausted — using last saved variant' };
-      }
-    }
-
-    // Save transcript
-    const transcriptDir = path.join(store.baseDir, 'transcripts');
-    fs.mkdirSync(transcriptDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(transcriptDir, `${doerName}_attempt_${attempt}.json`),
-      JSON.stringify(doerResult.transcript, null, 2)
-    );
-
-    // Skip critics if requested
-    if (skipCritics) {
-      console.log(`  Skipping critics (--skip-critics)`);
-      const elapsed = doerResult?.elapsedMs || 0;
-      const turns = doerResult?.turnCount || 0;
-      if (statusLines) {
-        statusLines.push(`## ${stageLabel} ✅ (${turns} turns, ${fmtTime(elapsed)}, no critic)`);
-        updateLiveStatus(store, statusLines);
-      }
-      return {
-        winnerId: doerFinish?.view_id || targetViewId,
-        winnerScore: null,
-        doerResult,
-        criticResults: [],
-        attempts: attempt,
-      };
-    }
-
-    // --- Critic review ---
-    console.log(`\n  --- Aesthetic Critic reviewing ${doerName} result ---`);
-
-    // Generate fresh preview for critic (they should see the current state, not doer's working state)
-    const criticDiagDir = path.join(store.baseDir, 'diagnostics', `${doerName}_critic_${attempt}`);
-    const criticViewId = doerFinish?.view_id || targetViewId;
-    const criticDiagPaths = await generateDiagnosticViews(ctx, criticViewId, criticDiagDir);
-    // Send only overview + crops to critic — NOT the background-stretched view.
-    // The stretched view amplifies invisible gradients 100x and causes false rejections.
+  // --- Critic as ADVISOR (not gatekeeper) ---
+  let advisorFeedback = '';
+  if (!skipCritics) {
+    console.log(`  --- Advisor reviewing ${doerName} result ---`);
+    const criticDiagDir = path.join(store.baseDir, 'diagnostics', `${doerName}_advisor`);
+    const criticDiagPaths = await generateDiagnosticViews(ctx, finalViewId, criticDiagDir);
     const criticImagePaths = criticDiagPaths.filter(p => !p.includes('bg_stretch'));
 
-    const criticStats = await getStats(ctx, criticViewId);
-    const criticUni = await measureUniformity(ctx, criticViewId);
-
-    const criticText = `## Image to evaluate
+    const criticText = `## Review this image and provide improvement suggestions
 
 Target: **${brief.target.name}** (${brief.target.classification})
+Stats: median=${finalStats.median.toFixed(6)}, max=${(finalStats.max ?? 0).toFixed(4)}, uniformity=${finalUni.score.toFixed(6)}
 
-### Stats
-- Median: ${criticStats.median.toFixed(6)}, MAD: ${criticStats.mad.toFixed(6)}
-- Max: ${(criticStats.max ?? 0).toFixed(4)}, Min: ${(criticStats.min ?? 0).toFixed(6)}
-- Background uniformity: ${criticUni.score.toFixed(6)}
-
-### Diagnostic views
-1. Overview — full image resized
-2. Center 1:1 crop — subject detail
-3. Corner 1:1 crop — background quality`;
+You are an ADVISOR, not a gatekeeper. The pipeline will proceed regardless.
+Provide 2-3 specific, actionable suggestions for improvement that the next run can use.
+Do NOT reject — just advise.`;
 
     const criticContent = buildImageMessage(criticText, criticImagePaths);
 
-    // Update live status: critic running
-    if (statusLines) {
-      statusLines.push(`## ${stageLabel} — critic reviewing (attempt ${attempt})`);
-      updateLiveStatus(store, statusLines);
-      statusLines.pop();
-    }
-
-    // Run aesthetic critic (uses critic model — can be Gemini Flash for cost savings)
-    const aestheticCritic = new LLMAgent('aesthetic_critic', {
+    const advisor = new LLMAgent('aesthetic_critic', {
       systemPrompt: buildAestheticCriticPrompt(brief),
       tools: buildToolSet('aesthetic_critic'),
       model: criticModel || model,
-      budget: { maxTurns: 5, maxWallClockMs: 5 * 60_000 },
-      store,
-      brief,
-      ctx,
+      budget: { maxTurns: 3, maxWallClockMs: 2 * 60_000 },
+      store, brief, ctx,
     });
 
-    const aestheticResult = await aestheticCritic.run(criticContent);
-    if (aestheticResult.crashError) throw aestheticResult.crashError;
-
-    // Save critic transcript
-    fs.writeFileSync(
-      path.join(transcriptDir, `${doerName}_aesthetic_critic_${attempt}.json`),
-      JSON.stringify(aestheticResult.transcript, null, 2)
-    );
-
-    // Extract verdict
-    const criticFinish = aestheticResult.finishResult;
-    const verdict = criticFinish?.verdict || 'accept';
-    const feedback = criticFinish?.feedback || '';
-
-    console.log(`  Aesthetic critic verdict: ${verdict}`);
-    if (feedback) console.log(`  Feedback: ${feedback.slice(0, 200)}`);
-
-    // Also compute stats-based scores
-    const autoScores = statsToScores(criticStats, criticUni, brief);
-    const autoAgg = computeAggregate(autoScores, brief.target.classification);
-
-    // Save scorecard
-    const scorecard = {
-      critic: 'aesthetic_critic',
-      candidateId: `${doerName}_attempt_${attempt}`,
-      timestamp: new Date().toISOString(),
-      pass: verdict === 'accept',
-      criticScores: criticFinish || {},
-      autoScores,
-      autoAggregate: autoAgg.aggregate,
-      feedback,
-    };
-    store.saveScorecard(doerName, `aesthetic_critic_${attempt}`, scorecard);
-
-    if (verdict === 'accept' || attempt > maxRejections) {
-      if (attempt > maxRejections && verdict !== 'accept') {
-        console.log(`  Max rejections reached. Accepting current result despite critic rejection.`);
+    const advisorResult = await advisor.run(criticContent);
+    if (!advisorResult.crashError) {
+      advisorFeedback = advisorResult.finishResult?.feedback || '';
+      if (advisorFeedback) {
+        console.log(`  Advisor: ${advisorFeedback.slice(0, 200)}`);
+        // Save to agent memory for next run
+        const memDir = path.join(os.homedir(), '.pixinsight-mcp', 'agent-memory');
+        fs.mkdirSync(memDir, { recursive: true });
+        const memFile = path.join(memDir, `${doerName}.json`);
+        let entries = [];
+        if (fs.existsSync(memFile)) entries = JSON.parse(fs.readFileSync(memFile, 'utf-8'));
+        entries.push({
+          title: `Advisor feedback (${store.runId})`,
+          content: advisorFeedback.slice(0, 500),
+          tags: ['advisor', 'feedback'],
+          date: new Date().toISOString().slice(0, 10),
+          timestamp: new Date().toISOString()
+        });
+        fs.writeFileSync(memFile, JSON.stringify(entries, null, 2));
       }
-      // Update live status: stage complete
-      const elapsed = doerResult?.elapsedMs || 0;
-      const turns = doerResult?.turnCount || 0;
-      const scoreStr = autoAgg.aggregate != null ? `, score ${autoAgg.aggregate.toFixed(1)}` : '';
-      if (statusLines) {
-        const icon = verdict === 'accept' ? '✅' : '⚠️';
-        statusLines.push(`## ${stageLabel} ${icon} (${turns} turns, ${fmtTime(elapsed)}${scoreStr}, ${attempt} attempt${attempt > 1 ? 's' : ''})`);
-        updateLiveStatus(store, statusLines);
-      }
-      return {
-        winnerId: doerFinish?.view_id || targetViewId,
-        winnerScore: autoAgg.aggregate,
-        doerResult,
-        criticResults: [aestheticResult],
-        scorecard,
-        attempts: attempt,
-      };
-    }
-
-    // Critic rejected — feed feedback back
-    criticFeedback = feedback || 'The critic rejected your result. Please try a different approach.';
-    console.log(`  Rejected — feeding feedback to doer for retry...`);
-
-    // Update live status: rejection with feedback
-    if (statusLines) {
-      const shortFeedback = feedback ? feedback.slice(0, 300) : 'no details';
-      statusLines.push(`### ${stageLabel} — critic rejected attempt ${attempt}: "${shortFeedback}"`);
-      updateLiveStatus(store, statusLines);
+      fs.writeFileSync(
+        path.join(transcriptDir, `${doerName}_advisor.json`),
+        JSON.stringify(advisorResult.transcript, null, 2)
+      );
     }
   }
+
+  // Update live status
+  if (statusLines) {
+    statusLines.push(`## ${stageLabel} ✅ (${turns} turns, ${fmtTime(elapsed)}${scoreStr})`);
+    if (advisorFeedback) {
+      statusLines.push(`> Advisor: ${advisorFeedback.slice(0, 200)}`);
+    }
+    updateLiveStatus(store, statusLines);
+  }
+
+  return {
+    winnerId: doerFinish?.view_id || targetViewId,
+    winnerScore: autoAgg.aggregate,
+    doerResult,
+    attempts: 1,
+  };
 }
 
 // ============================================================================

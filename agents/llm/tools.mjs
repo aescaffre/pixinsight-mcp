@@ -323,20 +323,12 @@ const TOOL_CATALOG = {
       }
     },
     handler: async (ctx, _store, _brief, input) => {
-      const r = await ctx.send('run_process', '__internal__', {
-        processId: 'NoiseXTerminator',
-        viewId: input.view_id,
-        params: { denoise: input.denoise, detail: input.detail ?? 0.15 }
-      });
-      if (r.status === 'error') {
-        // Fallback: direct PJSR
-        await ctx.pjsr(`
-          var P = new NoiseXTerminator;
-          P.denoise = ${input.denoise};
-          P.detail = ${input.detail ?? 0.15};
-          P.executeOn(ImageWindow.windowById('${input.view_id}').mainView);
-        `);
-      }
+      await ctx.pjsr(`
+        var P = new NoiseXTerminator;
+        P.denoise = ${input.denoise};
+        P.detail = ${input.detail ?? 0.15};
+        P.executeOn(ImageWindow.windowById('${input.view_id}').mainView);
+      `);
       const stats = await getStats(ctx, input.view_id);
       return { type: 'text', text: `NXT complete (denoise=${input.denoise}). Stats: median=${stats.median.toFixed(6)}, MAD=${stats.mad.toFixed(6)}` };
     }
@@ -1389,11 +1381,21 @@ const TOOL_CATALOG = {
         await ctx.pjsr(`var w=ImageWindow.windowById('${cm.id}');if(!w.isNull)w.forceClose();`);
       }
 
-      // Find and rename the new view
+      // Find and rename the new view — look for the aligned file name specifically
       const newImgs = await ctx.listImages();
-      const aligned = newImgs.find(i => i.id.includes('aligned') || (!i.isColor && i.id !== input.reference_id));
+      const alignedBaseName = path.basename(alignedPath, '.xisf').replace(/[^a-zA-Z0-9_]/g, '_');
+      const aligned = newImgs.find(i => i.id.includes('aligned') || i.id.includes(alignedBaseName));
       if (aligned && aligned.id !== input.target_id) {
         await ctx.pjsr(`var w = ImageWindow.windowById('${aligned.id}'); if (!w.isNull) w.mainView.id = '${input.target_id}';`);
+      }
+      // Fallback: if target_id still doesn't exist, find any new mono view that wasn't there before
+      const targetExists = newImgs.some(i => i.id === input.target_id);
+      if (!targetExists) {
+        const beforeSet = new Set([input.reference_id, 'FILTER_L', 'FILTER_Ha', 'FILTER_G']);
+        const candidate = newImgs.find(i => !i.isColor && !beforeSet.has(i.id));
+        if (candidate) {
+          await ctx.pjsr(`var w = ImageWindow.windowById('${candidate.id}'); if (!w.isNull) w.mainView.id = '${input.target_id}';`);
+        }
       }
 
       // Verify
