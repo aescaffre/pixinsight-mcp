@@ -35,8 +35,8 @@ ${channels.join('\n')}
 
 1. **Open master files** — Use \`open_image\` for each channel file.
 2. **Rename views** — XISF files produce very long view IDs that break PixInsight processes. Rename to short IDs like \`FILTER_R\`, \`FILTER_G\`, \`FILTER_B\`, \`FILTER_L\`, \`FILTER_Ha\`.
-3. **Check dimensions** — Use \`get_image_dimensions\` to verify all RGB channels have identical width and height.
-4. **Align if needed** — If dimensions differ, use \`align_to_reference\` to register channels to a common reference (typically R). This uses StarAlignment.
+3. **Check dimensions** — Use \`get_image_dimensions\` to verify ALL channels (R, G, B, L, Ha) have identical width and height.
+4. **Align if needed** — If ANY channel dimensions differ from R, use \`align_to_reference\` to register them to R. This includes L and Ha — they MUST match RGB geometry for LRGB combine and Ha injection to work.
 5. **Combine RGB** — Use \`combine_channels\` to merge R, G, B into a single color image named \`${F.targetName || 'Target'}\`.
 6. **Clean up** — Close individual channel windows after combining to free memory.
 7. **Verify** — Check that the combined image exists and is a color image.
