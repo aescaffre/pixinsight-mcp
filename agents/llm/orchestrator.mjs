@@ -696,7 +696,7 @@ async function orchestrate() {
     doerName: 'composition',
     doerPromptBuilder: buildCompositionPrompt,
     targetViewId: lumResult.winnerId || targetName,
-    model: 'claude-sonnet-4-20250514', // Composition needs strong tool-use reasoning for push-until-rejection
+    model: opts.model, // Use default model (Gemini Pro) — prompt instructs to start working immediately
     criticModel: opts.criticModel,
     maxTurns: opts.maxTurns || 30, // Phase A glue (~4-5 turns) + Phase B contrast/saturation iteration (~20-25 turns)
     skipCritics: opts.skipCritics,

@@ -60,11 +60,11 @@ ${brief.aestheticIntent.referenceNotes ? `User notes: ${brief.aestheticIntent.re
 ${advisorSection}
 
 # ====================================================================
+# START WORKING IMMEDIATELY — call tools on your FIRST turn.
+# Do NOT plan or summarize. Execute Phase A step by step.
+# ====================================================================
+
 # PHASE A — GLUE (deterministic, no iteration)
-# ====================================================================
-#
-# Run these steps exactly once, in order. Known-good recipes.
-# ====================================================================
 
 ## A1. Recall memory
 Call \`recall_memory\` first. Check for winning curve/saturation parameters from prior runs.
