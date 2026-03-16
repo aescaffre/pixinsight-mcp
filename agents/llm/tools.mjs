@@ -1083,7 +1083,7 @@ const TOOL_CATALOG = {
       await ctx.pjsr(`
         var l = ${lightness};
         var PM = new PixelMath;
-        PM.expression = "Yo = 0.2126*$T[0] + 0.7152*$T[1] + 0.0722*$T[2];\\nYb = (1-${lightness})*Yo + ${lightness}*${input.l_id};\\nratio = min(max(Yb, 0.00001) / max(Yo, 0.00001), 3.0);\\n$T * ratio";
+        PM.expression = "Yo = 0.2126*$T[0] + 0.7152*$T[1] + 0.0722*$T[2]; Yb = (1-${lightness})*Yo + ${lightness}*${input.l_id}; ratio = min(max(Yb, 0.00001) / max(Yo, 0.00001), 3.0); $T * ratio";
         PM.symbols = "Yo, Yb, ratio";
         PM.useSingleExpression = true;
         PM.use64BitWorkingImage = true;
