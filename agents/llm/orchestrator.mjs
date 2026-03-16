@@ -109,16 +109,17 @@ function parseArgs() {
 /**
  * Run a doer agent with critic as ADVISOR (not gatekeeper).
  * Single pass — no retries. Critic feedback is logged for provenance and next-run memory.
+ * Returns advisorFeedback for feed-forward to downstream stages.
  */
 async function runDoerWithCritics(ctx, store, brief, {
   doerName, doerPromptBuilder, targetViewId, model, criticModel, maxTurns, skipCritics, starsViewId, config,
-  stageIndex, statusLines,
+  stageIndex, statusLines, promptOptions,
 }) {
   console.log(`\n  --- ${doerName} ---`);
 
-  // Build doer tools and prompt
+  // Build doer tools and prompt — pass promptOptions (including accumulated advisor feedback)
   const doerTools = buildToolSet(doerName);
-  const systemPrompt = doerPromptBuilder(brief, config);
+  const systemPrompt = doerPromptBuilder(brief, config, promptOptions || {});
 
   // Generate diagnostic previews
   const diagDir = path.join(store.baseDir, 'diagnostics', doerName);
@@ -274,6 +275,7 @@ Do NOT reject — just advise.`;
     winnerScore: autoAgg.aggregate,
     doerResult,
     attempts: 1,
+    advisorFeedback,
   };
 }
 
@@ -481,6 +483,10 @@ async function orchestrate() {
     process.exit(77); // Distinct exit code for crash (vs 1 for errors)
   }
 
+  // --- Feed-forward: accumulate advisor feedback from each stage ---
+  // Each completed stage's advisor feedback is collected and injected into the next stage's prompt.
+  const accumulatedFeedback = [];
+
   // --- Stage 2: RGB Cleanliness Agent ---
   let rgbResult;
   if (resumeFromStage <= 2) {
@@ -492,15 +498,21 @@ async function orchestrate() {
     targetViewId: targetName,
     model: opts.model,
     criticModel: opts.criticModel,
-    maxTurns: opts.maxTurns || 25, // RGB needs more turns: memory + GC + BXT + WCS + SPCC + NXT + stretch + NXT + saturation
+    maxTurns: opts.maxTurns || 30, // Phase A glue (~12 turns) + Phase B saturation iteration (~10-15 turns)
     skipCritics: opts.skipCritics,
     config,
     stageIndex: 2,
     statusLines,
+    // No accumulated feedback yet — RGB is the first creative stage
   });
   } catch (err) { if (err?.isCrash) handleCrash(2, 'RGB Cleanliness', err); throw err; }
   console.log(`  Winner: ${rgbResult.winnerId} (score=${rgbResult.winnerScore?.toFixed(1) || 'N/A'}, attempts=${rgbResult.attempts})`);
   store.recordStageCompletion(2, 'rgb_cleanliness', rgbResult.winnerId, null, { score: rgbResult.winnerScore });
+
+  // Feed-forward: collect advisor feedback for downstream stages
+  if (rgbResult.advisorFeedback) {
+    accumulatedFeedback.push(`**RGB Cleanliness advisor**: ${rgbResult.advisorFeedback}`);
+  }
 
   // Early abort: if RGB cleanliness exhausted all attempts with a bad score, stop
   const RGB_EARLY_ABORT_THRESHOLD = 50;
@@ -528,14 +540,20 @@ async function orchestrate() {
     targetViewId: rgbResult.winnerId || targetName,
     model: opts.model,
     criticModel: opts.criticModel,
-    maxTurns: opts.maxTurns || 10, // Stars is a quick decision
+    maxTurns: opts.maxTurns || 10, // Stars is all-glue, no creative iteration needed
     skipCritics: opts.skipCritics,
     stageIndex: 3,
     statusLines,
+    promptOptions: {
+      advisorFeedback: accumulatedFeedback.length > 0 ? accumulatedFeedback.join('\n\n') : undefined,
+    },
   });
   } catch (err) { if (err?.isCrash) handleCrash(3, 'Star Policy', err); throw err; }
   console.log(`  Winner: ${starResult.winnerId} (attempts=${starResult.attempts})`);
   store.recordStageCompletion(3, 'star_policy', starResult.winnerId, null);
+  if (starResult.advisorFeedback) {
+    accumulatedFeedback.push(`**Star Policy advisor**: ${starResult.advisorFeedback}`);
+  }
   // Check if stars were separated (look for a stars view)
   const postStarImgs = await ctx.listImages();
   const starsViewFound = postStarImgs.find(i => i.id.includes('stars') || i.id.includes('star'));
@@ -551,7 +569,7 @@ async function orchestrate() {
     try {
     haResult = await runDoerWithCritics(ctx, store, brief, {
       doerName: 'ha_integration',
-      doerPromptBuilder: (b) => buildHaIntegrationPrompt(b, config),
+      doerPromptBuilder: (b, c, opts) => buildHaIntegrationPrompt(b, c, opts),
       targetViewId: starResult.winnerId || targetName,
       model: opts.model,
       criticModel: opts.criticModel,
@@ -560,10 +578,16 @@ async function orchestrate() {
       config,
       stageIndex: 4,
       statusLines,
+      promptOptions: {
+        advisorFeedback: accumulatedFeedback.length > 0 ? accumulatedFeedback.join('\n\n') : undefined,
+      },
     });
     } catch (err) { if (err?.isCrash) handleCrash(4, 'Ha Integration', err); throw err; }
     console.log(`  Winner: ${haResult?.winnerId} (attempts=${haResult?.attempts})`);
     store.recordStageCompletion(4, 'ha_integration', haResult?.winnerId, null);
+    if (haResult?.advisorFeedback) {
+      accumulatedFeedback.push(`**Ha Integration advisor**: ${haResult.advisorFeedback}`);
+    }
   } else if (!hasHa) {
     console.log('\n--- Stage 4: Ha Integration — skipped (no Ha data) ---');
     statusLines.push('## Stage 4: Ha Integration — skipped (no Ha data)');
@@ -583,14 +607,20 @@ async function orchestrate() {
     targetViewId: postHaViewId,
     model: opts.model,
     criticModel: opts.criticModel,
-    maxTurns: opts.maxTurns,
+    maxTurns: opts.maxTurns || 35, // Phase A glue (~8-10 turns) + Phase B LHE/HDRMT iteration (~20-25 turns)
     skipCritics: opts.skipCritics,
     stageIndex: 5,
     statusLines,
+    promptOptions: {
+      advisorFeedback: accumulatedFeedback.length > 0 ? accumulatedFeedback.join('\n\n') : undefined,
+    },
   });
   } catch (err) { if (err?.isCrash) handleCrash(5, 'Luminance Detail', err); throw err; }
   console.log(`  Winner: ${lumResult.winnerId} (score=${lumResult.winnerScore?.toFixed(1) || 'N/A'}, attempts=${lumResult.attempts})`);
   store.recordStageCompletion(5, 'luminance_detail', lumResult.winnerId, null, { score: lumResult.winnerScore });
+  if (lumResult.advisorFeedback) {
+    accumulatedFeedback.push(`**Luminance Detail advisor**: ${lumResult.advisorFeedback}`);
+  }
 
   } else { lumResult = { winnerId: targetName, winnerScore: null, attempts: 0 }; }
 
@@ -605,11 +635,14 @@ async function orchestrate() {
     targetViewId: lumResult.winnerId || targetName,
     model: opts.model,
     criticModel: opts.criticModel,
-    maxTurns: opts.maxTurns,
+    maxTurns: opts.maxTurns || 30, // Phase A glue (~4-5 turns) + Phase B contrast/saturation iteration (~20-25 turns)
     skipCritics: opts.skipCritics,
     starsViewId,
     stageIndex: 6,
     statusLines,
+    promptOptions: {
+      advisorFeedback: accumulatedFeedback.length > 0 ? accumulatedFeedback.join('\n\n') : undefined,
+    },
   });
   } catch (err) { if (err?.isCrash) handleCrash(6, 'Composition', err); throw err; }
   console.log(`  Winner: ${compResult.winnerId} (score=${compResult.winnerScore?.toFixed(1) || 'N/A'}, attempts=${compResult.attempts})`);

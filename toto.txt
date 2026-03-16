@@ -1,0 +1,160 @@
+Loading config: /Users/aescaffre/NGC891/NGC891_LRGB_v3.json
+Pipeline: NGC891 LRGB (Iteration 3)
+Target: NGC891
+Steps: Combine RGB -> GradientCorrection -> BXT (correctOnly) -> Plate Solve -> SPCC -> SCNR -> BXT (sharpening) -> NXT Pass 1 -> SXT -> Star Stretch (Seti Linear) -> Star Saturation -> Star Reduction -> L Stretch -> L NXT -> L BXT -> Stretch (HT+GHS) -> NXT Pass 2 -> Curves -> LRGB Combine -> LHE (Local Contrast) -> HDR Multiscale -> NXT Final -> Final Curves -> Star Addition
+
+==== PHASE 0: SETUP ====
+Closing all open images...
+Opening R, G, B, L...
+  R: masterLight_BIN_1_6224x4168_EXPOSURE_180_00s_FILTER_R_mono_autocrop_integration_autocrop (5972x3920)
+  G: masterLight_BIN_1_6224x4168_EXPOSURE_180_00s_FILTER_V_mono_autocrop_integration_autocrop
+  B: masterLight_BIN_1_6224x4168_EXPOSURE_180_00s_FILTER_B_mono_autocrop_integration_autocrop
+  L: masterLight_BIN_1_6224x4168_EXPOSURE_180_00s_FILTER_L_mono_autocrop_integration_autocrop (5972x3920)
+Identified: R=masterLight_BIN_1_6224x4168_EXPOSURE_180_00s_FILTER_R_mono_autocrop_integration_autocrop G=masterLight_BIN_1_6224x4168_EXPOSURE_180_00s_FILTER_V_mono_autocrop_integration_autocrop B=masterLight_BIN_1_6224x4168_EXPOSURE_180_00s_FILTER_B_mono_autocrop_integration_autocrop L=masterLight_BIN_1_6224x4168_EXPOSURE_180_00s_FILTER_L_mono_autocrop_integration_autocrop
+
+==== PHASE 0b: CHANNEL ALIGNMENT (StarAlignment) ====
+  Reference: R (masterLight_BIN_1_6224x4168_EXPOSURE_180_00s_FILTER_R_mono_autocrop_integration_autocrop)
+  Aligning G, B, L to R...
+  Alignment done.
+  Re-opening aligned files...
+  Re-identified: R=masterLight_BIN_1_6224x4168_EXPOSURE_180_00s_FILTER_R_mono_autocrop_integration_autocrop G=masterLight_BIN_1_6224x4168_EXPOSURE_180_00s_FILTER_V_mono_autocrop_r B=masterLight_BIN_1_6224x4168_EXPOSURE_180_00s_FILTER_B_mono_autocrop_r L=masterLight_BIN_1_6224x4168_EXPOSURE_180_00s_FILTER_L_mono_autocrop_r
+  [memory] 1755MB
+
+==== PHASE 1: COMBINE RGB ====
+  L already matches RGB dimensions.
+  Creating RGB composite (NGC891)...
+  Copying astrometry from R...
+  Cloning L -> L_work...
+  Closing original masters...
+    [preview] Exporting combine_rgb (linear→auto-stretch)...
+    [preview] Saved: combine_rgb.jpg
+  [memory] 1293MB
+
+==== PHASE 2: GradientCorrection ====
+  Done.
+    [preview] Exporting gc (linear→auto-stretch)...
+    [preview] Saved: gc.jpg
+  [memory] 838MB
+
+==== PHASE 3: BXT (correctOnly) ====
+  Done.
+    [preview] Exporting bxt_correct (linear→auto-stretch)...
+    [preview] Saved: bxt_correct.jpg
+  [memory] 895MB
+
+==== PHASE 3b: Plate Solve (ImageSolver) ====
+  WARN: Script error: P.executeOn is not a function
+
+==== PHASE 4: SPCC ====
+  Done.
+    [preview] Exporting spcc (linear→auto-stretch)...
+    [preview] Saved: spcc.jpg
+  [memory] 1682MB
+  SCNR (green removal)...
+  Done.
+    [preview] Exporting scnr (linear→auto-stretch)...
+    [preview] Saved: scnr.jpg
+  [memory] 1695MB
+
+==== PHASE 5: BXT (sharpening) ====
+  Done.
+    [preview] Exporting bxt_sharpen (linear→auto-stretch)...
+    [preview] Saved: bxt_sharpen.jpg
+  [memory] 910MB
+
+==== PHASE 6: NXT pass 1 ====
+  Done.
+    [preview] Exporting nxt_pass1 (linear→auto-stretch)...
+    [preview] Saved: nxt_pass1.jpg
+  [memory] 809MB
+    [checkpoint] Saving main (NGC891) -> checkpoint_sxt_main.xisf
+    [checkpoint] Saved checkpoint: sxt (1 images)
+
+==== PHASE 7: SXT (star removal) ====
+  Done.
+  Stars: NGC891_stars
+    [preview] Exporting sxt (linear→auto-stretch)...
+    [preview] Saved: sxt.jpg
+  [memory] 1138MB
+
+==== PHASE 7b: LINEAR STAR PROCESSING (Seti method) ====
+  Clipping background pedestal...
+  undefined
+  Seti stretch: midtone=0.2, 5 iterations
+    MTF expr: (0.800000*$T)/((0.600000)*$T+0.200000)
+  Seti stretch: undefined
+  Star saturation applied.
+    [preview] Exporting star_stretch (non-linear)...
+    [preview] Saved: star_stretch.jpg
+  [memory] 1156MB
+  Linear stars ready: NGC891_stars
+
+==== PHASE 7d: Ha SXT (SKIPPED) ====
+
+==== PHASE 7e: Ha STRETCH (SKIPPED) ====
+
+==== PHASE 7e2: L SXT (star removal from L) ====
+  Done.
+  Closed L star image(s).
+    [preview] Exporting l_sxt (linear→auto-stretch)...
+    [preview] Saved: l_sxt.jpg
+  [memory] 604MB
+
+==== PHASE 7f: L STRETCH ====
+    Stats: median=0.001868, MAD=0.000031
+    Auto-stretch: shadows=0.001781, midtone=0.000778
+    Stretched OK.
+    [preview] Exporting l_stretch (linear→auto-stretch)...
+    [preview] Saved: l_stretch.jpg
+  [memory] 484MB
+
+==== PHASE 7g: L NXT ====
+  Done.
+    [preview] Exporting l_nxt (non-linear)...
+    [preview] Saved: l_nxt.jpg
+  [memory] 457MB
+
+==== PHASE 7h: L BXT ====
+  Done.
+    [preview] Exporting l_bxt (non-linear)...
+    [preview] Saved: l_bxt.jpg
+  [memory] 450MB
+    [checkpoint] Saving main (NGC891) -> checkpoint_stretch_main.xisf
+    [checkpoint] Saving stars (NGC891_stars) -> checkpoint_stretch_stars.xisf
+    [checkpoint] Saving lum (L_work) -> checkpoint_stretch_lum.xisf
+    [checkpoint] Saved checkpoint: stretch (3 images)
+
+==== PHASE 8: STRETCH (HT + GHS) ====
+  8a: AutoStretch (HT)...
+    Stats: median=0.000856, MAD=0.000012
+    Auto-stretch: shadows=0.000824, midtone=0.000293
+    Stretched OK.
+  Post-stretch median: 0.1000
+  8b: GHS refinement...
+    Midtone boost (D=0.6, SP=0.1000)...
+      Done.
+    Fine contrast (D=0.3, SP=0.1249)...
+      Done.
+  8c: Background neutralization...
+    Shadows R=0.0145 G=0.0155 B=0.0000 → clip R-0.0102 G-0.0108 B-0.0000
+    Neutralized.
+    [preview] Exporting stretch (non-linear)...
+    [preview] Saved: stretch.jpg
+  [memory] 680MB
+
+==== PHASE 8b: NON-LINEAR STAR EXTRACTION (SKIPPED — using linear Seti method) ====
+
+==== PHASE 9: NXT pass 2 ====
+  Done.
+    [preview] Exporting nxt_pass2 (non-linear)...
+    [preview] Saved: nxt_pass2.jpg
+  [memory] 891MB
+    [checkpoint] Saving main (NGC891) -> checkpoint_curves_main_main.xisf
+    [checkpoint] Saving stars (NGC891_stars) -> checkpoint_curves_main_stars.xisf
+    [checkpoint] Saving lum (L_work) -> checkpoint_curves_main_lum.xisf
+    [checkpoint] Saved checkpoint: curves_main (3 images)
+
+==== PHASE 10: CURVES (contrast + saturation) ====
+  10a: Contrast S-curve...
+  10	
+========================================
