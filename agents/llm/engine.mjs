@@ -4,10 +4,11 @@
 // ============================================================================
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { Mistral } from '@mistralai/mistralai';
 import crypto from 'crypto';
 import { BridgeCrashError } from '../ops/bridge.mjs';
 
-const DEFAULT_MODEL = 'gemini-2.5-pro';
+const DEFAULT_MODEL = 'mistral-large-latest';
 
 // ============================================================================
 // Provider abstraction
@@ -251,10 +252,143 @@ class GoogleProvider {
 }
 
 /**
+ * Mistral provider — uses OpenAI-compatible tool calling format.
+ */
+class MistralProvider {
+  constructor() {
+    const apiKey = process.env.MISTRAL_API_KEY;
+    if (!apiKey) throw new Error('MISTRAL_API_KEY environment variable required');
+    this.client = new Mistral({ apiKey });
+  }
+
+  async call(model, systemPrompt, tools, messages, maxTokens) {
+    // Convert messages to Mistral format (OpenAI-compatible)
+    const mistralMessages = [
+      { role: 'system', content: systemPrompt },
+      ...this._convertMessages(messages)
+    ];
+
+    const mistralTools = tools.map(t => ({
+      type: 'function',
+      function: { name: t.name, description: t.description, parameters: t.input_schema }
+    }));
+
+    const response = await this.client.chat.complete({
+      model,
+      messages: mistralMessages,
+      tools: mistralTools.length > 0 ? mistralTools : undefined,
+      maxTokens,
+    });
+
+    return this._normalize(response);
+  }
+
+  _convertMessages(messages) {
+    const result = [];
+    for (const msg of messages) {
+      if (msg.role === 'assistant') {
+        const content = this._convertAssistant(msg.content);
+        result.push(content);
+      } else if (msg.role === 'user') {
+        if (Array.isArray(msg.content)) {
+          const toolResults = msg.content.filter(b => b.type === 'tool_result');
+          const other = msg.content.filter(b => b.type !== 'tool_result');
+
+          // Tool results become separate tool messages (Mistral uses toolCallId, not tool_call_id)
+          for (const tr of toolResults) {
+            result.push({
+              role: 'tool',
+              toolCallId: tr.tool_use_id,
+              content: this._extractText(tr.content),
+            });
+          }
+          if (other.length > 0) {
+            result.push({ role: 'user', content: this._convertContent(other) });
+          }
+        } else {
+          result.push({ role: 'user', content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content) });
+        }
+      }
+    }
+    return result;
+  }
+
+  _convertAssistant(content) {
+    if (!Array.isArray(content)) return { role: 'assistant', content: String(content) };
+
+    const toolCalls = [];
+    let text = '';
+    for (const block of content) {
+      if (block.type === 'tool_use') {
+        toolCalls.push({
+          id: block.id,
+          type: 'function',
+          function: { name: block.name, arguments: JSON.stringify(block.input) }
+        });
+      } else if (block.type === 'text') {
+        text += block.text;
+      }
+    }
+
+    const msg = { role: 'assistant', content: text || null };
+    if (toolCalls.length > 0) msg.toolCalls = toolCalls;
+    return msg;
+  }
+
+  _convertContent(blocks) {
+    // Mistral supports vision via image_url content blocks
+    const parts = [];
+    for (const b of blocks) {
+      if (b.type === 'text') {
+        parts.push({ type: 'text', text: b.text });
+      } else if (b.type === 'image') {
+        parts.push({
+          type: 'image_url',
+          imageUrl: { url: `data:${b.source?.media_type || 'image/jpeg'};base64,${b.source?.data}` }
+        });
+      }
+    }
+    return parts.length === 1 && parts[0].type === 'text' ? parts[0].text : parts;
+  }
+
+  _extractText(content) {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) return content.filter(c => c.type === 'text').map(c => c.text).join('\n');
+    return String(content);
+  }
+
+  _normalize(response) {
+    const choice = response.choices?.[0];
+    const msg = choice?.message;
+    const toolCalls = [];
+    const textBlocks = [];
+
+    if (msg?.content) textBlocks.push(msg.content);
+    if (msg?.toolCalls) {
+      for (const tc of msg.toolCalls) {
+        toolCalls.push({
+          id: tc.id || `mistral_${crypto.randomUUID().slice(0, 8)}`,
+          name: tc.function.name,
+          input: typeof tc.function.arguments === 'string' ? JSON.parse(tc.function.arguments) : tc.function.arguments,
+        });
+      }
+    }
+
+    const stopReason = choice?.finishReason === 'stop' ? 'end_turn' : choice?.finishReason;
+    return { toolCalls, textBlocks, stopReason, raw: response };
+  }
+
+  buildToolResult(toolUseId, content, toolName) {
+    return { type: 'tool_result', tool_use_id: toolUseId, content, _toolName: toolName };
+  }
+}
+
+/**
  * Detect provider from model name.
  */
 function getProvider(model) {
   if (model.startsWith('gemini')) return new GoogleProvider();
+  if (model.startsWith('mistral')) return new MistralProvider();
   return new AnthropicProvider();
 }
 
@@ -379,7 +513,8 @@ export class LLMAgent {
       }
 
       // Add assistant message and tool results to history
-      this.messages.push({ role: 'assistant', content: response.raw?.content || this._buildAssistantContent(textBlocks, toolCalls) });
+      // Always use canonical format for history — providers convert as needed
+      this.messages.push({ role: 'assistant', content: this._buildAssistantContent(textBlocks, toolCalls) });
       this.messages.push({ role: 'user', content: toolResults });
 
       this.turnCount++;
