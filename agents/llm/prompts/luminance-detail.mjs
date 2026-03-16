@@ -50,7 +50,7 @@ A separate luminance channel (\`FILTER_L\`) should be open in PixInsight. This i
    - BXT correct (\`run_bxt\` with correct_only=true on FILTER_L)
    - Copy WCS from R master (\`copy_astrometric_solution\` — BXT strips it)
    - NXT linear (\`run_nxt\` denoise=0.20 on FILTER_L)
-   - Seti stretch (\`seti_stretch\` target=0.12, headroom=0.10 on FILTER_L) — headroom=0.10 is critical for HDRMT core detail
+   - Seti stretch (\`seti_stretch\` target=0.12, headroom=0.15 on FILTER_L) — headroom=0.15 is CRITICAL. Cores MUST NOT clip to 1.0. HDRMT cannot recover clipped pixels. After stretch, verify max < 0.90.
    - LHE on L (with luminance mask, amount=0.25, r=64)
    - Inverted HDRMT on L (6 layers, 1 iteration)
    - NXT final on L (denoise=0.25)
@@ -97,7 +97,8 @@ ${brief.aestheticIntent.referenceNotes ? `User notes: ${brief.aestheticIntent.re
    - **Inverted mode** (invertedIterations=true): enhances local detail. Preferred for luminance.
    - This is the PRIMARY tool for resolving spiral arm structure and core detail.
    - layers=5-7, iterations=1 for inverted (2 is too aggressive, clips to 1.0)
-   - HDRMT cannot recover clipped data. Ensure headroom exists.
+   - HDRMT CANNOT recover clipped data. If max pixel is near 1.0, HDRMT will ring on the core.
+   - **Before HDRMT**: verify max pixel < 0.90. If higher, the stretch headroom was insufficient.
    - ALWAYS check for ringing on bright cores after HDRMT.
    ${isGalaxy ? `- Galaxy cores are ringing-prone. Use maskClipLow=0.30-0.35 for HDRMT mask.
    - For edge-on galaxies: core protection is critical, use higher clipLow.` : ''}
