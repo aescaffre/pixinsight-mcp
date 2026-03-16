@@ -915,7 +915,7 @@ const TOOL_CATALOG = {
     category: 'curves',
     definition: {
       name: 'run_pixelmath',
-      description: 'Run an arbitrary PixelMath expression. CAUTION: pow() is not available — use exp(exponent*ln(base)) instead.',
+      description: 'Run an arbitrary PixelMath expression. RULES: (1) NO pow() — use exp(exponent*ln(base)). (2) Channel access is $T[0] for R, $T[1] for G, $T[2] for B — NOT $T.R or $T.B. (3) For other images use viewId[0], viewId[1], viewId[2].',
       input_schema: {
         type: 'object',
         properties: {
