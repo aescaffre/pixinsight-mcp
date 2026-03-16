@@ -7,7 +7,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import crypto from 'crypto';
 import { BridgeCrashError } from '../ops/bridge.mjs';
 
-const DEFAULT_MODEL = 'claude-sonnet-4-20250514';
+const DEFAULT_MODEL = 'gemini-2.5-pro';
 
 // ============================================================================
 // Provider abstraction

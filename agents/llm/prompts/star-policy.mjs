@@ -67,9 +67,10 @@ SXT may leave residuals on large spirals (HII regions, spiral knots). This is ac
 1. **Recall memory** — check what worked before
 2. **List open images** — find the stars view (created by RGB agent, name contains "stars")
 3. If stars view exists and is LINEAR (median very low, < 0.01):
-   - **MUST stretch the stars** with \`auto_stretch\` (target_bg=0.25) — linear stars screen-blended onto stretched data creates giant white blobs!
-   - Apply gentle saturation curve: S channel [[0,0],[0.50,0.58],[1,1]]
-   - Show preview to verify star quality — stars should look like small bright points, not large circles
+   - **MUST use \`stretch_stars\`** — this clips the background to zero and rescales only star peaks.
+   - **NEVER use \`auto_stretch\` or \`seti_stretch\` on stars** — they lift the background and amplify SXT residuals into green/purple blobs!
+   - After stretching, apply gentle saturation curve: S channel [[0,0],[0.50,0.58],[1,1]]
+   - Show preview to verify: stars should be small bright points on a BLACK background, no colored blobs
 4. If NO stars view: run SXT on the current image (\`is_linear=false\` if stretched) as fallback
 5. **Call finish** with the main (starless) view_id
 

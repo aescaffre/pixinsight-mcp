@@ -399,6 +399,71 @@ const TOOL_CATALOG = {
     }
   },
 
+  stretch_stars: {
+    category: 'stretch',
+    definition: {
+      name: 'stretch_stars',
+      description: 'Stretch a LINEAR star image using the Seti method: clip background pedestal, then iterative MTF. Produces tight, point-like stars on a black background. DO NOT use auto_stretch or seti_stretch on star images — they amplify background noise.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'Star image view ID (must be linear)' },
+          midtone: { type: 'number', description: 'MTF midtone (0.15-0.25, default 0.20). Lower = brighter faint stars but risk of bloat.' },
+          iterations: { type: 'integer', description: 'Number of MTF iterations (3-7, default 5). More = brighter faint stars.' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const midtone = input.midtone ?? 0.20;
+      const iterations = input.iterations ?? 5;
+
+      // Seti star stretch method (proven in scripted pipeline):
+      // 1. Clip background pedestal (subtract median, rescale)
+      // 2. MTF iterations: progressively lift faint stars while constraining bright ones
+      const r = await ctx.pjsr(`
+        var w = ImageWindow.windowById('${input.view_id}');
+        if (w.isNull) throw new Error('View not found: ${input.view_id}');
+        var v = w.mainView;
+
+        // Step 1: Clip background pedestal
+        var med = v.image.median();
+        if (med > 0.00001) {
+          var P = new PixelMath;
+          P.expression = 'max(0, ($T - ' + med + ') / (1 - ' + med + '))';
+          P.useSingleExpression = true;
+          P.createNewImage = false;
+          P.use64BitWorkingImage = true;
+          P.truncate = true; P.truncateLower = 0; P.truncateUpper = 1;
+          P.executeOn(v);
+        }
+
+        // Step 2: Seti MTF stretch — N iterations
+        // MTF(m, x) = (1-m)*x / ((1-2*m)*x + m)
+        var m = ${midtone};
+        var a = (1 - m).toFixed(6);
+        var b = (1 - 2*m).toFixed(6);
+        var mtfExpr = '(' + a + '*$T)/((' + b + ')*$T+' + m.toFixed(6) + ')';
+        for (var i = 0; i < ${iterations}; i++) {
+          var P2 = new PixelMath;
+          P2.expression = mtfExpr;
+          P2.useSingleExpression = true;
+          P2.createNewImage = false;
+          P2.use64BitWorkingImage = true;
+          P2.truncate = true; P2.truncateLower = 0; P2.truncateUpper = 1;
+          P2.executeOn(v);
+          processEvents();
+        }
+
+        var finalMed = v.image.median();
+        var finalMax = v.image.maximum();
+        JSON.stringify({ bgClip: med, midtone: m, iterations: ${iterations}, finalMedian: finalMed, finalMax: finalMax });
+      `);
+      const result = JSON.parse(r.outputs?.consoleOutput || '{}');
+      return { type: 'text', text: `Stars stretched (Seti method): bgClip=${result.bgClip?.toFixed(6)}, midtone=${midtone}, ${iterations} iterations. Final: median=${result.finalMedian?.toFixed(4)}, max=${result.finalMax?.toFixed(4)}` };
+    }
+  },
+
   auto_stretch: {
     category: 'stretch',
     definition: {
