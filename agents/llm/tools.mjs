@@ -594,6 +594,9 @@ const TOOL_CATALOG = {
         var tgtW = ImageWindow.windowById('${input.target_id}');
         if (tgtW.isNull) throw new Error('Target not found: ${input.target_id}');
 
+        // Check file exists BEFORE opening (avoids modal popup on missing file)
+        if (!File.exists(srcPath)) throw new Error('Source file not found: ' + srcPath);
+
         var wins = ImageWindow.open(srcPath);
         if (!wins || wins.length === 0) throw new Error('Cannot open source: ' + srcPath);
         var srcW = wins[0];
@@ -608,9 +611,15 @@ const TOOL_CATALOG = {
         if (!srcW.hasAstrometricSolution) {
           info = 'WARNING: source has no astrometric solution';
         } else {
-          // Use PixInsight's native API to copy the full astrometric solution
-          tgtW.copyAstrometricSolution(srcW);
-          info = 'Astrometric solution copied (hasAstro=' + tgtW.hasAstrometricSolution + ')';
+          // Check dimension match — WCS is dimension-specific
+          var sw = srcW.mainView.image.width, sh = srcW.mainView.image.height;
+          var tw = tgtW.mainView.image.width, th = tgtW.mainView.image.height;
+          if (sw !== tw || sh !== th) {
+            info = 'WARNING: dimension mismatch (source ' + sw + 'x' + sh + ' vs target ' + tw + 'x' + th + '). WCS not copied — SPCC may fail.';
+          } else {
+            tgtW.copyAstrometricSolution(srcW);
+            info = 'Astrometric solution copied (hasAstro=' + tgtW.hasAstrometricSolution + ')';
+          }
         }
 
         // Copy observation keywords (BXT may have cleared them)
