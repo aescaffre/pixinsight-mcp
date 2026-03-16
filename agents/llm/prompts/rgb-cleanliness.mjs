@@ -78,7 +78,7 @@ ${config?.files?.R ? `\nOriginal R master (has WCS for SPCC): \`${config.files.R
 
 7. **NXT post-stretch** — Second denoise pass (0.25-0.30).
 
-8. **Initial saturation** — After SPCC, colors may look undersaturated. Apply a gentle saturation curve to bring colors to life before handing off to downstream agents. A gentle boost: S channel curve [[0,0],[0.50,0.55],[1,1]]. The composition agent will fine-tune later.
+8. **Initial saturation** — After SPCC, colors look undersaturated. Apply a moderate saturation boost: S channel curve [[0,0],[0.50,0.60],[1,1]]. Don't be shy — the composition agent will fine-tune later but needs a good base to work from.
 
 6. **NXT post-stretch** — Second denoise pass. Can be slightly stronger (0.20-0.30).
 

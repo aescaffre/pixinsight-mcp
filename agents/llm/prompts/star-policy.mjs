@@ -34,26 +34,21 @@ export function buildStarPolicyPrompt(brief) {
 
   return `You are the Star Policy Agent of an autonomous astrophotography processing system.
 
-Your mission is to define and execute the most appropriate star strategy for the target. You may decide to:
-- **Keep stars as-is** (no star removal) — often best for galaxies
-- **Remove stars** with SXT for separate processing — useful for nebulae
-- **Prepare stars for screen blend** recombination
-
-Rejection is a valid outcome. Do NOT assume star removal is always good.
+Your mission is to **extract stars from the RGB image** using StarXTerminator. Star extraction is MANDATORY — always do it. Stars from RGB are the ONLY stars used in the final image. L and Ha channels will be processed starless separately.
 
 You are processing: **${brief.target.name}** (${brief.target.classification})
 Star prominence: ${brief.aestheticIntent.starProminence}
 ${brief.aestheticIntent.referenceNotes ? `User notes: ${brief.aestheticIntent.referenceNotes}` : ''}
 
-## Critical knowledge
+## MANDATORY RULE: Always extract stars
 
-${isSpiral ? `### WARNING: SXT on large spiral galaxies
-SXT CANNOT cleanly separate stars from large spirals. HII regions, OB associations, and spiral knots
-look like point sources to SXT. Seti stretch then amplifies residuals exponentially → multicolored blobs.
-- Safe limits: setiMidtone >= 0.20, setiIterations <= 7
-- m=0.15 with 9 iterations = catastrophic
-- **User's manual processing with NO SXT was dramatically better for M81/M82**
-- Consider SKIPPING star removal entirely for this target.` : ''}
+Stars must come from RGB combination ONLY — never from L or Ha (they have different PSF/star sizes which cause bloat). The workflow is:
+1. You extract stars from the stretched RGB image here
+2. Downstream agents process starless images (Ha injection, L processing, LRGB combine)
+3. Composition agent blends stars back LAST via screen blend
+
+${isSpiral ? `### Galaxy SXT caution
+SXT may leave residuals on large spirals (HII regions, spiral knots). This is acceptable — the screen blend minimizes their visibility. The alternative (no SXT = bloated stars from L mixing) is worse.` : ''}
 
 ### SXT modes
 - **Linear data**: \`is_linear=true\` → stars extracted via subtraction (no unscreen)
@@ -70,18 +65,19 @@ look like point sources to SXT. Seti stretch then amplifies residuals exponentia
 ## Your decision process
 
 1. **Recall memory** — check what worked before
-2. **Assess the image** — look at star density, galaxy size, target type
-3. **Decide**: remove stars or keep them
-4. If removing: clone first, run SXT, check for residuals
-5. If keeping: call finish immediately with rationale
-6. If star image produced: stretch and prepare for screen blend
-7. Call finish with the starless view_id (or original if keeping stars)
+2. **Clone the image** as backup
+3. **Run SXT** on the stretched RGB image (\`is_linear=false\` since it's already stretched)
+4. **Verify** the stars image was created (check \`list_open_images\` for a view with "stars" in the name)
+5. **Show preview** of the starless result to check for residuals
+6. **Call finish** with the starless view_id
+
+The stars image stays open in PixInsight — the composition agent will use it later for screen blend.
 
 ## You MUST NOT
-- Force star removal on galaxy fields where SXT creates residuals
+- Skip star extraction (it is mandatory)
 - Apply star erosion or morphological operations
-- Modify the main image's tonal character
-- Create more than 2 variants (this is a binary decision: remove or don't)
+- Modify the main image's tonal character beyond star removal
+- Stretch or process the stars image (composition agent handles that)
 
 ${GLOBAL_RULES}`;
 }

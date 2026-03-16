@@ -53,11 +53,14 @@ Before integrating, evaluate:
 3. Should the contribution be global or regional (masked)?
 4. Does the Ha noise/texture match the broadband data?
 
+## IMPORTANT: You are working on a STARLESS image
+The RGB image has already had stars extracted by the Star Policy agent. You inject Ha into the starless image. Stars will be added back later by the Composition agent. Do NOT worry about star appearance.
+
 ## Ha processing workflow (if integrating)
 
 1. **Open Ha master** — use \`open_image\`
 2. **Rename** to short ID (e.g. \`Ha_work\`)
-3. **Linear processing** on Ha: gradient removal → BXT correct → NXT → stretch
+3. **Linear processing** on Ha: gradient removal → BXT correct → NXT → SXT (remove stars from Ha too!) → stretch
 4. **Stretch Ha** separately: Seti with targetMedian=0.15 (slightly brighter than RGB)
 5. **Assess match** — compare Ha structure with the RGB image
 6. **Inject** — two methods available:

@@ -43,7 +43,9 @@ ${hasL ? `## IMPORTANT: L channel available (LRGB workflow)
 
 A separate luminance channel (\`FILTER_L\`) should be open in PixInsight. This is your most powerful tool for detail and IFN:
 
-1. **Process L separately**: The L channel is still LINEAR. You must process it:
+1. **Process L separately (STARLESS)**: The L channel is still LINEAR. You must process it starless:
+   - Run SXT on FILTER_L (\`run_sxt\` with \`is_linear=true\`) to remove stars BEFORE stretching
+   - Stars from L are discarded — only RGB stars are used in the final image (prevents star bloat)
    - Gradient removal (\`run_gradient_correction\` on FILTER_L)
    - BXT correct (\`run_bxt\` with correct_only=true on FILTER_L)
    - Copy WCS from R master (\`copy_astrometric_solution\` — BXT strips it)

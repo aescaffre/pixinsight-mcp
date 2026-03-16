@@ -1500,9 +1500,9 @@ const TOOL_CATALOG = {
 const AGENT_TOOL_CATEGORIES = {
   readiness: ['measurement', 'readiness', 'image_mgmt', 'memory', 'control'],
   rgb_cleanliness: ['measurement', 'preview', 'image_mgmt', 'gradient', 'denoise', 'sharpen', 'stretch', 'calibration', 'memory', 'artifacts', 'control'],
-  luminance_detail: ['measurement', 'preview', 'image_mgmt', 'detail', 'masks', 'denoise', 'sharpen', 'stretch', 'gradient', 'calibration', 'readiness', 'memory', 'artifacts', 'control'],
+  luminance_detail: ['measurement', 'preview', 'image_mgmt', 'detail', 'masks', 'denoise', 'sharpen', 'stretch', 'gradient', 'calibration', 'readiness', 'star_removal', 'memory', 'artifacts', 'control'],
   star_policy: ['measurement', 'preview', 'image_mgmt', 'star_removal', 'stretch', 'curves', 'memory', 'artifacts', 'control'],
-  ha_integration: ['measurement', 'preview', 'image_mgmt', 'gradient', 'denoise', 'sharpen', 'stretch', 'masks', 'ha_injection', 'memory', 'artifacts', 'control'],
+  ha_integration: ['measurement', 'preview', 'image_mgmt', 'gradient', 'denoise', 'sharpen', 'stretch', 'masks', 'ha_injection', 'star_removal', 'memory', 'artifacts', 'control'],
   composition: ['measurement', 'preview', 'image_mgmt', 'curves', 'stars', 'lrgb', 'memory', 'artifacts', 'control'],
   aesthetic_critic: ['measurement', 'memory', 'control', 'scoring'],
   technical_critic: ['measurement', 'memory', 'control', 'scoring'],

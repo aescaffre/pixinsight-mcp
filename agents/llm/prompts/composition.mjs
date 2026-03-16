@@ -63,16 +63,19 @@ ${brief.aestheticIntent.referenceNotes ? `User notes: ${brief.aestheticIntent.re
    ${isGalaxy ? '- Galaxy: center the S-curve around the subject median, not 0.50' : ''}
 
 2. **Saturation curves** (CurvesTransformation on S channel)
-   - Gentle boost: [[0,0],[0.50,0.55],[1,1]]
    - Moderate: [[0,0],[0.50,0.60],[1,1]]
-   - Strong: [[0,0],[0.50,0.65],[1,1]]
-   ${isGalaxy ? '- Galaxy saturation: [0.50, 0.55-0.60] range' : ''}
-   ${isNebula ? '- Nebula saturation: [0.50, 0.60-0.65] range (color is primary value)' : ''}
+   - Strong: [[0,0],[0.50,0.68],[1,1]]
+   - Very strong: [[0,0],[0.50,0.75],[1,1]]
+   ${isGalaxy ? '- Galaxy saturation: [0.50, 0.65-0.70] range — push it! Previous runs were too conservative.' : ''}
+   ${isNebula ? '- Nebula saturation: [0.50, 0.70-0.75] range (color is the primary value)' : ''}
+   - User feedback: "still lots of room for more saturation" — be bolder than your instinct.
 
-3. **Star screen blend** (if stars view is available)
+3. **Star screen blend** (MANDATORY — stars view should be available)
+   - Stars were extracted from RGB ONLY by the star policy agent — these are the ONLY stars to use
    - Screen blend formula: ~(~target * ~(stars * strength))
    - strength=0.80-1.00 for natural, 0.60-0.80 for subdued
    - Screen blend avoids SXT residual rim artifacts
+   - Do this AFTER LRGB combine and curves — stars go on LAST
 
 4. **Hue-selective saturation** (galaxies — better than blanket boost)
    - Instead of uniform saturation curve, boost per-hue via PixelMath:
