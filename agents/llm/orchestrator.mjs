@@ -974,6 +974,105 @@ This is the FINAL image before output. Your job is to verify it passes all hard 
 
   store.finalize(compResult.winnerId || 'unknown');
 
+  // --- Post-run analysis: generate improvement memories for next run ---
+  console.log('\n--- Post-run Analysis ---');
+  {
+    const finalStats = await getStats(ctx, finalViewId);
+    const finalUni = await measureUniformity(ctx, finalViewId);
+    const intent = (opts.intent || '').toUpperCase();
+    const classification = brief.target.classification;
+    const memories = [];
+
+    // Check: intent says "brighter" but median is low
+    if ((intent.includes('BRIGHT') || intent.includes('BRIGHTER')) && finalStats.median < 0.10) {
+      memories.push({
+        title: `${classification}: increase stretch target for brightness`,
+        content: `Intent requested brighter image but final median was ${finalStats.median.toFixed(4)} (< 0.10). Increase seti_stretch target_median or apply mild brightness PixelMath in composition.`,
+        tags: [classification, 'stretch_target', 'improvement'],
+      });
+    }
+
+    // Check: intent says "more detail" but no HDRMT was applied
+    const lumTranscriptPath = path.join(store.baseDir, 'transcripts', 'luminance_detail.json');
+    let hadHDRMT = false;
+    if (fs.existsSync(lumTranscriptPath)) {
+      const lumTranscript = fs.readFileSync(lumTranscriptPath, 'utf-8');
+      hadHDRMT = lumTranscript.includes('HDRMT') || lumTranscript.includes('hdrmt') || lumTranscript.includes('MultiscaleMedianTransform');
+    }
+    if ((intent.includes('DETAIL') || intent.includes('MORE_DETAIL')) && !hadHDRMT) {
+      memories.push({
+        title: `${classification}: ensure HDRMT runs for detail`,
+        content: `Intent requested more detail but HDRMT was not applied during luminance_detail stage. Ensure HDRMT inverted is attempted in Phase B3.`,
+        tags: [classification, 'hdrmt', 'improvement'],
+      });
+    }
+
+    // Check: intent says "IFN" but background is too dark
+    if (intent.includes('IFN') && finalStats.median < 0.05) {
+      memories.push({
+        title: `${classification}: lift background for IFN visibility`,
+        content: `Intent requested IFN but final median was ${finalStats.median.toFixed(4)} (< 0.05). Background is too dark for IFN. Increase stretch target or reduce shadow crush in composition contrast curves.`,
+        tags: [classification, 'ifn', 'improvement'],
+      });
+    }
+
+    // Check: poor background uniformity
+    if (finalUni.score > 0.005) {
+      memories.push({
+        title: `${classification}: background uniformity was poor`,
+        content: `Final background uniformity score was ${finalUni.score.toFixed(6)} (> 0.005, threshold for acceptable). Consider stronger gradient correction or per-channel GC.`,
+        tags: [classification, 'uniformity', 'improvement'],
+      });
+    }
+
+    // Check: image is very dark overall
+    if (finalStats.median < 0.06) {
+      memories.push({
+        title: `${classification}: final image very dark`,
+        content: `Final median was ${finalStats.median.toFixed(4)} (< 0.06). Image may appear too dark. Consider increasing stretch target_median or adding brightness in composition.`,
+        tags: [classification, 'brightness', 'improvement'],
+      });
+    }
+
+    // Check: clipping risk
+    if ((finalStats.max ?? 0) > 0.99) {
+      memories.push({
+        title: `${classification}: clipping detected in final image`,
+        content: `Final max pixel was ${(finalStats.max ?? 0).toFixed(4)} (> 0.99). Some data is clipped. Increase headroom in stretch or reduce highlight push in contrast curves.`,
+        tags: [classification, 'clipping', 'improvement'],
+      });
+    }
+
+    // Save memories to ALL creative agent memory files
+    if (memories.length > 0) {
+      const agentNames = ['rgb_cleanliness', 'luminance_detail', 'composition'];
+      const memDir = path.join(os.homedir(), '.pixinsight-mcp', 'agent-memory');
+      fs.mkdirSync(memDir, { recursive: true });
+
+      for (const agentName of agentNames) {
+        const memFile = path.join(memDir, `${agentName}.json`);
+        let entries = [];
+        if (fs.existsSync(memFile)) entries = JSON.parse(fs.readFileSync(memFile, 'utf-8'));
+        for (const mem of memories) {
+          entries.push({
+            ...mem,
+            date: new Date().toISOString().slice(0, 10),
+            timestamp: new Date().toISOString(),
+          });
+        }
+        fs.writeFileSync(memFile, JSON.stringify(entries, null, 2));
+      }
+
+      console.log(`  Generated ${memories.length} improvement memory(ies):`);
+      for (const m of memories) {
+        console.log(`    - ${m.title}`);
+      }
+      console.log(`  Saved to: rgb_cleanliness, luminance_detail, composition`);
+    } else {
+      console.log('  No improvement suggestions — image meets all intent-based checks.');
+    }
+  }
+
   // Final live status
   statusLines.push(`## Stage 8: Finalize ✅`);
   statusLines.push('');

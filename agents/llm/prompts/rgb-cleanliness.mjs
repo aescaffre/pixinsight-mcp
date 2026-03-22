@@ -124,6 +124,12 @@ Run \`run_nxt\` with denoise=0.25. Single pass.
 
 ## B1. Saturation curve — Push until rejection
 
+**IMPORTANT: Check your memory for starting parameters.**
+If recall_memory returned winning values for this target classification (e.g. "planetary_nebula: saturation midpoint=0.68"),
+START from just below that value (e.g. 0.63) instead of the conservative default (0.58).
+Skip steps in the table that are below your memory-informed starting point.
+This avoids wasting turns re-discovering known-good parameters.
+
 The image after SPCC is undersaturated. Your job is to find the MAXIMUM saturation
 that still looks natural, not to settle for a timid default.
 
@@ -146,7 +152,10 @@ ${isNebula ? '- Nebulae: expect to land around 0.70-0.78. Emission color is the 
 3. If step 2 is also clean: note "0.63 = good", push to step 3
 4. Continue until you see: color banding, unnatural hues, chromatic noise amplification, or blown channels
 5. When you hit rejection: revert to clone, re-apply the LAST GOOD value
-6. \`save_memory\` with the winning saturation value for this target type
+6. \`save_memory\` with the winning value AND the target classification:
+   - Title: "{target_classification}: saturation midpoint = {value}"
+   - Content: "For {classification} targets, saturation midpoint landed at {value} (rejection at {rejection_value}). Start next run at {value - one_step}."
+   - Tags: ["{classification}", "saturation_midpoint", "winning_param"]
 
 **Assessment criteria for each step:**
 - Check per-channel max values (any channel > 0.98 = clipping risk)

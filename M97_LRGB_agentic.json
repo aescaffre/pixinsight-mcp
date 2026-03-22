@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "name": "M97 Owl Nebula LRGB — LLM Agentic Pipeline",
+  "files": {
+    "sourceFolder": "/Users/aescaffre/M97_Output/master",
+    "L": "/Users/aescaffre/M97_Output/master/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-L_mono_autocrop.xisf",
+    "R": "/Users/aescaffre/M97_Output/master/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-R_mono_autocrop.xisf",
+    "G": "/Users/aescaffre/M97_Output/master/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-V_mono_autocrop.xisf",
+    "B": "/Users/aescaffre/M97_Output/master/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-B_mono_autocrop.xisf",
+    "Ha": "",
+    "outputDir": "/Users/aescaffre/M97_Output/agentic",
+    "targetName": "M97"
+  }
+}

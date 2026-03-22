@@ -113,6 +113,12 @@ Clone the result as your revert point for all Phase B experiments.
 
 ## B1. Contrast S-curve — Push until rejection
 
+**IMPORTANT: Check your memory for starting parameters.**
+If recall_memory returned winning values for this target classification (e.g. "galaxy_spiral: contrast curve = step 3 Balanced"),
+START from just below that step (e.g. step 2 Gentle) instead of the conservative default (step 1 Whisper).
+Skip steps in the table that are below your memory-informed starting point.
+This avoids wasting turns re-discovering known-good parameters.
+
 **Iteration target: S-curve shadow pull-down and highlight push-up**
 
 The S-curve is defined by shadow control point and highlight control point.
@@ -141,6 +147,12 @@ ${isGalaxy ? 'Center the S-curve around the subject median (~0.10-0.15 for galax
 - Image looks "contrasty" rather than natural
 
 ## B2. Saturation curve — Push until rejection
+
+**IMPORTANT: Check your memory for starting parameters.**
+If recall_memory returned winning values for this target classification (e.g. "galaxy_spiral: composition saturation midpoint=0.65"),
+START from just below that value (e.g. 0.60) instead of the conservative default (0.55).
+Skip steps in the table that are below your memory-informed starting point.
+This avoids wasting turns re-discovering known-good parameters.
 
 **Iteration target: S-channel curve midpoint**
 
@@ -196,12 +208,15 @@ Stars go on LAST, after all curve work.
 ## B6. Save winning parameters
 
 After all push-until-rejection loops complete:
-1. \`save_memory\` with ALL winning values:
-   - Contrast curve: step N (describe which S-curve won)
-   - Saturation: midpoint=X
-   - Hue-selective: applied/skipped, factors used
-   - Star strength: value used
-   - Include target type for future reference
+1. \`save_memory\` for EACH winning parameter with the target classification:
+   - Title: "{target_classification}: contrast curve = step {N} ({character})"
+   - Content: "For {classification} targets, contrast curve landed at step {N} ({character}) (rejection at step {rejection_step}). Start next run at step {N-1}."
+   - Tags: ["{classification}", "contrast_curve", "winning_param"]
+   - Title: "{target_classification}: composition saturation midpoint = {value}"
+   - Content: "For {classification} targets, composition saturation midpoint landed at {value} (rejection at {rejection_value}). Start next run at {value - one_step}."
+   - Tags: ["{classification}", "composition_saturation", "winning_param"]
+   - Also save hue-selective and star strength if applicable:
+     - Tags: ["{classification}", "hue_selective", "winning_param"] or ["{classification}", "star_strength", "winning_param"]
 2. Save the final result as a variant.
 
 ## You MUST

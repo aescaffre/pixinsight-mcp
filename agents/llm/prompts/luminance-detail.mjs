@@ -136,6 +136,12 @@ Every application MUST follow this pattern:
 
 ## B1. LHE large-scale — Push until rejection
 
+**IMPORTANT: Check your memory for starting parameters.**
+If recall_memory returned winning values for this target classification (e.g. "galaxy_spiral: LHE large amount=0.35"),
+START from just below that value (e.g. 0.28) instead of the conservative default (0.20).
+Skip steps in the table that are below your memory-informed starting point.
+This avoids wasting turns re-discovering known-good parameters.
+
 Start conservative, push the amount higher until artifacts appear.
 
 **Iteration target: LHE amount at radius=128**
@@ -162,6 +168,12 @@ ${isNebula ? `- Nebulae: expect to land around 0.20-0.30. Emission regions toler
 
 ## B2. LHE mid-scale — Push until rejection (OPTIONAL)
 
+**IMPORTANT: Check your memory for starting parameters.**
+If recall_memory returned winning values for this target classification (e.g. "galaxy_spiral: LHE mid amount=0.25"),
+START from just below that value (e.g. 0.18) instead of the conservative default (0.18).
+Skip steps in the table that are below your memory-informed starting point.
+This avoids wasting turns re-discovering known-good parameters.
+
 Only attempt if B1 produced good results and you have budget remaining.
 Uses a DIFFERENT, tighter mask than B1.
 
@@ -175,6 +187,12 @@ Uses a DIFFERENT, tighter mask than B1.
 - If B1 was already aggressive (amount > 0.35), skip B2 entirely.
 
 ## B3. HDRMT inverted — Push until rejection
+
+**IMPORTANT: Check your memory for starting parameters.**
+If recall_memory returned winning values for this target classification (e.g. "galaxy_spiral: HDRMT layers=6"),
+START from just below that value (e.g. 5 layers) instead of the conservative default (5).
+Skip steps in the table that are below your memory-informed starting point.
+This avoids wasting turns re-discovering known-good parameters.
 
 ${isGalaxy ? `ESSENTIAL for galaxy core detail. Do not skip.` : `Optional for nebulae — try one pass and assess.`}
 
@@ -207,11 +225,15 @@ After all LHE/HDRMT experimentation, apply one gentle cleanup:
 ## B5. Save winning parameters
 
 After all push-until-rejection loops complete:
-1. \`save_memory\` with ALL winning values:
-   - LHE large: amount=X, slopeLimit=Y
-   - LHE mid: amount=X (or "skipped")
-   - HDRMT: layers=N (or "skipped")
-   - Include target type and classification for future reference
+1. \`save_memory\` for EACH winning parameter with the target classification:
+   - Title: "{target_classification}: LHE large amount = {value}"
+   - Content: "For {classification} targets, LHE large amount landed at {value} (rejection at {rejection_value}). Start next run at {value - one_step}."
+   - Tags: ["{classification}", "lhe_large_amount", "winning_param"]
+   - Repeat for LHE mid amount (or note "skipped") and HDRMT layers:
+     - Title: "{target_classification}: LHE mid amount = {value}"
+     - Tags: ["{classification}", "lhe_mid_amount", "winning_param"]
+     - Title: "{target_classification}: HDRMT layers = {value}"
+     - Tags: ["{classification}", "hdrmt_layers", "winning_param"]
 2. Save a variant with the final result.
 
 ## Artifact checklist (check after EACH Phase B operation)
