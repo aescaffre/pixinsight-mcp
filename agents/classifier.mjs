@@ -4,6 +4,22 @@
 // Rule-based for Phase 1 (LLM-based classification in Phase 2).
 // ============================================================================
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Load processing profiles from JSON.
+ */
+function loadProcessingProfiles() {
+  const profilePath = path.join(__dirname, 'processing-profiles.json');
+  if (fs.existsSync(profilePath)) {
+    return JSON.parse(fs.readFileSync(profilePath, 'utf-8'));
+  }
+  return {};
+}
 
 /**
  * Common deep sky objects and their classifications.
@@ -38,9 +54,9 @@ const KNOWN_OBJECTS = {
   'IC2118': 'reflection_nebula', 'NGC1333': 'reflection_nebula',
   'vdB': 'reflection_nebula',
   // Planetary nebulae
-  'M27': 'planetary_nebula', 'M57': 'planetary_nebula',
+  'M27': 'planetary_nebula', 'M57': 'planetary_nebula', 'M97': 'planetary_nebula',
   'NGC7293': 'planetary_nebula', 'NGC6543': 'planetary_nebula',
-  'NGC2392': 'planetary_nebula', 'NGC3242': 'planetary_nebula',
+  'NGC2392': 'planetary_nebula', 'NGC3242': 'planetary_nebula', 'NGC6826': 'planetary_nebula',
   // Star clusters
   'M13': 'star_cluster', 'M3': 'star_cluster', 'M5': 'star_cluster',
   'M92': 'star_cluster', 'M2': 'star_cluster',
@@ -164,6 +180,7 @@ export function generateBrief(config, opts = {}) {
       maxWallClockMinutes: opts.maxWallClockMinutes || 60,
       maxIterationsPerAgent: opts.maxIterationsPerAgent || 8
     },
-    softGoals: opts.softGoals || []
+    softGoals: opts.softGoals || [],
+    processingProfile: loadProcessingProfiles()[classification] || loadProcessingProfiles()['mixed_field'] || {}
   };
 }
