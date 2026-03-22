@@ -80,6 +80,11 @@ Call \`recall_memory\` first. Check for winning curve/saturation parameters from
 ## A3. Star screen blend
 Stars go on EARLY — before curves, so curve adjustments affect the complete image.
 - Find the stars view (use \`list_open_images\`, name contains "stars")
+- **CHECK stars median first** with \`get_image_stats\` on the stars view:
+  - If median < 0.01 → stars are LINEAR (unstretched). Run \`stretch_stars\` on them FIRST!
+  - If median > 0.01 → stars are already stretched, proceed to blend.
+  - **NEVER blend linear stars** — they create massive white blobs.
+- **DO NOT further process the stars image** — no PixelMath, no curves, no adjustments. The star policy agent already prepared them. Just blend as-is.
 - Use \`star_screen_blend\` with target_id=your working image, stars_id=the stars view
 - strength=1.00 for natural prominence
 - ${brief.aestheticIntent.starProminence === 'subdued' ? 'User wants subdued stars: strength=0.70' : ''}

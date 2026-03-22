@@ -8,6 +8,11 @@
 // Usage:
 //   node agents/llm/orchestrator.mjs --config /path/to/config.json \
 //     [--intent "natural galaxy"] [--model claude-sonnet-4-20250514]
+//     [--use-max]  # Use Claude Max subscription via claude CLI subprocess
+//
+// Modes:
+//   Default (API):  Uses LLMAgent with direct API calls (requires API key)
+//   --use-max:      Uses MaxAgent via `claude -p` subprocess (requires Max subscription)
 //
 // IMPORTANT — PixInsight bridge serialization:
 //   There is a single PixInsight instance reachable via the file-based bridge
@@ -44,6 +49,7 @@ import { generateBrief } from '../classifier.mjs';
 import { checkHardConstraints, statsToScores, computeAggregate } from '../scoring.mjs';
 import { generateDossier } from '../dossier.mjs';
 import { LLMAgent } from './engine.mjs';
+import { MaxAgent } from './engine-max.mjs';
 import { buildToolSet } from './tools.mjs';
 import { generateDiagnosticViews, buildImageMessage } from './vision.mjs';
 import { buildReadinessPrompt } from './prompts/readiness.mjs';
@@ -82,6 +88,92 @@ function fmtTime(ms) {
 }
 
 // ============================================================================
+// Agent factory — creates the right agent type based on mode
+// ============================================================================
+
+/**
+ * Create an agent using either API mode (LLMAgent) or Max mode (MaxAgent).
+ *
+ * @param {boolean} useMax - Use Max subscription mode
+ * @param {string} name - Agent display name (for logging)
+ * @param {object} opts - Agent options
+ * @param {string} opts.systemPrompt - System prompt
+ * @param {string} opts.agentName - Tool set agent name (e.g. 'rgb_cleanliness')
+ * @param {object} opts.tools - Tool set from buildToolSet() (API mode only)
+ * @param {string} opts.model - Model ID
+ * @param {object} opts.budget - { maxTurns, maxWallClockMs }
+ * @param {ArtifactStore} opts.store
+ * @param {object} opts.brief
+ * @param {object} opts.ctx - Bridge context (API mode only)
+ * @returns {LLMAgent|MaxAgent}
+ */
+function createAgent(useMax, name, opts) {
+  if (useMax) {
+    return new MaxAgent(name, {
+      systemPrompt: opts.systemPrompt,
+      agentName: opts.agentName || name,
+      maxTurns: opts.budget?.maxTurns ?? 30,
+      store: opts.store,
+      brief: opts.brief,
+      model: opts.model,
+    });
+  } else {
+    return new LLMAgent(name, {
+      systemPrompt: opts.systemPrompt,
+      tools: opts.tools,
+      model: opts.model,
+      budget: opts.budget,
+      store: opts.store,
+      brief: opts.brief,
+      ctx: opts.ctx,
+    });
+  }
+}
+
+/**
+ * Build the initial prompt content for an agent.
+ * In API mode: returns content array with text + base64 images.
+ * In Max mode: returns text string with image file paths.
+ *
+ * @param {boolean} useMax
+ * @param {string} text - Prompt text
+ * @param {string[]} imagePaths - JPEG file paths for diagnostic images
+ * @returns {string|Array}
+ */
+function buildPromptContent(useMax, text, imagePaths = []) {
+  if (useMax) {
+    // Max mode: include file paths in text, agent uses Read tool to view
+    let fullText = text;
+    if (imagePaths.length > 0) {
+      fullText += '\n\n### Preview images saved to disk\n';
+      fullText += 'Use the Read tool to view any of these images:\n';
+      imagePaths.forEach((p, i) => {
+        fullText += `${i + 1}. ${p}\n`;
+      });
+    }
+    return fullText;
+  } else {
+    // API mode: build content array with base64 images
+    return buildImageMessage(text, imagePaths);
+  }
+}
+
+/**
+ * Run an agent with the appropriate invocation pattern.
+ * In API mode: pass content array.
+ * In Max mode: pass text string (images are file paths in text).
+ */
+async function runAgent(useMax, agent, promptContent) {
+  if (useMax) {
+    // MaxAgent.run() takes a text string
+    return await agent.run(promptContent);
+  } else {
+    // LLMAgent.run() takes a content array
+    return await agent.run(promptContent);
+  }
+}
+
+// ============================================================================
 // CLI argument parsing
 // ============================================================================
 function parseArgs() {
@@ -98,6 +190,7 @@ function parseArgs() {
     else if (args[i] === '--skip-critics') opts.skipCritics = true;
     else if (args[i] === '--critic-model' && args[i + 1]) opts.criticModel = args[++i];
     else if (args[i] === '--resume') opts.resume = true;
+    else if (args[i] === '--use-max') opts.useMax = true;
   }
   return opts;
 }
@@ -110,10 +203,12 @@ function parseArgs() {
  * Run a doer agent with critic as ADVISOR (not gatekeeper).
  * Single pass — no retries. Critic feedback is logged for provenance and next-run memory.
  * Returns advisorFeedback for feed-forward to downstream stages.
+ *
+ * Supports both API mode (LLMAgent) and Max mode (MaxAgent) via the useMax flag.
  */
 async function runDoerWithCritics(ctx, store, brief, {
   doerName, doerPromptBuilder, targetViewId, model, criticModel, maxTurns, skipCritics, starsViewId, config,
-  stageIndex, statusLines, promptOptions,
+  stageIndex, statusLines, promptOptions, useMax,
 }) {
   console.log(`\n  --- ${doerName} ---`);
 
@@ -152,7 +247,7 @@ Process the image view \`${targetViewId}\` according to the processing brief.
 3. Corner 1:1 crop — background quality
 4. Background-stretched — reveals faint gradients/structure`;
 
-  const initialContent = buildImageMessage(initialText, diagPaths);
+  const initialContent = buildPromptContent(useMax, initialText, diagPaths);
 
   // Update live status: doer starting
   const stageLabel = `Stage ${stageIndex}: ${doerName.replace(/_/g, ' ')}`;
@@ -163,8 +258,9 @@ Process the image view \`${targetViewId}\` according to the processing brief.
   }
 
   // Create and run the doer
-  const doer = new LLMAgent(doerName, {
+  const doer = createAgent(useMax, doerName, {
     systemPrompt,
+    agentName: doerName,
     tools: doerTools,
     model,
     budget: { maxTurns: maxTurns || 20, maxWallClockMs: 30 * 60_000 },
@@ -173,7 +269,7 @@ Process the image view \`${targetViewId}\` according to the processing brief.
     ctx,
   });
 
-  const doerResult = await doer.run(initialContent);
+  const doerResult = await runAgent(useMax, doer, initialContent);
 
   // Check for PI crash
   if (doerResult.crashError) throw doerResult.crashError;
@@ -224,17 +320,18 @@ You are an ADVISOR, not a gatekeeper. The pipeline will proceed regardless.
 Provide 2-3 specific, actionable suggestions for improvement that the next run can use.
 Do NOT reject — just advise.`;
 
-    const criticContent = buildImageMessage(criticText, criticImagePaths);
+    const criticContent = buildPromptContent(useMax, criticText, criticImagePaths);
 
-    const advisor = new LLMAgent('aesthetic_critic', {
+    const advisor = createAgent(useMax, 'aesthetic_critic', {
       systemPrompt: buildAestheticCriticPrompt(brief),
+      agentName: 'aesthetic_critic',
       tools: buildToolSet('aesthetic_critic'),
       model: criticModel || model,
       budget: { maxTurns: 3, maxWallClockMs: 2 * 60_000 },
       store, brief, ctx,
     });
 
-    const advisorResult = await advisor.run(criticContent);
+    const advisorResult = await runAgent(useMax, advisor, criticContent);
     if (!advisorResult.crashError) {
       advisorFeedback = advisorResult.finishResult?.feedback || '';
       if (advisorFeedback) {
@@ -285,15 +382,18 @@ Apply the advisor's suggestions — focus on the TOP 1-2 most impactful changes.
 Clone before experimenting. Show a preview after each change.
 Call finish when done.`;
 
-    const refinementDoer = new LLMAgent(doerName, {
+    const refinementContent = buildPromptContent(useMax, refinementText);
+
+    const refinementDoer = createAgent(useMax, doerName, {
       systemPrompt: doerPromptBuilder(brief, config, promptOptions || {}),
+      agentName: doerName,
       tools: doerTools,
       model,
       budget: { maxTurns: 10, maxWallClockMs: 5 * 60_000 },
       store, brief, ctx,
     });
 
-    refinementResult = await refinementDoer.run([{ type: 'text', text: refinementText }]);
+    refinementResult = await runAgent(useMax, refinementDoer, refinementContent);
     if (refinementResult.crashError) throw refinementResult.crashError;
 
     if (refinementResult.finishResult) {
@@ -338,19 +438,21 @@ async function orchestrate() {
   const configPath = opts.configPath;
   if (!configPath || !fs.existsSync(configPath)) {
     console.error(`Config not found: ${configPath || '(none provided)'}`);
-    console.error('Usage: node agents/llm/orchestrator.mjs --config /path/to/config.json');
+    console.error('Usage: node agents/llm/orchestrator.mjs --config /path/to/config.json [--use-max]');
     process.exit(1);
   }
 
+  const useMax = !!opts.useMax;
   const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
   console.log(`\n${'='.repeat(60)}`);
   console.log(`  LLM-Driven Agentic Pipeline`);
   console.log(`  Target: ${config.files?.targetName || config.name}`);
   console.log(`  Config: ${configPath}`);
-  console.log(`  Model: ${opts.model || 'claude-sonnet-4-20250514'}`);
+  console.log(`  Mode: ${useMax ? 'Claude Max (claude -p subprocess)' : 'API (' + (opts.model || 'gemini-2.5-pro') + ')'}`);
+  console.log(`  Model: ${opts.model || (useMax ? 'default (Max subscription)' : 'gemini-2.5-pro')}`);
   console.log(`${'='.repeat(60)}\n`);
 
-  // Bridge context
+  // Bridge context (needed even in Max mode for readiness checks and diagnostics)
   const ctx = createBridgeContext({ log: console.log });
 
   // Verify PixInsight
@@ -467,7 +569,8 @@ async function orchestrate() {
     `# ${targetDisplayName} — Live Status`,
     `> Run: ${store.runId}  `,
     `> Started: ${new Date().toISOString()}  `,
-    `> Model: ${opts.model || 'claude-sonnet-4-20250514'}`,
+    `> Mode: ${useMax ? 'Claude Max' : 'API (' + (opts.model || 'gemini-2.5-pro') + ')'}`,
+    `> Model: ${opts.model || (useMax ? 'Max subscription' : 'gemini-2.5-pro')}`,
     resumeFromStage > 0 ? `> **RESUMED** from stage ${resumeFromStage}` : '',
     '',
   ].filter(Boolean);
@@ -486,8 +589,11 @@ async function orchestrate() {
     updateLiveStatus(store, statusLines);
     statusLines.pop();
 
-    const readinessAgent = new LLMAgent('readiness', {
+    const readinessPromptText = `Prepare the input masters for processing. The target view name should be \`${targetName}\`. Open the files, inspect them, handle any issues, and produce a combined RGB color image.`;
+
+    const readinessAgent = createAgent(useMax, 'readiness', {
       systemPrompt: buildReadinessPrompt(brief, config),
+      agentName: 'readiness',
       tools: buildToolSet('readiness'),
       model: opts.model,
       budget: { maxTurns: 25, maxWallClockMs: 15 * 60_000 },
@@ -496,10 +602,8 @@ async function orchestrate() {
       ctx,
     });
 
-    const readinessResult = await readinessAgent.run([{
-      type: 'text',
-      text: `Prepare the input masters for processing. The target view name should be \`${targetName}\`. Open the files, inspect them, handle any issues, and produce a combined RGB color image.`
-    }]);
+    const readinessContent = buildPromptContent(useMax, readinessPromptText);
+    const readinessResult = await runAgent(useMax, readinessAgent, readinessContent);
 
     if (readinessResult.crashError) {
       statusLines.push('## Stage 1: Readiness ❌ CRASHED');
@@ -541,7 +645,7 @@ async function orchestrate() {
     console.error(`\n  CRASH at Stage ${stageIndex} (${stageName}): ${err.message}`);
     statusLines.push(`## ❌ Stage ${stageIndex}: ${stageName} — CRASHED`);
     statusLines.push(`> PixInsight crashed. Restart PI + watcher, then resume:`);
-    statusLines.push(`> \`node agents/llm/orchestrator.mjs --config ${opts.configPath} --resume --run-id ${store.runId}\``);
+    statusLines.push(`> \`node agents/llm/orchestrator.mjs --config ${opts.configPath} --resume --run-id ${store.runId}${useMax ? ' --use-max' : ''}\``);
     updateLiveStatus(store, statusLines);
     process.exit(77); // Distinct exit code for crash (vs 1 for errors)
   }
@@ -566,6 +670,7 @@ async function orchestrate() {
     config,
     stageIndex: 2,
     statusLines,
+    useMax,
     // No accumulated feedback yet — RGB is the first creative stage
   });
   } catch (err) { if (err?.isCrash) handleCrash(2, 'RGB Cleanliness', err); throw err; }
@@ -607,6 +712,7 @@ async function orchestrate() {
     skipCritics: opts.skipCritics,
     stageIndex: 3,
     statusLines,
+    useMax,
     promptOptions: {
       advisorFeedback: accumulatedFeedback.length > 0 ? accumulatedFeedback.join('\n\n') : undefined,
     },
@@ -641,6 +747,7 @@ async function orchestrate() {
       config,
       stageIndex: 4,
       statusLines,
+      useMax,
       promptOptions: {
         advisorFeedback: accumulatedFeedback.length > 0 ? accumulatedFeedback.join('\n\n') : undefined,
       },
@@ -674,6 +781,7 @@ async function orchestrate() {
     skipCritics: opts.skipCritics,
     stageIndex: 5,
     statusLines,
+    useMax,
     promptOptions: {
       advisorFeedback: accumulatedFeedback.length > 0 ? accumulatedFeedback.join('\n\n') : undefined,
     },
@@ -696,13 +804,14 @@ async function orchestrate() {
     doerName: 'composition',
     doerPromptBuilder: buildCompositionPrompt,
     targetViewId: lumResult.winnerId || targetName,
-    model: opts.model, // Use default model (Gemini Pro) — prompt instructs to start working immediately
+    model: opts.model, // Use default model for all stages
     criticModel: opts.criticModel,
     maxTurns: opts.maxTurns || 30, // Phase A glue (~4-5 turns) + Phase B contrast/saturation iteration (~20-25 turns)
     skipCritics: opts.skipCritics,
     starsViewId,
     stageIndex: 6,
     statusLines,
+    useMax,
     promptOptions: {
       advisorFeedback: accumulatedFeedback.length > 0 ? accumulatedFeedback.join('\n\n') : undefined,
     },
@@ -738,8 +847,12 @@ This is the FINAL image before output. Your job is to verify it passes all hard 
 - Max: ${(finalStats.max ?? 0).toFixed(4)}, Min: ${(finalStats.min ?? 0).toFixed(6)}
 - Background uniformity: ${finalUni.score.toFixed(6)}`;
 
-    const techCritic = new LLMAgent('technical_critic', {
+    const techImagePaths = techDiagPaths.filter(p => !p.includes('bg_stretch'));
+    const techContent = buildPromptContent(useMax, techText, techImagePaths);
+
+    const techCritic = createAgent(useMax, 'technical_critic', {
       systemPrompt: buildTechnicalCriticPrompt(brief),
+      agentName: 'technical_critic',
       tools: buildToolSet('technical_critic'),
       model: opts.criticModel || opts.model,
       budget: { maxTurns: 5, maxWallClockMs: 5 * 60_000 },
@@ -748,8 +861,7 @@ This is the FINAL image before output. Your job is to verify it passes all hard 
       ctx,
     });
 
-    const techImagePaths = techDiagPaths.filter(p => !p.includes('bg_stretch'));
-    const techResult = await techCritic.run(buildImageMessage(techText, techImagePaths));
+    const techResult = await runAgent(useMax, techCritic, techContent);
     const techVerdict = techResult.finishResult?.verdict || 'accept';
     console.log(`  Technical critic verdict: ${techVerdict}`);
 

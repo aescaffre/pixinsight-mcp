@@ -8,7 +8,7 @@ import { Mistral } from '@mistralai/mistralai';
 import crypto from 'crypto';
 import { BridgeCrashError } from '../ops/bridge.mjs';
 
-const DEFAULT_MODEL = 'mistral-large-latest';
+const DEFAULT_MODEL = 'gemini-2.5-pro';
 
 // ============================================================================
 // Provider abstraction

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "pixinsight": {
+      "command": "node",
+      "args": ["agents/llm/mcp-agent-tools.mjs", "rgb_cleanliness", "", ""]
+    }
+  }
+}

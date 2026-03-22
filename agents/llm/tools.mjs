@@ -168,9 +168,9 @@ const TOOL_CATALOG = {
 
       // Get stats for the text portion
       const stats = await getStats(ctx, input.view_id);
-      const textSummary = `Preview saved: ${input.label}\nStats: median=${stats.median.toFixed(6)}, MAD=${stats.mad.toFixed(6)}, max=${(stats.max ?? 0).toFixed(4)}`;
+      const textSummary = `Preview saved: ${input.label}\nFile: ${previewPath}\nStats: median=${stats.median.toFixed(6)}, MAD=${stats.mad.toFixed(6)}, max=${(stats.max ?? 0).toFixed(4)}`;
 
-      // Return multi-content: text + image
+      // Return multi-content: text + image (in MCP mode, image block is converted to file path hint)
       if (fs.existsSync(previewPath)) {
         return [
           { type: 'text', text: textSummary },
