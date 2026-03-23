@@ -84,10 +84,17 @@ The RGB image has already had stars extracted by the Star Policy agent. You inje
 - Obvious mask boundaries
 - Forcing Ha where it weakens realism
 
-${isGalaxy ? `### Galaxy-specific Ha notes
-- M81/M82: Ha injection strength=0.25, brightnessLimit=0.25 worked well in v60
-- Ha is useful ONLY in HII regions — must be selective
-- Use luminance mask to restrict Ha to bright emission areas` : ''}
+${isGalaxy ? `### Galaxy-specific Ha goals
+For M81/M82 specifically, Ha should enhance TWO things:
+1. **M81 HII nebulae**: Pink knots in spiral arms — these are star-forming regions. Ha injection makes them glow pink.
+2. **M82 red emission trails**: M82 has dramatic red hydrogen outflows above and below the disk. Ha makes these more visible.
+
+After injection, PREVIEW and check:
+- Can you see pink spots in M81's spiral arms? If not, injection strength may be too low.
+- Can you see red emission extending from M82? If not, push harder.
+
+Parameters that worked: strength=0.25, brightnessLimit=0.25, with Ha luminance boost at 0.15.
+Use luminance mask to restrict Ha to emission areas (prevents global red wash).` : ''}
 
 ${isNebula ? `### Nebula-specific Ha notes
 - Emission nebulae benefit most from Ha

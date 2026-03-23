@@ -1086,23 +1086,76 @@ const TOOL_CATALOG = {
         'LinearFit done';
       `);
 
-      // Step 2: LRGB combine via PixelMath (luminance replacement)
-      // Formula: RGB * min(ratio, 3.0) where ratio = Y_blend / Y_original
-      // Capping at 3.0 prevents color washout when L is much brighter than RGB luminance
+      // Step 2: Native LRGBCombination
+      // executeOn() requires channel views named {target}_L, {target}_R, etc.
+      // So we extract RGB channels and clone L with the expected names.
+      const tgt = input.rgb_id;
       await ctx.pjsr(`
-        var l = ${lightness};
-        var PM = new PixelMath;
-        PM.expression = "Yo = 0.2126*$T[0] + 0.7152*$T[1] + 0.0722*$T[2]; Yb = (1-${lightness})*Yo + ${lightness}*${input.l_id}; ratio = min(max(Yb, 0.00001) / max(Yo, 0.00001), 3.0); $T * ratio";
-        PM.symbols = "Yo, Yb, ratio";
-        PM.useSingleExpression = true;
-        PM.use64BitWorkingImage = true;
-        PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1;
-        PM.createNewImage = false;
-        PM.executeOn(ImageWindow.windowById('${input.rgb_id}').mainView);
+        var CE = new ChannelExtraction;
+        CE.channelEnabled = [true, true, true];
+        CE.channelId = ['${tgt}_R', '${tgt}_G', '${tgt}_B'];
+        CE.colorSpace = ChannelExtraction.prototype.RGB;
+        CE.sampleFormat = ChannelExtraction.prototype.SameAsSource;
+        CE.executeOn(ImageWindow.windowById('${tgt}').mainView);
+        'channels extracted';
       `);
 
+      // Clone L to {target}_L (don't rename the original)
+      await ctx.pjsr(`
+        var src = ImageWindow.windowById('${input.l_id}');
+        var img = src.mainView.image;
+        var dst = new ImageWindow(img.width, img.height, 1, 32, true, false, '${tgt}_L');
+        dst.show();
+        var PM = new PixelMath;
+        PM.expression = '${input.l_id}';
+        PM.useSingleExpression = true;
+        PM.createNewImage = false;
+        PM.executeOn(dst.mainView);
+        'L cloned';
+      `);
+
+      const r = await ctx.pjsr(`
+        var P = new LRGBCombination;
+        P.channelL = [true, '${tgt}_L'];
+        P.channelR = [true, '${tgt}_R'];
+        P.channelG = [true, '${tgt}_G'];
+        P.channelB = [true, '${tgt}_B'];
+        P.lightness = ${lightness};
+        P.saturation = ${saturation};
+        P.noiseReduction = false;
+        var ret = P.executeOn(ImageWindow.windowById('${tgt}').mainView);
+        ret ? 'LRGB_OK' : 'LRGB_FAILED';
+      `);
+
+      // Clean up temp channel views
+      await ctx.pjsr(`
+        var ids = ['${tgt}_R','${tgt}_G','${tgt}_B','${tgt}_L'];
+        for (var i = 0; i < ids.length; i++) {
+          var w = ImageWindow.windowById(ids[i]);
+          if (!w.isNull) w.forceClose();
+        }
+        'cleaned up';
+      `);
+
+      const lrgbOut = r.outputs?.consoleOutput?.trim() || '';
+      let method = 'LRGBCombination';
+      if (r.status === 'error' || lrgbOut.includes('LRGB_FAILED')) {
+        // Fallback: PixelMath luminance replacement (saturation not supported)
+        method = 'PixelMath fallback';
+        await ctx.pjsr(`
+          var PM = new PixelMath;
+          PM.expression = "Yo = 0.2126*$T[0] + 0.7152*$T[1] + 0.0722*$T[2]; Yb = (1-${lightness})*Yo + ${lightness}*${input.l_id}; ratio = min(max(Yb, 0.00001) / max(Yo, 0.00001), 3.0); $T * ratio";
+          PM.symbols = "Yo, Yb, ratio";
+          PM.useSingleExpression = true;
+          PM.use64BitWorkingImage = true;
+          PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1;
+          PM.createNewImage = false;
+          PM.executeOn(ImageWindow.windowById('${input.rgb_id}').mainView);
+        `);
+      }
+
       const stats = await getStats(ctx, input.rgb_id);
-      return { type: 'text', text: `LRGB combined (lightness=${lightness}, saturation=${saturation}). Stats: median=${stats.median.toFixed(6)}, max=${(stats.max ?? 0).toFixed(4)}` };
+      return { type: 'text', text: `LRGB combined via ${method} (lightness=${lightness}, saturation=${saturation}). Stats: median=${stats.median.toFixed(6)}, max=${(stats.max ?? 0).toFixed(4)}` };
     }
   },
 
@@ -1439,11 +1492,19 @@ const TOOL_CATALOG = {
       const saOk = (saResult.outputs?.consoleOutput || '').includes('true');
       if (!saOk) return { type: 'text', text: `StarAlignment failed: ${saResult.outputs?.consoleOutput || saResult.error?.message}` };
 
-      // Find the aligned output file
-      const files = fs.readdirSync(tmpDir).filter(f => f.startsWith('aligned_'));
-      if (files.length === 0) return { type: 'text', text: 'StarAlignment produced no output file' };
-
-      const alignedPath = path.join(tmpDir, files[0]);
+      // Find the aligned output file — must match THIS target specifically
+      const expectedName = `aligned_${input.target_id}.xisf`;
+      const alignedPath = path.join(tmpDir, expectedName);
+      if (!fs.existsSync(alignedPath)) {
+        // Fallback: look for any aligned file that was just created
+        const files = fs.readdirSync(tmpDir).filter(f => f.startsWith('aligned_'));
+        if (files.length === 0) return { type: 'text', text: 'StarAlignment produced no output file' };
+        // Sort by modification time, newest first
+        files.sort((a, b) => fs.statSync(path.join(tmpDir, b)).mtimeMs - fs.statSync(path.join(tmpDir, a)).mtimeMs);
+        // Use the most recently modified file
+        const fallbackPath = path.join(tmpDir, files[0]);
+        return { type: 'text', text: `Warning: Expected ${expectedName} not found. Using ${files[0]} instead. Aligned file: ${fallbackPath}` };
+      }
 
       // Close old target, open aligned, rename
       await ctx.pjsr(`var w = ImageWindow.windowById('${input.target_id}'); if (!w.isNull) w.forceClose();`);
@@ -1478,7 +1539,7 @@ const TOOL_CATALOG = {
         var t = ImageWindow.windowById('${input.target_id}');
         JSON.stringify({ ref: { w: r.mainView.image.width, h: r.mainView.image.height }, tgt: { w: t.mainView.image.width, h: t.mainView.image.height } });
       `);
-      return { type: 'text', text: `Aligned ${input.target_id} to ${input.reference_id}. Dimensions: ${dimR.outputs?.consoleOutput}` };
+      return { type: 'text', text: `Aligned ${input.target_id} to ${input.reference_id}. Aligned file on disk: ${alignedPath}. Dimensions: ${dimR.outputs?.consoleOutput}` };
     }
   },
 
@@ -1579,7 +1640,7 @@ const AGENT_TOOL_CATEGORIES = {
   luminance_detail: ['measurement', 'preview', 'image_mgmt', 'detail', 'masks', 'denoise', 'sharpen', 'stretch', 'gradient', 'calibration', 'readiness', 'star_removal', 'memory', 'artifacts', 'control'],
   star_policy: ['measurement', 'preview', 'image_mgmt', 'star_removal', 'stretch', 'curves', 'memory', 'artifacts', 'control'],
   ha_integration: ['measurement', 'preview', 'image_mgmt', 'gradient', 'denoise', 'sharpen', 'stretch', 'masks', 'ha_injection', 'star_removal', 'memory', 'artifacts', 'control'],
-  composition: ['measurement', 'preview', 'image_mgmt', 'curves', 'stars', 'lrgb', 'memory', 'artifacts', 'control'],
+  composition: ['measurement', 'preview', 'image_mgmt', 'curves', 'stars', 'lrgb', 'masks', 'memory', 'artifacts', 'control'],
   aesthetic_critic: ['measurement', 'memory', 'control', 'scoring'],
   technical_critic: ['measurement', 'memory', 'control', 'scoring'],
 };
@@ -1591,8 +1652,10 @@ const AGENT_TOOL_CATEGORIES = {
  * @returns {{ definitions: Array, handlers: Map }}
  */
 export function buildToolSet(agentName, extraCategories = []) {
+  // If agent not in the map, give ALL categories (collect unique category values)
+  const allCategories = [...new Set(Object.values(TOOL_CATALOG).map(t => t.category))];
   const categories = new Set([
-    ...(AGENT_TOOL_CATEGORIES[agentName] || Object.keys(TOOL_CATALOG)),
+    ...(AGENT_TOOL_CATEGORIES[agentName] || allCategories),
     ...extraCategories
   ]);
 

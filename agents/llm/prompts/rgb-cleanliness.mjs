@@ -110,8 +110,17 @@ Run \`run_nxt\` with denoise=0.25. Single pass.
 # PHASE B — CREATIVE (iterative push-until-rejection)
 # ====================================================================
 #
-# For each creative parameter below, use the PUSH-UNTIL-REJECTION loop:
+# IMPORTANT: Check the "PREVIOUS WINNING PARAMETERS" section in your
+# initial message. If winning params exist for this target classification:
+#   - SKIP directly to the winning value (do NOT start from step 1)
+#   - Apply the winning value, verify it looks good (1 turn)
+#   - Try ONE step higher to confirm the ceiling still holds (1 turn)
+#   - If the higher step is better, keep it. Otherwise keep the winning value.
+#   - Move on. Total: 2 turns per parameter, not 5.
 #
+# Only use the full push-from-conservative loop when NO winning params exist.
+#
+# Full loop (first run only):
 #   1. Clone the current state as checkpoint
 #   2. Apply operation with a CONSERVATIVE starting value
 #   3. Preview + self-assess: is it better? Any artifacts?

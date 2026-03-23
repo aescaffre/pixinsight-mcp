@@ -64,6 +64,56 @@ import { buildTechnicalCriticPrompt } from './prompts/technical-critic.mjs';
 const home = os.homedir();
 
 // ============================================================================
+// Winning parameter extraction from agent memory
+// ============================================================================
+
+/**
+ * Extract winning parameters from an agent's memory file for a given target classification.
+ * Returns a formatted string to inject into the initial message so the agent
+ * doesn't waste turns rediscovering known-good values.
+ *
+ * @param {string} agentName - Agent name (e.g. 'luminance_detail')
+ * @param {string} classification - Target classification (e.g. 'galaxy_spiral')
+ * @returns {string} Formatted winning params block, or empty string if none found
+ */
+function extractWinningParams(agentName, classification) {
+  const memFile = path.join(home, '.pixinsight-mcp', 'agent-memory', `${agentName}.json`);
+  if (!fs.existsSync(memFile)) return '';
+
+  const entries = JSON.parse(fs.readFileSync(memFile, 'utf-8'));
+
+  // Find winning_param entries matching this classification
+  // Prefer the most recent entry per parameter type (dedup by first tag after classification)
+  const winners = entries
+    .filter(e => e.tags?.includes('winning_param') &&
+                 (e.tags?.includes(classification) || e.title?.toLowerCase().includes(classification.replace('_', ' '))))
+    .reverse(); // most recent first
+
+  if (winners.length === 0) return '';
+
+  // Deduplicate: keep only the most recent entry per parameter key
+  // Key = second tag (e.g. 'lhe_large_amount', 'contrast_curve', 'lrgb_combine')
+  const seen = new Set();
+  const deduped = [];
+  for (const w of winners) {
+    const paramTag = w.tags?.find(t => t !== classification && t !== 'winning_param') || w.title;
+    if (!seen.has(paramTag)) {
+      seen.add(paramTag);
+      deduped.push(w);
+    }
+  }
+
+  const lines = deduped.map(w => `- **${w.title}**: ${w.content.split('\n')[0]}`);
+
+  return `\n### PREVIOUS WINNING PARAMETERS for ${classification}
+**USE THESE AS YOUR STARTING POINT. Do NOT rediscover them from scratch.**
+Skip all push-until-rejection steps BELOW these values. Start from these values and only push ONE step higher to verify they still hold, then move on.
+
+${lines.join('\n')}
+`;
+}
+
+// ============================================================================
 // Live status file — written after every significant event
 // ============================================================================
 
@@ -246,6 +296,13 @@ Process the image view \`${targetViewId}\` according to the processing brief.
 2. Center 1:1 crop — subject detail quality
 3. Corner 1:1 crop — background quality
 4. Background-stretched — reveals faint gradients/structure`;
+
+  // Inject winning parameters from previous runs so agents don't rediscover them
+  const classification = brief.target?.classification || '';
+  const winningParams = extractWinningParams(doerName, classification);
+  if (winningParams) {
+    initialText += winningParams;
+  }
 
   const initialContent = buildPromptContent(useMax, initialText, diagPaths);
 
@@ -520,40 +577,44 @@ async function orchestrate() {
         await new Promise(r => setTimeout(r, 5000));
       }
 
-      // Load the last completed stage's winner XISF into PixInsight
-      const variants = store.listVariants(lastStage.agentName);
-      if (variants.length > 0) {
-        const lastVariant = variants[variants.length - 1];
-        if (lastVariant.xisfPath && fs.existsSync(lastVariant.xisfPath)) {
-          console.log(`  Loading last variant: ${lastVariant.xisfPath}`);
-          await ctx.send('open_image', '__internal__', { filePath: lastVariant.xisfPath });
+      // Load snapshots from the last completed stage into PixInsight
+      const snapshotDir = path.join(store.baseDir, 'snapshots');
+      const snapshotPrefix = `${lastStage.agentName}_`;
+      const snapshots = fs.existsSync(snapshotDir)
+        ? fs.readdirSync(snapshotDir).filter(f => f.startsWith(snapshotPrefix) && f.endsWith('.xisf'))
+        : [];
+
+      if (snapshots.length > 0) {
+        console.log(`  Loading ${snapshots.length} snapshot(s) from ${lastStage.agentName}:`);
+        for (const snap of snapshots) {
+          const snapPath = path.join(snapshotDir, snap);
+          const viewId = snap.replace(snapshotPrefix, '').replace('.xisf', '');
+          console.log(`    ${viewId} <- ${snap}`);
+          await ctx.send('open_image', '__internal__', { filePath: snapPath });
           // Close crop masks
           const imgs = await ctx.listImages();
           for (const cm of imgs.filter(i => i.id.includes('crop_mask'))) {
             await ctx.pjsr(`var w=ImageWindow.windowById('${cm.id}');if(!w.isNull)w.forceClose();`);
           }
-          // Rename to target name
+          // Rename the opened view to the expected ID
           const loaded = await ctx.listImages();
-          const colorLoaded = loaded.find(i => i.isColor) || loaded[0];
-          if (colorLoaded && colorLoaded.id !== targetName) {
-            await ctx.pjsr(`var w = ImageWindow.windowById('${colorLoaded.id}'); if (!w.isNull) w.mainView.id = '${targetName}';`);
+          const newView = loaded.find(i => !i.id.includes('crop_mask') && i.id.includes(lastStage.agentName));
+          if (newView && newView.id !== viewId) {
+            await ctx.pjsr(`var w = ImageWindow.windowById('${newView.id}'); if (!w.isNull) w.mainView.id = '${viewId}';`);
           }
-          console.log(`  Restored: ${targetName}`);
-        } else {
-          console.log('  WARNING: No XISF found for last variant. Starting from scratch.');
-          resumeFromStage = 0;
         }
+        console.log(`  Restored ${snapshots.length} view(s)`);
       } else {
-        // No variants saved, but check if PI still has the image open
+        // Fallback: check if PI still has the image open (no crash, just resume)
         const currentImgs = await ctx.listImages();
         const targetInPI = currentImgs.find(i => i.id === lastStage.winnerId || i.isColor);
         if (targetInPI) {
-          console.log(`  No saved variants, but PI still has ${targetInPI.id} open. Resuming.`);
+          console.log(`  No snapshots, but PI still has ${targetInPI.id} open. Resuming.`);
           if (targetInPI.id !== targetName) {
             await ctx.pjsr(`var w = ImageWindow.windowById('${targetInPI.id}'); if (!w.isNull) w.mainView.id = '${targetName}';`);
           }
         } else {
-          console.log('  WARNING: No variants and no images in PI. Starting from scratch.');
+          console.log('  WARNING: No snapshots and no images in PI. Starting from scratch.');
           resumeFromStage = 0;
         }
       }
@@ -596,7 +657,7 @@ async function orchestrate() {
       agentName: 'readiness',
       tools: buildToolSet('readiness'),
       model: opts.model,
-      budget: { maxTurns: 25, maxWallClockMs: 15 * 60_000 },
+      budget: { maxTurns: 40, maxWallClockMs: 15 * 60_000 }, // alignment bug workaround needs extra turns
       store,
       brief,
       ctx,
@@ -631,13 +692,30 @@ async function orchestrate() {
     statusLines.push(`## Stage 1: Readiness ✅ (${readinessResult.turnCount} turns, ${fmtTime(readinessResult.elapsedMs)})`);
     updateLiveStatus(store, statusLines);
     store.recordStageCompletion(1, 'readiness', targetName, null);
+    // Save snapshots for crash recovery — include L and Ha for downstream stages
+    await saveStageSnapshot('readiness', [targetName, 'FILTER_L', 'FILTER_Ha']);
   } else {
     console.log('\n--- Stage 1: Readiness — skipped (resumed) ---');
   }
 
   // Close individual channel windows to free memory (if they're still open)
-  for (const id of ['FILTER_R', 'FILTER_G', 'FILTER_B', 'FILTER_Ha']) {
+  for (const id of ['FILTER_R', 'FILTER_G', 'FILTER_B']) {
     await ctx.pjsr(`var w=ImageWindow.windowById('${id}');if(!w.isNull)w.forceClose();`).catch(() => {});
+  }
+
+  // --- Save stage snapshots for crash recovery ---
+  async function saveStageSnapshot(stageName, viewIds) {
+    const snapshotDir = path.join(store.baseDir, 'snapshots');
+    fs.mkdirSync(snapshotDir, { recursive: true });
+    for (const viewId of viewIds) {
+      const outPath = path.join(snapshotDir, `${stageName}_${viewId}.xisf`);
+      try {
+        await ctx.pjsr(`
+          var w = ImageWindow.windowById('${viewId}');
+          if (!w.isNull) { w.saveAs('${outPath.replace(/'/g, "\\'")}', false, false, false, false); if (w.mainView.id !== '${viewId}') w.mainView.id = '${viewId}'; }
+        `);
+      } catch (e) { /* ignore — view may not exist */ }
+    }
   }
 
   // --- Crash-resilient stage runner ---
@@ -676,6 +754,7 @@ async function orchestrate() {
   } catch (err) { if (err?.isCrash) handleCrash(2, 'RGB Cleanliness', err); throw err; }
   console.log(`  Winner: ${rgbResult.winnerId} (score=${rgbResult.winnerScore?.toFixed(1) || 'N/A'}, attempts=${rgbResult.attempts})`);
   store.recordStageCompletion(2, 'rgb_cleanliness', rgbResult.winnerId, null, { score: rgbResult.winnerScore });
+  await saveStageSnapshot('rgb_cleanliness', [rgbResult.winnerId, 'FILTER_L', 'FILTER_Ha']);
 
   // Feed-forward: collect advisor feedback for downstream stages
   if (rgbResult.advisorFeedback) {
@@ -720,6 +799,7 @@ async function orchestrate() {
   } catch (err) { if (err?.isCrash) handleCrash(3, 'Star Policy', err); throw err; }
   console.log(`  Winner: ${starResult.winnerId} (attempts=${starResult.attempts})`);
   store.recordStageCompletion(3, 'star_policy', starResult.winnerId, null);
+  await saveStageSnapshot('star_policy', [starResult.winnerId, starsViewId, 'FILTER_L', 'FILTER_Ha'].filter(Boolean));
   if (starResult.advisorFeedback) {
     accumulatedFeedback.push(`**Star Policy advisor**: ${starResult.advisorFeedback}`);
   }
@@ -755,6 +835,7 @@ async function orchestrate() {
     } catch (err) { if (err?.isCrash) handleCrash(4, 'Ha Integration', err); throw err; }
     console.log(`  Winner: ${haResult?.winnerId} (attempts=${haResult?.attempts})`);
     store.recordStageCompletion(4, 'ha_integration', haResult?.winnerId, null);
+    await saveStageSnapshot('ha_integration', [haResult?.winnerId, starsViewId, 'FILTER_L'].filter(Boolean));
     if (haResult?.advisorFeedback) {
       accumulatedFeedback.push(`**Ha Integration advisor**: ${haResult.advisorFeedback}`);
     }
@@ -777,7 +858,7 @@ async function orchestrate() {
     targetViewId: postHaViewId,
     model: opts.model,
     criticModel: opts.criticModel,
-    maxTurns: opts.maxTurns || 35, // Phase A glue (~8-10 turns) + Phase B LHE/HDRMT iteration (~20-25 turns)
+    maxTurns: opts.maxTurns || 100, // Phase A (~10 turns) + Phase B: L LHE+HDRMT+NXT (~30 turns) + RGB LHE/HDRMT+NXT (~30 turns) + generous buffer
     skipCritics: opts.skipCritics,
     stageIndex: 5,
     statusLines,
@@ -789,6 +870,7 @@ async function orchestrate() {
   } catch (err) { if (err?.isCrash) handleCrash(5, 'Luminance Detail', err); throw err; }
   console.log(`  Winner: ${lumResult.winnerId} (score=${lumResult.winnerScore?.toFixed(1) || 'N/A'}, attempts=${lumResult.attempts})`);
   store.recordStageCompletion(5, 'luminance_detail', lumResult.winnerId, null, { score: lumResult.winnerScore });
+  await saveStageSnapshot('luminance_detail', [lumResult.winnerId, starsViewId, 'FILTER_L'].filter(Boolean));
   if (lumResult.advisorFeedback) {
     accumulatedFeedback.push(`**Luminance Detail advisor**: ${lumResult.advisorFeedback}`);
   }
@@ -806,7 +888,7 @@ async function orchestrate() {
     targetViewId: lumResult.winnerId || targetName,
     model: opts.model, // Use default model for all stages
     criticModel: opts.criticModel,
-    maxTurns: opts.maxTurns || 30, // Phase A glue (~4-5 turns) + Phase B contrast/saturation iteration (~20-25 turns)
+    maxTurns: opts.maxTurns || 40, // Phase A (~3 turns) + Phase B: LRGB iteration (~8-10) + contrast/saturation/stars (~20-25 turns)
     skipCritics: opts.skipCritics,
     starsViewId,
     stageIndex: 6,
@@ -819,6 +901,7 @@ async function orchestrate() {
   } catch (err) { if (err?.isCrash) handleCrash(6, 'Composition', err); throw err; }
   console.log(`  Winner: ${compResult.winnerId} (score=${compResult.winnerScore?.toFixed(1) || 'N/A'}, attempts=${compResult.attempts})`);
   store.recordStageCompletion(6, 'composition', compResult.winnerId, null, { score: compResult.winnerScore });
+  await saveStageSnapshot('composition', [compResult.winnerId].filter(Boolean));
 
   } else { compResult = { winnerId: targetName, winnerScore: null, attempts: 0 }; }
 

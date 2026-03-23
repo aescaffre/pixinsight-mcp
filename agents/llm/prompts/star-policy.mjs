@@ -78,8 +78,21 @@ Call \`list_open_images\` to locate the stars image (name contains "stars").
 - Run SXT on the current image (\`is_linear=false\` if stretched) as fallback
 - This is the less-preferred path — linear extraction by RGB agent is cleaner
 
-## Step 4. Verify and finish
-- Show preview of stars — verify they look like clean, colorful points on black
+## Step 4. Assess star quality — CRITICAL
+
+Preview the stars and assess HONESTLY:
+- **Size**: Are stars small, tight points? Or are they bloated/puffy/fat?
+  Galaxy fields need SMALL stars — they are background decoration, not the subject.
+  **Stars from SXT + stretch are almost always too bloated.** Assume they need reduction unless they look tiny.
+  - Apply star reduction: \`run_pixelmath\` with formula \`iif($T > 0.02, $T * 0.65, $T)\`
+  - Preview again. Still too big? Push harder: \`iif($T > 0.01, $T * 0.50, $T)\`
+  - Stars should be PINPOINTS with subtle color, not fat blobs.
+- **Color**: Stars should have visible colors — orange/yellow for cool stars, blue-white for hot. If all white, apply saturation curve again.
+- **Noise**: Background of stars image should be pure black. Any non-zero background = SXT residuals that will add haze when blended.
+  - If background is not black: \`run_pixelmath\` with \`iif($T < 0.005, 0, $T)\` to clip residuals to zero.
+
+## Step 5. Verify and finish
+- Show preview of stars — verify they look like clean, SMALL, colorful points on BLACK background
 - Call \`finish\` with the main (starless) view_id
 
 ## MANDATORY RULE: Always extract stars

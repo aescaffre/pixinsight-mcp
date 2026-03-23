@@ -105,7 +105,6 @@ export class MaxAgent {
       '--strict-mcp-config',
       '--allowedTools', allowedTools.join(','),
       '--permission-mode', 'bypassPermissions',
-      '--bare',
     ];
 
     if (this.model) {
@@ -137,6 +136,12 @@ export class MaxAgent {
       claude.on('close', (code) => {
         const elapsed = Date.now() - this.startTime;
         this._log(`Completed in ${Math.round(elapsed / 1000)}s (exit ${code})`);
+
+        // Debug: log raw output on failure
+        if (code !== 0) {
+          this._log(`[DEBUG] stdout (first 500): ${stdout.slice(0, 500)}`);
+          this._log(`[DEBUG] stderr (first 500): ${stderr.slice(0, 500)}`);
+        }
 
         // Clean up temp MCP config
         try { fs.unlinkSync(mcpConfigPath); } catch {}

@@ -488,6 +488,20 @@ export class LLMAgent {
       }
 
       if (toolCalls.length === 0) {
+        // If the agent hasn't called finish yet, nudge it to continue working.
+        // Models sometimes pause to describe what they'll do next without actually calling tools.
+        // Allow up to 2 nudges before giving up.
+        if (!this.finishResult && (this._nudgeCount || 0) < 2) {
+          this._nudgeCount = (this._nudgeCount || 0) + 1;
+          const nudgeMsg = this.turnCount === 0
+            ? 'You described your plan but did not call any tools. You MUST call tools to do your work. Start now — call your first tool immediately.'
+            : 'You stopped calling tools but have not called `finish`. You still have work to do — continue with the next step in your plan. Call the next tool NOW.';
+          this._log(`No tool calls (nudge ${this._nudgeCount}/2) — prompting model to continue`);
+          this.messages.push({ role: 'assistant', content: this._buildAssistantContent(textBlocks, []) });
+          this.messages.push({ role: 'user', content: [{ type: 'text', text: nudgeMsg }] });
+          this.turnCount++;
+          continue;
+        }
         this._log('No tool calls — conversation ended');
         break;
       }
