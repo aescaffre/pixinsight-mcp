@@ -102,9 +102,7 @@ export class MaxAgent {
       '--output-format', 'json',
       '--append-system-prompt', this.systemPrompt,
       '--mcp-config', mcpConfigPath,
-      '--strict-mcp-config',
       '--allowedTools', allowedTools.join(','),
-      '--permission-mode', 'bypassPermissions',
     ];
 
     if (this.model) {
@@ -114,10 +112,14 @@ export class MaxAgent {
     this._log(`Spawning claude subprocess (${this._toolNames.length} MCP tools)...`);
 
     return new Promise((resolve, reject) => {
-      const claude = spawn('claude', args, {
+      // Use full path to claude to avoid PATH issues
+      const claudePath = process.env.HOME + '/.local/bin/claude';
+      this._log(`[DEBUG] Using claude at: ${claudePath}`);
+      this._log(`[DEBUG] Args count: ${args.length}, system prompt length: ${this.systemPrompt?.length}`);
+      const claude = spawn(claudePath, args, {
         cwd: process.cwd(),
-        env: { ...process.env },
-        timeout: 30 * 60 * 1000, // 30 min max
+        env: { ...process.env, PATH: process.env.HOME + '/.local/bin:' + process.env.HOME + '/.local/node-v22.13.1-darwin-arm64/bin:/usr/bin:/bin:' + (process.env.PATH || '') },
+        timeout: 120 * 60 * 1000, // 2 hour max for giga pipeline
       });
 
       let stdout = '';
@@ -143,8 +145,9 @@ export class MaxAgent {
           this._log(`[DEBUG] stderr (first 500): ${stderr.slice(0, 500)}`);
         }
 
-        // Clean up temp MCP config
-        try { fs.unlinkSync(mcpConfigPath); } catch {}
+        // Keep MCP config for debugging
+        this._log(`[DEBUG] MCP config: ${mcpConfigPath}`);
+        // try { fs.unlinkSync(mcpConfigPath); } catch {}
 
         // Detect PixInsight crash from stderr
         let crashError = null;

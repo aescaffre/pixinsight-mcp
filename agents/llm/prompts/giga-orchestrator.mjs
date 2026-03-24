@@ -92,12 +92,42 @@ You must behave like a disciplined director:
 - lrgb_combine for L+RGB merge
 
 ${isGalaxy ? `## GALAXY-SPECIFIC NOTES
-- IFN (Integrated Flux Nebula): background-stretched views of this data show MASSIVE wispy cirrus. Revealing it is a primary goal.
+- IFN (Integrated Flux Nebula): background-stretched views of this data show MASSIVE wispy cirrus. Revealing it is a primary goal. Make it DRAMATIC, not subtle.
 - Seti stretch target for L: start at 0.25 (bright enough for IFN). Try 0.28+ if IFN invisible.
 - Headroom 0.10 for L stretch (leaves room for HDRMT).
-- HDRMT inverted: START with 2 iterations, not 1. Try 6-7 layers. Push to find the synthetic boundary.
+- HDRMT inverted: Try 6-7 layers. Push to find the synthetic boundary.
 - LHE: L channel can take amounts up to 0.60+. Push until synthetic, step back one.
-- Stars should be SMALL pinpoints for galaxy fields.` : ''}
+- Stars should be small but NATURAL — not aggressively reduced to tiny dots. Preserve star color (orange, blue, white).
+- Color saturation should be BOLD — vivid galaxy colors, not washed out.
+
+## KNOWN ISSUES FROM PREVIOUS RUN (fix these!)
+1. **HDRMT RINGING ON GALAXY CORE**: Previous run created concentric ring artifacts in M81's core.
+   CAUSE: HDRMT applied with mask clipLow too low, allowing processing on the bright nucleus.
+   FIX: Use maskClipLow=0.40 or higher for HDRMT. The bright core region MUST be fully protected.
+   If ringing appears in preview, IMMEDIATELY revert and use a tighter mask.
+
+2. **STARS PROCESSED BEFORE SEPARATION**: Previous run had stars that looked processed/bloated.
+   CAUSE: LHE or HDRMT was applied while stars were still in the image, or star layer was modified by branch work.
+   FIX: Stars must be a completely SEPARATE layer that is NEVER touched by detail/IFN branches. Only the star branch should modify the star layer. Screen blend stars LAST in composition.
+
+3. **STAR COLORS FLAT**: Stars were white/gray with no color distinction.
+   FIX: Apply STRONG saturation curve to star layer: S channel [[0,0],[0.30,0.55],[0.60,0.85],[1,1]]. Apply TWICE if stars still look white.
+
+4. **STAR REDUCTION TOO AGGRESSIVE (TWICE!)**: Stars were over-reduced in BOTH runs. The field feels EMPTY.
+   FIX: Star reduction should be MINIMAL. Use factor 0.90-0.95 at most, or skip reduction entirely and just apply color saturation. Stars must be CLEARLY VISIBLE and give the field life. An empty-looking star field is a failure.
+
+5. **OVER-DENOISING**: NXT was applied too aggressively, softening real detail.
+   FIX: Use denoise=0.15-0.20 max. Better to have slight noise than plastic smoothness.
+   Consider using BXT in sharpen mode (sharpen_nonstellar=0.40) to recover sharpness.
+
+6. **SATURATION TOO LOW**: Final image was undersaturated.
+   FIX: Push saturation curves harder. S channel midpoint 0.75-0.85 for galaxies.
+
+7. **Ha INJECTION MISSING/WEAK**: M81 has HII regions in spiral arms that should glow PINK. Ha injection is NOT optional for HaLRGB data.
+   FIX: FORCE Ha injection in Branch C. ha_inject_red strength=0.40, brightnessLimit=0.20. ha_inject_luminance strength=0.25. If HII knots are not visibly pink in the final image, Ha injection failed.
+
+8. **IMAGE TOO DARK**: LRGB lightness=0.55 pulled the image too dark because L median (0.25) >> RGB median (0.12) causes LinearFit to compress L.
+   FIX: Use LRGB lightness=0.35-0.40 for this data. The RGB should retain its brightness.` : ''}
 
 # ======================================================================
 # PHASE 0 — INTAKE AND MEMORY
@@ -194,21 +224,29 @@ Work on RGB. Goal: vivid but plausible color.
 
 Required candidates: color_restrained, color_target, color_bold, color_overdone
 
-Tools: run_curves (S channel), run_pixelmath, save_variant
+Tools: run_curves (S channel), run_pixelmath, ha_inject_red, ha_inject_luminance, save_variant
 - Saturation curves: S channel [[0,0],[0.50,midpoint],[1,1]] with midpoint from 0.60 → 0.75 → 0.85
-${hasHa ? '- Ha injection: ha_inject_red (strength=0.25-0.40) and ha_inject_luminance (strength=0.15-0.30) to enhance HII regions and M82 red emission' : ''}
+${hasHa ? `- **Ha injection is MANDATORY for HaLRGB data.** Do NOT skip it.
+  Apply ha_inject_red (strength=0.40, brightnessLimit=0.20) + ha_inject_luminance (strength=0.25).
+  M81 has HII regions in spiral arms that MUST glow pink. M82 has red emission outflows.
+  If HII knots are not visibly pink, Ha injection failed. Push harder.` : ''}
 - Do not stop at a safe midpoint if the image is still washed out.
 
 ## BRANCH D — STAR POLICY
 
-Work on star layer. Goal: small, colorful, non-dominant stars.
+Work on star layer. Goal: colorful, natural-looking stars that give the field LIFE.
 
-Required candidates: stars_minimal, stars_target, stars_edge, stars_overdone
+**CRITICAL: Previous runs over-reduced stars, making the field feel EMPTY. This is a failure.**
+Stars should be present, colorful, and natural — just not bloated or dominant.
+
+Required candidates: stars_natural, stars_target, stars_reduced, stars_overreduced
 
 Tools: stretch_stars, run_curves, run_pixelmath, save_variant
-- Star reduction: run_pixelmath with \`iif($T > 0.02, $T * factor, $T)\` — vary factor from 0.70 → 0.50 → 0.35
-- Saturation curve on star layer: S channel [[0,0],[0.40,0.65],[0.70,0.90],[1,1]]
-- Stars should be PINPOINTS, not fat blobs. Push harder than your first instinct.
+- Start with NO reduction — just apply color saturation: S channel [[0,0],[0.30,0.55],[0.60,0.85],[1,1]] (apply twice)
+- Only if stars are genuinely too fat: gentle reduction factor 0.90-0.95 via \`iif($T > 0.02, $T * 0.90, $T)\`
+- Never go below factor 0.80. Stars that are barely visible = FAILURE.
+- The "overdone" candidate here should be OVER-REDUCED (too faint) to mark the boundary.
+- Screen blend strength should be 0.85-1.00, not lower.
 
 # ======================================================================
 # PHASE 3 — BRANCH CRITIC PASS
@@ -315,7 +353,14 @@ Guardrail mode. Do NOT water down the art unless technically broken.
 
 - Ensure final is saved as variant
 - Run check_constraints + compute_scores
-- save_memory for generalized lessons only (NOT brittle parameter superstitions)
+- save_memory for EVERY branch winner with specific parameters:
+  - "Branch A winner: LHE r=128/amount=X + r=64/amount=Y + HDRMT layers=Z/iter=N. Rejection boundary at..."
+  - "Branch B winner: IFN shadow-lift curve [[...]] through inverted mask blur=X clipLow=Y"
+  - "Branch C winner: saturation midpoint=X, Ha inject strength=Y"
+  - "Branch D winner: star reduction factor=X, saturation curve=[...]"
+  - "Composition winner: LRGB lightness=X saturation=Y, star blend strength=Z"
+  - Also save WHAT WENT WRONG: "HDRMT ringing at layers=7/iter=2 with maskClipLow=0.25"
+  This is critical — next run should not rediscover these from scratch.
 
 Call finish only when:
 - A true bracket was produced
