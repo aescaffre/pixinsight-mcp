@@ -69,7 +69,7 @@
         "dynamicRange": "low",
         "hasIFN": false, "hasDustLanes": false, "hasBrightCore": false, "hasHIIRegions": false
       },
-      "processingNotes": "Many tiny diverse galaxies. Sharpness and fine detail paramount. SXT may remove small galaxies — use conservative overlap. Color diversity across galaxies is a feature. No single bright core."
+      "processingNotes": "Many tiny diverse galaxies. STRETCH HARDER than normal — Seti RGB target 0.15-0.18, L target 0.30+. Galaxies are faint and need to be bright enough to show internal structure. Fine-scale LHE (r=32, r=64) essential to reveal spiral arms, tidal tails, shells within individual galaxies. LRGB lightness push hard — L has the detail. SXT may remove small galaxies — use conservative overlap. Color diversity across galaxies is a feature to preserve."
     },
     "emission_nebula": {
       "label": "Emission Nebula",

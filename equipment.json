@@ -1,0 +1,28 @@
+{
+  "description": "Equipment configuration for SPCC color calibration. Edit to match YOUR setup.",
+
+  "spcc": {
+    "filterSet": "Astronomik Deep Sky",
+    "sensorQE": "Sony IMX411/455/461/533/571",
+    "whiteReference": "Average Spiral Galaxy",
+
+    "_comment_filters": "Common filter sets (use exact SPCC names):",
+    "_option_filters_1": "Astronomik Deep Sky",
+    "_option_filters_2": "Baader LRGB (Highspeed)",
+    "_option_filters_3": "Chroma LRGB",
+    "_option_filters_4": "ZWO LRGB",
+    "_option_filters_5": "Optolong LRGB",
+
+    "_comment_sensors": "Common sensor QE curves:",
+    "_option_sensors_1": "Sony IMX411/455/461/533/571",
+    "_option_sensors_2": "Sony IMX294",
+    "_option_sensors_3": "Sony IMX585",
+    "_option_sensors_4": "Sony IMX071/178/183",
+    "_option_sensors_5": "Ideal QE curve",
+
+    "_comment_whiteref": "White reference options:",
+    "_option_whiteref_1": "Average Spiral Galaxy",
+    "_option_whiteref_2": "Photon Flux",
+    "_option_whiteref_3": "Energy Flux"
+  }
+}

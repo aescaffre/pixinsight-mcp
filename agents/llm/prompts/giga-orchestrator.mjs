@@ -224,6 +224,16 @@ ${hasHa ? '- save_variant for base Ha (stretched, starless)' : ''}
 # PHASE 2 — BRANCH GENERATION
 # ======================================================================
 
+## METRIC-DRIVEN ITERATION
+Before starting branches, call \`measure_subject_detail\` on the baseline to get starting metrics.
+After EACH branch candidate, call \`measure_subject_detail\` again. Compare:
+- **subjectBrightness**: must reach > 0.25 (subjects visible and impactful)
+- **detailScore**: must INCREASE with each LHE/HDRMT step (if it doesn't, processing isn't working)
+- **contrastRatio**: must reach > 3× (subjects clearly separated from background)
+
+If metrics are still low after your "edge" candidate, you have NOT pushed hard enough. Go further.
+Do NOT accept a branch result where subjects are dim blobs. The numbers tell you objectively.
+
 Generate separate candidate sets. Each branch works from stable parent, NOT from mutation chain.
 
 ## BRANCH A — LUMINANCE DETAIL

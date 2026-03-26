@@ -422,13 +422,44 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     'WCS copied';
   `);
 
-  // SPCC
-  log('  SPCC...');
+  // SPCC with equipment-specific filters + QE from equipment.json
+  const equipPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '../../equipment.json');
+  let equipConfig = {};
+  if (fs.existsSync(equipPath)) {
+    equipConfig = JSON.parse(fs.readFileSync(equipPath, 'utf-8')).spcc || {};
+  }
+  const filterSet = equipConfig.filterSet || 'Astronomik Deep Sky';
+  const sensorQE = equipConfig.sensorQE || 'Sony IMX411/455/461/533/571';
+  const whiteRef = equipConfig.whiteReference || 'Average Spiral Galaxy';
+  log(`  SPCC (${filterSet} + ${sensorQE})...`);
+
+  // Write curve data to temp file (too large for inline PJSR)
+  const spccCurvesModule = await import('../../scripts/spcc-curves.mjs');
+  const spccDataPath = '/tmp/spcc-curves-prep.json';
+  fs.writeFileSync(spccDataPath, JSON.stringify(spccCurvesModule.default));
+
   const spccR = await ctx.pjsr(`
+    var json=File.readLines('${spccDataPath}').join('');
+    var c=JSON.parse(json);
     var P=new SpectrophotometricColorCalibration;
-    P.applyCalibration=true;P.narrowBandMode=false;P.narrowBandOptimizeStars=false;
-    P.catalogId='GaiaDR3SP';P.autoLimitMagnitude=true;
-    P.psfStructureLayers=5;P.psfMinSNR=40;P.psfChannelSearchTolerance=2;
+    P.applyCalibration=true;
+    P.narrowbandMode=false;
+    P.whiteReferenceSpectrum=c.whiteRef;
+    P.whiteReferenceName='${whiteRef}';
+    P.redFilterTrCurve=c.red;
+    P.redFilterName='${filterSet} R';
+    P.greenFilterTrCurve=c.green;
+    P.greenFilterName='${filterSet} G';
+    P.blueFilterTrCurve=c.blue;
+    P.blueFilterName='${filterSet} B';
+    P.deviceQECurve=c.qe;
+    P.deviceQECurveName='${sensorQE}';
+    P.catalogId='GaiaDR3SP';
+    P.autoLimitMagnitude=true;
+    P.psfStructureLayers=5;
+    P.psfMinSNR=20;
+    P.psfChannelSearchTolerance=2;
+    P.psfAllowClusteredSources=true;
     var ret=P.executeOn(ImageWindow.windowById('${targetName}').mainView);
     ret?'SPCC_OK':'SPCC_FAILED';
   `);

@@ -10,3 +10,4 @@ export { runGC, runABE, runPerChannelABE, runSCNR } from './gradient.mjs';
 export { cloneImage, restoreFromClone, closeImage, purgeUndoHistory } from './image-mgmt.mjs';
 export { saveCheckpoint, loadCheckpoint } from './checkpoint.mjs';
 export { checkStarQuality, checkRinging, checkSharpness, checkCoreBurning } from './quality-gates.mjs';
+export { measureSubjectDetail } from './subject-metrics.mjs';

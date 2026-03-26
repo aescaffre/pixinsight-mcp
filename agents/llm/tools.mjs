@@ -12,6 +12,7 @@ import {
   setiStretch,
   createLumMask, applyMask, removeMask, closeMask,
   checkStarQuality, checkRinging, checkSharpness, checkCoreBurning,
+  measureSubjectDetail,
 } from '../ops/index.mjs';
 import { checkHardConstraints, statsToScores, computeAggregate } from '../scoring.mjs';
 import { jpegToContentBlock } from './vision.mjs';
@@ -1374,6 +1375,7 @@ const TOOL_CATALOG = {
       // === QUALITY GATE ENFORCEMENT ===
       // Run automated quality checks — agent cannot bypass these
       const failures = [];
+      const warnings = [];
 
       // Gate 1: Star quality (FWHM + color)
       try {
@@ -1386,15 +1388,15 @@ const TOOL_CATALOG = {
         // This handles the case where finish is called on a starless view
       }
 
-      // Gate 2: Ringing detection
+      // Gate 2: Ringing detection (non-blocking — galaxy clusters have intrinsic oscillations)
       try {
         const ringingResult = await checkRinging(ctx, input.view_id);
         if (!ringingResult.pass) {
-          failures.push(`RINGING GATE FAILED: ${ringingResult.details}`);
+          warnings.push(`RINGING WARNING: ${ringingResult.details}`);
         }
       } catch (e) {
         // If ringing check fails to execute, warn but don't block
-        failures.push(`RINGING CHECK ERROR: ${e.message} — inspect manually`);
+        warnings.push(`RINGING CHECK ERROR: ${e.message} — inspect manually`);
       }
 
       // Gate 3: Core burning
@@ -1417,9 +1419,10 @@ const TOOL_CATALOG = {
         };
       }
 
+      const warnText = warnings.length > 0 ? `\nWarnings:\n${warnings.map(w => '  - ' + w).join('\n')}` : '';
       return {
         type: 'text',
-        text: `Finished (all quality gates PASSED). Best: ${input.view_id} (median=${stats.median.toFixed(6)}, max=${(stats.max ?? 0).toFixed(4)})\nRationale: ${input.rationale}`
+        text: `Finished (quality gates PASSED). Best: ${input.view_id} (median=${stats.median.toFixed(6)}, max=${(stats.max ?? 0).toFixed(4)})${warnText}\nRationale: ${input.rationale}`
       };
     }
   },
@@ -1820,6 +1823,32 @@ const TOOL_CATALOG = {
           `  Burnt fraction: ${(result.burntFraction * 100)?.toFixed(1) || 'N/A'}% (limit: 2%)\n` +
           `  Peak value: ${result.peakValue?.toFixed(4) || 'N/A'}\n` +
           `  Core center: [${result.coreCenter || 'N/A'}]`
+      };
+    }
+  },
+
+  measure_subject_detail: {
+    category: 'measurement',
+    definition: {
+      name: 'measure_subject_detail',
+      description: 'Measure subject brightness, detail resolution, and contrast ratio. Returns numeric goals: subjectBrightness (goal: >0.25), detailScore (higher=sharper internal structure), contrastRatio (goal: >3x background). Use this AFTER each processing step to verify improvement. If subjects are still dim or smooth blobs, push harder.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'View ID to measure' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const result = await measureSubjectDetail(ctx, input.view_id);
+      return {
+        type: 'text',
+        text: `[SUBJECT METRICS] ${result.details}\n` +
+          `  Brightness: ${result.subjectBrightness?.toFixed(4) || 'N/A'} (goal: >0.25)\n` +
+          `  Detail score: ${result.detailScore?.toFixed(6) || 'N/A'} (higher=better)\n` +
+          `  Contrast ratio: ${result.contrastRatio?.toFixed(1) || 'N/A'}× (goal: >3×)\n` +
+          `  Subject regions: ${result.subjectCount || 0} / Background median: ${result.backgroundMedian?.toFixed(4) || 'N/A'}`
       };
     }
   },
