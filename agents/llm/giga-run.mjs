@@ -121,7 +121,7 @@ async function main() {
     'measurement', 'preview', 'image_mgmt', 'gradient',
     'denoise', 'sharpen', 'stretch',
     'masks', 'detail', 'curves', 'lrgb', 'ha_injection', 'stars',
-    'artifacts', 'memory', 'control', 'scoring'
+    'artifacts', 'memory', 'control', 'scoring', 'quality_gate'
   ];
   const { definitions, handlers } = buildToolSet('giga_orchestrator', creativeCategories);
   console.log(`  Tools available: ${definitions.length}`);
@@ -191,30 +191,54 @@ ${extractWinningParams(brief.target.classification)}
   const xisfPath = path.join(outputDir, `${targetName}_giga.xisf`);
   const jpgPath = path.join(outputDir, `${targetName}_giga.jpg`);
 
+  // Find the best final image to save — prefer COMP_final, then any COMP_, then targetName
+  // The agent often leaves targetName as starless and puts the final composition elsewhere
   try {
-    await ctx.pjsr(`
-      var w = ImageWindow.windowById('${targetName}');
-      if (w.isNull) {
-        var ws = ImageWindow.windows;
-        for (var i = 0; i < ws.length; i++) {
-          if (ws[i].mainView.image.numberOfChannels === 3) { w = ws[i]; break; }
+    const saveResult = await ctx.pjsr(`
+      var candidates = ['COMP_final', 'COMP_final_v2', 'COMP_balanced', 'COMP_boldIFN', 'COMP_edge', '${targetName}'];
+      var best = null;
+      for (var i = 0; i < candidates.length; i++) {
+        var w = ImageWindow.windowById(candidates[i]);
+        if (!w.isNull && w.mainView.image.numberOfChannels === 3) {
+          best = w;
+          break;
         }
       }
-      if (!w.isNull) {
-        w.saveAs('${xisfPath.replace(/'/g, "\\'")}', false, false, false, false);
-        if (w.mainView.id !== '${targetName}') w.mainView.id = '${targetName}';
+      // Fallback: any 3-channel image
+      if (!best) {
+        var ws = ImageWindow.windows;
+        for (var i = 0; i < ws.length; i++) {
+          if (ws[i].mainView.image.numberOfChannels === 3) { best = ws[i]; break; }
+        }
+      }
+      if (best) {
+        best.saveAs('${xisfPath.replace(/'/g, "\\'")}', false, false, false, false);
+        best.mainView.id = '${targetName}';
+        best.saveAs('${jpgPath.replace(/'/g, "\\'")}', false, false, false, false);
+        best.mainView.id = '${targetName}';
+        'Saved: ' + best.mainView.id;
+      } else {
+        'No color image found';
       }
     `);
+    console.log(`  ${saveResult.outputs?.consoleOutput || 'done'}`);
     console.log(`  Saved: ${xisfPath}`);
-
-    await ctx.pjsr(`
-      var w = ImageWindow.windowById('${targetName}');
-      if (!w.isNull) w.saveAs('${jpgPath.replace(/'/g, "\\'")}', false, false, false, false);
-      if (!w.isNull && w.mainView.id !== '${targetName}') w.mainView.id = '${targetName}';
-    `);
     console.log(`  Saved: ${jpgPath}`);
   } catch (e) {
     console.error(`  Save error: ${e.message}`);
+  }
+
+  // Run memory optimizer after each run
+  try {
+    const { optimizeMemory } = await import('../memory/hierarchical-memory.mjs');
+    const optResult = optimizeMemory();
+    if (optResult.promotions.length > 0) {
+      console.log(`\n--- Memory Optimizer: ${optResult.promotions.length} promotion(s) ---`);
+      optResult.promotions.forEach(p => console.log(`  ${p}`));
+    }
+    console.log(`  Memory: ${optResult.totalEntries} entries`);
+  } catch (e) {
+    console.log(`  Memory optimizer skipped: ${e.message}`);
   }
 
   console.log(`\n${'='.repeat(60)}`);

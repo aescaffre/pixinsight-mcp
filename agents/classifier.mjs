@@ -22,6 +22,17 @@ function loadProcessingProfiles() {
 }
 
 /**
+ * Load target taxonomy from JSON.
+ */
+function loadTaxonomy() {
+  const taxPath = path.join(__dirname, 'target-taxonomy.json');
+  if (fs.existsSync(taxPath)) {
+    return JSON.parse(fs.readFileSync(taxPath, 'utf-8')).categories || {};
+  }
+  return {};
+}
+
+/**
  * Common deep sky objects and their classifications.
  * Used for rule-based classification from target name.
  */
@@ -58,9 +69,17 @@ const KNOWN_OBJECTS = {
   'NGC7293': 'planetary_nebula', 'NGC6543': 'planetary_nebula',
   'NGC2392': 'planetary_nebula', 'NGC3242': 'planetary_nebula', 'NGC6826': 'planetary_nebula',
   // Star clusters
-  'M13': 'star_cluster', 'M3': 'star_cluster', 'M5': 'star_cluster',
-  'M92': 'star_cluster', 'M2': 'star_cluster',
-  'NGC884': 'star_cluster', 'NGC869': 'star_cluster',
+  'M13': 'star_cluster_globular', 'M3': 'star_cluster_globular', 'M5': 'star_cluster_globular',
+  'M92': 'star_cluster_globular', 'M2': 'star_cluster_globular',
+  'NGC884': 'star_cluster_open', 'NGC869': 'star_cluster_open',
+  // Supernova remnants
+  'NGC6960': 'supernova_remnant', 'NGC6992': 'supernova_remnant',
+  'Simeis147': 'supernova_remnant', 'IC443': 'supernova_remnant',
+  // Galaxy clusters
+  'Abell2151': 'galaxy_cluster', 'Abell1656': 'galaxy_cluster',
+  'HCG92': 'galaxy_cluster', 'Stephan': 'galaxy_cluster',
+  // Dark nebulae
+  'Barnard33': 'dark_nebula', 'LDN1622': 'dark_nebula', 'Barnard68': 'dark_nebula',
 };
 
 /**
@@ -134,13 +153,33 @@ export function generateBrief(config, opts = {}) {
       'resolution', 'background_quality', 'natural_appearance', 'star_quality'];
   }
 
-  // Determine field characteristics
+  // Determine field characteristics from taxonomy
+  const taxonomy = loadTaxonomy();
+  const taxEntry = taxonomy[classification] || {};
+  const taxTraits = taxEntry.traits || {};
+  const hasHa = workflow.includes('Ha');
+
+  // Override signalType based on actual data
+  let signalType = taxTraits.signalType || 'broadband';
+  if (hasHa && signalType === 'broadband') signalType = 'ha_accented';
+
   const fieldCharacteristics = {
-    starDensity: 'moderate',
-    haSignalStrength: workflow.includes('Ha') ? 'moderate' : 'none',
-    dustLanes: isGalaxy,
-    brightCore: isGalaxy || classification === 'planetary_nebula',
-    faintOuterStructure: isGalaxy
+    // New processing-relevant traits
+    signalType,
+    structuralZones: taxTraits.structuralZones || 'uniform',
+    colorZonation: taxTraits.colorZonation || 'monochromatic',
+    starRelationship: taxTraits.starRelationship || 'stars_are_context',
+    faintStructureGoal: taxTraits.faintStructureGoal || 'none',
+    subjectScale: taxTraits.subjectScale || 'medium',
+    dynamicRange: taxTraits.dynamicRange || 'moderate',
+    // Legacy boolean traits (kept for backward compat with prompt conditionals)
+    haSignalStrength: hasHa ? 'moderate' : 'none',
+    dustLanes: taxTraits.hasDustLanes ?? isGalaxy,
+    brightCore: taxTraits.hasBrightCore ?? false,
+    hasIFN: taxTraits.hasIFN ?? false,
+    hasHIIRegions: taxTraits.hasHIIRegions ?? hasHa,
+    // Processing guidance
+    processingNotes: taxEntry.processingNotes || ''
   };
 
   return {
@@ -169,6 +208,11 @@ export function generateBrief(config, opts = {}) {
       starProminence: isGalaxy ? 'subdued' : 'balanced',
       detailEmphasis: isGalaxy ? 'fine_detail' : 'balanced',
       referenceNotes: opts.intent || ''
+    },
+    aestheticPreferences: {
+      noiseLevel: opts.noiseLevel || 'clean',              // very_clean | clean | natural
+      glow: opts.glow || 'moderate',                     // none | subtle | moderate | strong
+      starPresence: opts.starPresence || 'prominent',    // minimal | subdued | prominent | rich
     },
     technicalPriorities: priorities,
     hardConstraints: {

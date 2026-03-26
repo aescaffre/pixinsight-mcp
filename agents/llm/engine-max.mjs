@@ -97,12 +97,18 @@ export class MaxAgent {
     ];
 
     // Build claude CLI args
+    // --strict-mcp-config: only use our MCP server
+    // --bypassPermissions: auto-approve all tool calls
+    // No --bare: allows OAuth/Max subscription auth (--bare requires API key which has no credits)
+    // Strip ANTHROPIC_API_KEY: forces OAuth flow instead of API billing
     const args = [
       '-p', promptText,
       '--output-format', 'json',
       '--append-system-prompt', this.systemPrompt,
       '--mcp-config', mcpConfigPath,
+      '--strict-mcp-config',
       '--allowedTools', allowedTools.join(','),
+      '--permission-mode', 'bypassPermissions',
     ];
 
     if (this.model) {
@@ -112,13 +118,12 @@ export class MaxAgent {
     this._log(`Spawning claude subprocess (${this._toolNames.length} MCP tools)...`);
 
     return new Promise((resolve, reject) => {
-      // Use full path to claude to avoid PATH issues
-      const claudePath = process.env.HOME + '/.local/bin/claude';
-      this._log(`[DEBUG] Using claude at: ${claudePath}`);
+      const spawnEnv = { ...process.env };
+      delete spawnEnv.ANTHROPIC_API_KEY;  // Force OAuth/Max subscription auth
       this._log(`[DEBUG] Args count: ${args.length}, system prompt length: ${this.systemPrompt?.length}`);
-      const claude = spawn(claudePath, args, {
+      const claude = spawn('claude', args, {
         cwd: process.cwd(),
-        env: { ...process.env, PATH: process.env.HOME + '/.local/bin:' + process.env.HOME + '/.local/node-v22.13.1-darwin-arm64/bin:/usr/bin:/bin:' + (process.env.PATH || '') },
+        env: spawnEnv,
         timeout: 120 * 60 * 1000, // 2 hour max for giga pipeline
       });
 

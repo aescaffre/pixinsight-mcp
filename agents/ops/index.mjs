@@ -6,6 +6,7 @@ export { getStats, measureUniformity } from './stats.mjs';
 export { savePreview, autoStretch } from './preview.mjs';
 export { createMask, createLumMask, applyMask, removeMask, closeMask, createOiiiMask } from './masks.mjs';
 export { setiStretch, computeGHSCoefficients, buildGHSExpr, ghsCode } from './stretch.mjs';
-export { runGC, runABE } from './gradient.mjs';
+export { runGC, runABE, runPerChannelABE, runSCNR } from './gradient.mjs';
 export { cloneImage, restoreFromClone, closeImage, purgeUndoHistory } from './image-mgmt.mjs';
 export { saveCheckpoint, loadCheckpoint } from './checkpoint.mjs';
+export { checkStarQuality, checkRinging, checkSharpness, checkCoreBurning } from './quality-gates.mjs';

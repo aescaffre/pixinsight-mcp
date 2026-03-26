@@ -21,6 +21,10 @@ export function buildGigaOrchestratorPrompt(brief, config) {
   const hasL = !!(F.L?.trim());
   const hasHa = !!(F.Ha?.trim());
   const isGalaxy = brief.target.classification.startsWith('galaxy');
+  const fc = brief.target.fieldCharacteristics || {};
+  const hasIFN = fc.hasIFN || false;
+  const hasHIIRegions = fc.hasHIIRegions || false;
+  const ap = brief.aestheticPreferences || {};
 
   return `# GIGA PROMPT — PixInsight MCP Agentic Astrophotography Orchestrator
 
@@ -34,6 +38,14 @@ by driving PixInsight through the existing MCP tools.
 - Style: ${brief.aestheticIntent.style}
 - Star prominence: ${brief.aestheticIntent.starProminence}
 ${brief.aestheticIntent.referenceNotes ? `- User notes: ${brief.aestheticIntent.referenceNotes}` : ''}
+${fc.processingNotes ? `- **Processing guidance**: ${fc.processingNotes}` : ''}
+- Subject scale: ${fc.subjectScale || 'medium'} | Dynamic range: ${fc.dynamicRange || 'moderate'}
+
+## Aesthetic Preferences (user-configured)
+- Noise level: **${ap.noiseLevel || 'very_clean'}** ${ap.noiseLevel === 'very_clean' ? '— push NXT harder in final passes, accept slight detail loss for smoothness' : ap.noiseLevel === 'natural' ? '— preserve grain, minimal NXT' : '— moderate NXT'}
+- Glow: **${ap.glow || 'moderate'}** ${ap.glow === 'moderate' || ap.glow === 'strong' ? '— add soft luminance glow to subject in final polish (Gaussian blur blend)' : '— no artificial glow'}
+- Star presence: **${ap.starPresence || 'prominent'}** ${ap.starPresence === 'prominent' || ap.starPresence === 'rich' ? '— stars must be clearly visible and give the field life. check_star_quality gate requires >= 50 stars.' : '— subtle stars acceptable'}
+- Background: **preserve IFN first** ${isGalaxy ? '— do NOT darken background at the expense of IFN. Faint cirrus visibility is more important than a dark background. Only darken areas where no IFN is present.' : ''}
 
 ## Available master files
 ${channels.join('\\n')}
@@ -91,43 +103,67 @@ You must behave like a disciplined director:
 - star_screen_blend for star reintegration
 - lrgb_combine for L+RGB merge
 
-${isGalaxy ? `## GALAXY-SPECIFIC NOTES
-- IFN (Integrated Flux Nebula): background-stretched views of this data show MASSIVE wispy cirrus. Revealing it is a primary goal. Make it DRAMATIC, not subtle.
-- Seti stretch target for L: start at 0.25 (bright enough for IFN). Try 0.28+ if IFN invisible.
-- Headroom 0.10 for L stretch (leaves room for HDRMT).
-- HDRMT inverted: Try 6-7 layers. Push to find the synthetic boundary.
-- LHE: L channel can take amounts up to 0.60+. Push until synthetic, step back one.
-- Stars should be small but NATURAL — not aggressively reduced to tiny dots. Preserve star color (orange, blue, white).
-- Color saturation should be BOLD — vivid galaxy colors, not washed out.
+${isGalaxy ? `## GALAXY PROCESSING RULES
+- IFN (Integrated Flux Nebula): if present in field, revealing it is a primary goal. Make it DRAMATIC.
+- Seti stretch target for L: bright enough for faint structure. Push higher if IFN invisible.
+- Headroom 0.10+ for L stretch (leaves room for HDRMT).
+- HDRMT inverted: push layers to find the synthetic boundary.
+- LHE: L channel can take strong amounts. Push until synthetic, step back one.
+` : ''}
+## QUALITY RULES — HARD GATES (target-agnostic)
 
-## KNOWN ISSUES FROM PREVIOUS RUN (fix these!)
-1. **HDRMT RINGING ON GALAXY CORE**: Previous run created concentric ring artifacts in M81's core.
-   CAUSE: HDRMT applied with mask clipLow too low, allowing processing on the bright nucleus.
-   FIX: Use maskClipLow=0.40 or higher for HDRMT. The bright core region MUST be fully protected.
-   If ringing appears in preview, IMMEDIATELY revert and use a tighter mask.
+These are enforced by automated code. The \`finish\` tool runs quality gates automatically.
+You CANNOT complete until these pass. Fix issues proactively — don't wait for finish to reject.
 
-2. **STARS PROCESSED BEFORE SEPARATION**: Previous run had stars that looked processed/bloated.
-   CAUSE: LHE or HDRMT was applied while stars were still in the image, or star layer was modified by branch work.
-   FIX: Stars must be a completely SEPARATE layer that is NEVER touched by detail/IFN branches. Only the star branch should modify the star layer. Screen blend stars LAST in composition.
+### 1. NO RINGING ARTIFACTS (zero tolerance)
+HDRMT and aggressive sharpening create concentric ring patterns around bright cores/stars.
+- Use \`check_ringing\` after EVERY HDRMT application to verify
+- **Gate: 0 oscillations allowed.** Any oscillation = FAIL.
+- If oscillations > 0: IMMEDIATELY revert and use tighter mask or donut mask technique
+- Donut mask: apply \`$T*(1-$T)*4\` to luminance mask — protects BOTH core and background
+- Prevention: maskClipLow >= 0.35 for HDRMT, or donut mask for bright cores
 
-3. **STAR COLORS FLAT**: Stars were white/gray with no color distinction.
-   FIX: Apply STRONG saturation curve to star layer: S channel [[0,0],[0.30,0.55],[0.60,0.85],[1,1]]. Apply TWICE if stars still look white.
+### 2. STAR QUALITY — NATURAL, COLORFUL, PRESENT
+Stars must be small, colorful, and natural — not white blobs or invisible dots.
+- Use \`check_star_quality\` after star reintegration to verify
+- FWHM must be < 6px (bloated stars = FAIL)
+- Color diversity must be > 0.05 (colorless stars = FAIL)
+- Minimum 50 stars detected (too few = stars missing or over-reduced = FAIL)
+- Stars are a SEPARATE layer — NEVER apply LHE/HDRMT to the star layer
+- Star reduction should be MINIMAL (factor 0.90-0.95) or skipped entirely
+- Apply saturation curves to stars: S channel [[0,0],[0.30,0.55],[0.60,0.85],[1,1]]
+- Screen blend stars LAST in composition
 
-4. **STAR REDUCTION TOO AGGRESSIVE (TWICE!)**: Stars were over-reduced in BOTH runs. The field feels EMPTY.
-   FIX: Star reduction should be MINIMAL. Use factor 0.90-0.95 at most, or skip reduction entirely and just apply color saturation. Stars must be CLEARLY VISIBLE and give the field life. An empty-looking star field is a failure.
+### 3. NO CORE BURNING (zero tolerance)
+The galaxy core MUST retain structure — never clip to white.
+- Use \`check_core_burning\` after EVERY HDRMT and LHE application
+- **Gate: < 2% of core pixels > 0.98.** Any more = FAIL.
+- If core is burnt: revert, increase stretch headroom, or use tighter mask protecting the core
+- Seti stretch headroom=0.10 for L channel preserves core detail
+- Previous run (v8) had a slightly burnt core. Protect it.
 
-5. **OVER-DENOISING**: NXT was applied too aggressively, softening real detail.
-   FIX: Use denoise=0.15-0.20 max. Better to have slight noise than plastic smoothness.
-   Consider using BXT in sharpen mode (sharpen_nonstellar=0.40) to recover sharpness.
+### 4. NO OVER-DENOISING — this is critical
+NXT denoise > 0.25 softens real detail and creates plastic appearance.
+- Keep denoise=0.40-0.50 for branch-level passes (post-stretch, through masks)
+- Final polish pass: 0.15 MAX, or skip if background is already clean
+- **Plastic smoothness is WORSE than slight noise** — err on the side of less denoising
+- Previous run (v5) over-denoised and killed all detail. Do not repeat.
 
-6. **SATURATION TOO LOW**: Final image was undersaturated.
-   FIX: Push saturation curves harder. S channel midpoint 0.75-0.85 for galaxies.
+### 4. SATURATION — VIVID NOT WASHED
+Push saturation curves. Undersaturated images are a failure.
+- Use \`check_sharpness\` to compare candidates (higher = better)
+${hasHa ? `
+### 5. Ha INJECTION (MANDATORY for HaLRGB/HaRGB)
+This target has Ha data. Ha injection is NOT optional.
+- Apply ha_inject_red + ha_inject_luminance in Branch C
+- HII regions must glow pink in the final image
+- If HII knots are not visibly colored, Ha injection failed — push harder` : ''}
 
-7. **Ha INJECTION MISSING/WEAK**: M81 has HII regions in spiral arms that should glow PINK. Ha injection is NOT optional for HaLRGB data.
-   FIX: FORCE Ha injection in Branch C. ha_inject_red strength=0.40, brightnessLimit=0.20. ha_inject_luminance strength=0.25. If HII knots are not visibly pink in the final image, Ha injection failed.
-
-8. **IMAGE TOO DARK**: LRGB lightness=0.55 pulled the image too dark because L median (0.25) >> RGB median (0.12) causes LinearFit to compress L.
-   FIX: Use LRGB lightness=0.35-0.40 for this data. The RGB should retain its brightness.` : ''}
+### WORKFLOW: Run quality gates BEFORE calling finish
+1. After EVERY HDRMT/LHE: \`check_core_burning\` + \`check_ringing\`
+2. After star reintegration: \`check_star_quality\`
+3. Compare candidates: \`check_sharpness\`
+4. Only call \`finish\` when all gates would pass (star quality + ringing + core burning)
 
 # ======================================================================
 # PHASE 0 — INTAKE AND MEMORY
@@ -137,7 +173,8 @@ ${isGalaxy ? `## GALAXY-SPECIFIC NOTES
 - Identify workflow: ${brief.dataDescription.workflow}
 - Target class: ${brief.target.classification}
 - Aesthetic target: ${brief.aestheticIntent.style}
-${isGalaxy ? '- IFN is a PRIMARY goal. Safe results = failure.' : ''}
+${hasIFN ? '- IFN (Integrated Flux Nebula) is a PRIMARY goal. Safe results = failure.' : ''}
+${hasHIIRegions ? '- HII regions expected — ensure Ha emission features are visible.' : ''}
 
 # ======================================================================
 # PHASE 1 — DETERMINISTIC PREP (ALREADY DONE — DO NOT REPEAT)
@@ -204,49 +241,67 @@ Tools: create_luminance_mask, apply_mask, run_lhe, run_hdrmt, remove_mask, close
 - You MUST revert at least once — if you never revert, you didn't push hard enough.
 ` : 'No L channel. Apply LHE/HDRMT to RGB directly with same bracketing discipline.'}
 
-## BRANCH B — IFN REVEAL
-${isGalaxy ? `
+## BRANCH B — IFN REVEAL *** HIGHEST PRIORITY BRANCH ***
+${hasIFN ? `
+**IFN is the #1 differentiator for this image.** v6 had dramatic IFN but v7 lost it. This branch MUST recover v6-level IFN.
+
 Work from starless L or starless RGB. Goal: make faint galactic cirrus OBVIOUSLY visible.
 This branch exists because IFN is routinely lost by conservative workflows.
 
 Required candidates: IFN_weak, IFN_target, IFN_edge, IFN_overdone
 
 Tools: create_luminance_mask (with inverted=true for background-only work), apply_mask, run_curves, run_pixelmath, save_variant
-- Shadow-lifting curves through INVERTED luminance mask (protects galaxies, lifts only background)
-- Aggressive lift: [[0,0.04],[0.04,0.12],[0.10,0.16],[0.20,0.24],[0.50,0.50],[1,1]]
+- Shadow-lifting curves through INVERTED luminance mask (protects subject, lifts only background)
+- Aggressive lift: [[0,0.03],[0.04,0.15],[0.10,0.22],[0.20,0.32],[0.50,0.55],[1,1]] (v6 winning params)
 - If IFN is still invisible in your strongest candidate, you have NOT pushed enough.
 - A brighter background WITH visible IFN is better than a dark background WITHOUT it.
-` : 'IFN not expected for this target type. Skip this branch.'}
+- IFN target candidate should push L median to ~0.35 (v6 achieved this and user loved it)
+- In COMPOSITION phase, the IFN shadow-lift MUST be preserved. If composition darkens IFN, REJECT it.
+` : 'IFN not expected for this target type. Skip this branch or use for faint outer structure.'}
 
 ## BRANCH C — COLOR RICHNESS
 
-Work on RGB. Goal: vivid but plausible color.
+Work on RGB. Goal: VIVID, bold color — especially on the subject galaxies.
 
 Required candidates: color_restrained, color_target, color_bold, color_overdone
 
-Tools: run_curves (S channel), run_pixelmath, ha_inject_red, ha_inject_luminance, save_variant
-- Saturation curves: S channel [[0,0],[0.50,midpoint],[1,1]] with midpoint from 0.60 → 0.75 → 0.85
-${hasHa ? `- **Ha injection is MANDATORY for HaLRGB data.** Do NOT skip it.
-  Apply ha_inject_red (strength=0.40, brightnessLimit=0.20) + ha_inject_luminance (strength=0.25).
-  M81 has HII regions in spiral arms that MUST glow pink. M82 has red emission outflows.
-  If HII knots are not visibly pink, Ha injection failed. Push harder.` : ''}
+Tools: run_curves (S channel), run_pixelmath, ha_inject_red, ha_inject_luminance, create_luminance_mask, apply_mask, remove_mask, close_mask, save_variant
+
+**TWO-STAGE saturation:**
+1. **Global S-curve**: S channel [[0,0],[0.50,midpoint],[1,1]] with midpoint from 0.65 → 0.75 → 0.85
+2. **MASKED galaxy boost**: Create luminance mask (clipLow=0.10, blur=5), apply mask, then push S-curve on the galaxies only: midpoint 0.80-0.85.
+
+**HUE-SELECTIVE saturation (critical):**
+- Blue and yellow/brown: push HARD — these are the galaxy's natural colors
+- Red/pink: RESTRAIN — Ha injection already adds red. Over-saturating red makes HII knots garish.
+- Use run_pixelmath on CIE a* channel to selectively reduce red saturation if HII knots look overdone:
+  \`iif(CIE_a($T) > 0.02, CIE_a($T) * 0.70, CIE_a($T))\` or apply S-curve with lower midpoint on red hues only
+- Previous run (v7) had good blue/yellow but overdone pink/red knots.
+${hasHa ? `
+- **Ha injection is MANDATORY for HaLRGB/HaRGB data.** Do NOT skip it.
+  Apply ha_inject_red (strength=0.30-0.40, brightnessLimit=0.20) + ha_inject_luminance (strength=0.25).
+  HII regions and emission structures MUST show pink/red in the final image.
+  If Ha-emitting features are not visibly colored, Ha injection failed. Push harder.` : ''}
 - Do not stop at a safe midpoint if the image is still washed out.
 
 ## BRANCH D — STAR POLICY
 
-Work on star layer. Goal: colorful, natural-looking stars that give the field LIFE.
+Work on star layer. Goal: LUMINOUS, colorful stars that bring LIFE to the field.
 
-**CRITICAL: Previous runs over-reduced stars, making the field feel EMPTY. This is a failure.**
-Stars should be present, colorful, and natural — just not bloated or dominant.
+**CRITICAL: Stars that are tiny pinpoints or barely visible = FAILURE.**
+**Previous runs (v4, v5, v6) ALL had stars too small/dim. This is a recurring problem.**
+Stars should be clearly visible, luminous, and colorful. Slightly bigger is BETTER than too small.
+The \`check_star_quality\` gate requires >= 50 detected stars.
 
-Required candidates: stars_natural, stars_target, stars_reduced, stars_overreduced
+Required candidates: stars_bright, stars_target, stars_reduced, stars_overreduced
 
 Tools: stretch_stars, run_curves, run_pixelmath, save_variant
-- Start with NO reduction — just apply color saturation: S channel [[0,0],[0.30,0.55],[0.60,0.85],[1,1]] (apply twice)
-- Only if stars are genuinely too fat: gentle reduction factor 0.90-0.95 via \`iif($T > 0.02, $T * 0.90, $T)\`
-- Never go below factor 0.80. Stars that are barely visible = FAILURE.
+- Start with NO reduction and STRONG color saturation: S channel [[0,0],[0.30,0.55],[0.60,0.85],[1,1]] (apply twice)
+- Brighten stars if needed: \`max($T * 1.3, $T)\` or gentle curves lift on the star layer
+- Do NOT reduce stars unless they are genuinely bloated (FWHM > 6px). Default: NO reduction (factor 1.0).
+- Never go below factor 0.90. Stars that are barely visible = FAILURE.
 - The "overdone" candidate here should be OVER-REDUCED (too faint) to mark the boundary.
-- Screen blend strength should be 0.85-1.00, not lower.
+- Screen blend strength: **0.90-1.00** — do NOT go below 0.85. Previous runs used 0.55-0.65 which killed stars.
 
 # ======================================================================
 # PHASE 3 — BRANCH CRITIC PASS
@@ -300,7 +355,7 @@ Required: at least 3 composition variants:
 
 For each composition:
 ${hasL ? '1. lrgb_combine (FILTER_L + RGB)' : '1. Start from RGB'}
-2. Apply IFN shadow-lift (through inverted mask if galaxy)
+2. Apply IFN shadow-lift if applicable (through inverted mask for faint structure)
 3. Apply saturation
 4. star_screen_blend with branch D winner
 5. save_variant
@@ -339,13 +394,48 @@ Rules:
 - Allow one narrow final refinement only if correct answer is clearly close
 
 # ======================================================================
-# PHASE 8 — TECHNICAL VALIDATION
+# PHASE 7.5 — GRADIENT CORRECTION
+# ======================================================================
+
+After composition but BEFORE quality gates. Check for color gradients in the background.
+
+1. **Measure**: get_image_stats — check per-channel medians. If one channel's background is significantly higher on one side, there's a gradient.
+2. **Diagnose**: measure_uniformity — compare corner medians per channel. If G corners differ by > 0.005, green gradient present.
+3. **Fix options** (try in order, save_variant after each):
+   - \`run_scnr\` through INVERTED luminance mask (background only) — for green casts. Amount 0.30-0.50.
+   - \`run_per_channel_abe\` with polyDegree=1 — for channel-specific spatial gradients. Very gentle.
+   - \`run_gradient_correction\` — for broadband gradients on the final composition.
+4. **Verify**: measure_uniformity again. If corner uniformity improved, keep. If galaxy colors affected, revert.
+
+Do NOT over-correct. A slight residual gradient is better than a flattened background that kills IFN.
+
+# ======================================================================
+# PHASE 8 — TECHNICAL VALIDATION + QUALITY GATES
 # ======================================================================
 
 Guardrail mode. Do NOT water down the art unless technically broken.
 - check_constraints
 - compute_scores
+- **check_star_quality** — verify stars pass FWHM and color gates
+- **check_ringing** — verify no concentric ring artifacts
+- **check_sharpness** — record final sharpness score for comparison
+- If any quality gate FAILS, fix the issue before proceeding
 - If bold but technically acceptable, do NOT weaken it.
+
+# ======================================================================
+# PHASE 8.5 — FINAL POLISH
+# ======================================================================
+
+After quality gates pass, apply finishing touches. These are SUBTLE refinements, not creative choices.
+
+${ap.noiseLevel === 'very_clean' ? `1. **Final denoise**: run_nxt denoise=0.20 on the composition. Slight detail loss acceptable for smooth backgrounds.` : ap.noiseLevel === 'clean' ? `1. **Final denoise**: run_nxt denoise=0.15 MAX on the composition. Goal: smooth background WITHOUT losing galaxy detail or IFN. If background is already clean, SKIP this step. Over-denoising is worse than slight noise.` : '1. **Final denoise**: only if noise is obviously distracting. Keep at 0.10 max or skip.'}
+
+${ap.glow === 'moderate' || ap.glow === 'strong' ? `2. **Soft glow**: Clone the image, create a luminance mask (blur=3, clipLow=0.15), apply gentle shadow-lift curve through the mask to add warmth/glow to the subject. The target should have a subtle luminous quality, not harsh edges.
+   - Alternatively: run_pixelmath to blend a Gaussian-blurred copy at 5-10% strength: \`$T * 0.92 + blur_clone * 0.08\`` : '2. **Glow**: Not requested — skip.'}
+
+${ap.starPresence === 'prominent' || ap.starPresence === 'rich' ? `3. **Star check**: Verify stars are clearly visible. If check_star_quality shows < 50 stars, the star blend was too weak — increase screen blend strength.` : '3. **Star check**: Stars should be present but subtle.'}
+
+4. **Final preview**: save_and_show_preview — this is the image the user will see first.
 
 # ======================================================================
 # PHASE 9 — FINALIZATION AND MEMORY

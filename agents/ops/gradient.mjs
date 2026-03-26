@@ -62,3 +62,91 @@ export async function runABE(ctx, viewId, opts = {}) {
     await ctx.pjsr(`var ids=[${closeIds}];for(var i=0;i<ids.length;i++){var w=ImageWindow.windowById(ids[i]);if(w&&!w.isNull)w.forceClose();processEvents();}`);
   }
 }
+
+/**
+ * Run per-channel ABE on stretched RGB — extracts R/G/B, ABEs each independently, recombines.
+ * Fixes color-specific gradients that emerge during non-linear processing.
+ * @param {object} ctx - Bridge context
+ * @param {string} viewId - RGB view ID (must be non-linear/stretched)
+ * @param {object} opts - { polyDegree, tolerance }
+ */
+export async function runPerChannelABE(ctx, viewId, opts = {}) {
+  const polyDeg = opts.polyDegree ?? 1;
+  const tol = opts.tolerance ?? 1.2;
+  const beforeIds = (await ctx.listImages()).map(i => i.id);
+  const r = await ctx.pjsr(`
+    var tgt = ImageWindow.windowById('${viewId}');
+    if (tgt.isNull) throw new Error('View not found: ${viewId}');
+
+    // Extract channels
+    var CE = new ChannelExtraction;
+    CE.channelEnabled = [true, true, true];
+    CE.channelId = ['__pca_R', '__pca_G', '__pca_B'];
+    CE.colorSpace = ChannelExtraction.prototype.RGB;
+    CE.sampleFormat = ChannelExtraction.prototype.SameAsSource;
+    CE.executeOn(tgt.mainView);
+    processEvents();
+
+    // ABE each channel
+    var chans = ['__pca_R', '__pca_G', '__pca_B'];
+    for (var i = 0; i < chans.length; i++) {
+      var cw = ImageWindow.windowById(chans[i]);
+      if (cw.isNull) continue;
+      var P = new AutomaticBackgroundExtractor;
+      P.tolerance = ${tol};
+      P.deviation = 0.8;
+      P.polyDegree = ${polyDeg};
+      P.boxSize = 5;
+      P.boxSeparation = 5;
+      P.targetCorrection = AutomaticBackgroundExtractor.prototype.Subtract;
+      P.normalize = true;
+      P.discardModel = true;
+      P.replaceTarget = true;
+      P.verbosity = 0;
+      P.executeOn(cw.mainView);
+      processEvents();
+    }
+
+    // Recombine into target
+    var CC = new ChannelCombination;
+    CC.colorSpace = ChannelCombination.prototype.RGB;
+    CC.channels = [[true, '__pca_R'], [true, '__pca_G'], [true, '__pca_B']];
+    CC.executeOn(tgt.mainView);
+    processEvents();
+
+    // Cleanup
+    for (var i = 0; i < chans.length; i++) {
+      var w = ImageWindow.windowById(chans[i]);
+      if (!w.isNull) w.forceClose();
+    }
+    'Per-channel ABE done (polyDeg=${polyDeg}, tol=${tol})';
+  `);
+  if (r.status === 'error') ctx.log('  [PCA-ABE] WARN: ' + r.error?.message);
+  // Close any leftover model images
+  const newImgs = await ctx.detectNewImages(beforeIds);
+  for (const img of newImgs) {
+    await ctx.pjsr(`var w=ImageWindow.windowById('${img.id}');if(!w.isNull)w.forceClose();`).catch(() => {});
+  }
+  return r;
+}
+
+/**
+ * Run SCNR (SubtractiveChromaticNoiseReduction) on a view — removes green cast.
+ * Use through an inverted luminance mask to target background only.
+ * @param {object} ctx - Bridge context
+ * @param {string} viewId - View ID
+ * @param {object} opts - { amount, protection }
+ */
+export async function runSCNR(ctx, viewId, opts = {}) {
+  const amount = opts.amount ?? 0.50;
+  const r = await ctx.pjsr(`
+    var P = new SCNR;
+    P.colorToRemove = SCNR.prototype.Green;
+    P.amount = ${amount};
+    P.protectionMethod = SCNR.prototype.AverageNeutral;
+    P.executeOn(ImageWindow.windowById('${viewId}').mainView);
+    'SCNR done (amount=${amount})';
+  `);
+  if (r.status === 'error') ctx.log('  [SCNR] WARN: ' + r.error?.message);
+  return r;
+}

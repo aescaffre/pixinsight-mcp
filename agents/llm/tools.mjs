@@ -8,9 +8,10 @@ import {
   getStats, measureUniformity,
   savePreview,
   cloneImage, restoreFromClone, closeImage, purgeUndoHistory,
-  runGC, runABE,
+  runGC, runABE, runPerChannelABE, runSCNR,
   setiStretch,
   createLumMask, applyMask, removeMask, closeMask,
+  checkStarQuality, checkRinging, checkSharpness, checkCoreBurning,
 } from '../ops/index.mjs';
 import { checkHardConstraints, statsToScores, computeAggregate } from '../scoring.mjs';
 import { jpegToContentBlock } from './vision.mjs';
@@ -303,6 +304,52 @@ const TOOL_CATALOG = {
       });
       const stats = await getStats(ctx, input.view_id);
       return { type: 'text', text: `ABE complete (degree=${input.poly_degree || 4}). Stats: median=${stats.median.toFixed(6)}, MAD=${stats.mad.toFixed(6)}` };
+    }
+  },
+
+  run_per_channel_abe: {
+    category: 'gradient',
+    definition: {
+      name: 'run_per_channel_abe',
+      description: 'Run ABE independently on each R/G/B channel then recombine. Fixes color-specific gradients (e.g., green gradient on one side) that emerge after stretching/curves. Use on NON-LINEAR (stretched) data. polyDegree=1 is safest.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'RGB view ID (must be stretched/non-linear)' },
+          poly_degree: { type: 'integer', description: 'ABE polynomial degree per channel (1-3, default 1). Keep low!' },
+          tolerance: { type: 'number', description: 'Sample rejection tolerance (default 1.2)' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      await runPerChannelABE(ctx, input.view_id, {
+        polyDegree: input.poly_degree ?? 1,
+        tolerance: input.tolerance ?? 1.2
+      });
+      const stats = await getStats(ctx, input.view_id);
+      return { type: 'text', text: `Per-channel ABE complete (degree=${input.poly_degree || 1}). Stats: median=${stats.median.toFixed(6)}` };
+    }
+  },
+
+  run_scnr: {
+    category: 'gradient',
+    definition: {
+      name: 'run_scnr',
+      description: 'Run SCNR (SubtractiveChromaticNoiseReduction) to remove green cast. Apply through an INVERTED luminance mask to target background only (protects galaxies). Amount 0.30-0.50 is moderate, 0.70+ is aggressive.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'View ID to process' },
+          amount: { type: 'number', description: 'Green removal amount (0.0-1.0, default 0.50)' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      await runSCNR(ctx, input.view_id, { amount: input.amount ?? 0.50 });
+      const stats = await getStats(ctx, input.view_id);
+      return { type: 'text', text: `SCNR green removal (amount=${input.amount ?? 0.50}). Stats: median=${stats.median.toFixed(6)}` };
     }
   },
 
@@ -1232,16 +1279,29 @@ const TOOL_CATALOG = {
     category: 'memory',
     definition: {
       name: 'recall_memory',
-      description: 'Read your memory from previous runs. Returns all lessons, patterns, and notes you saved before. ALWAYS call this at the start of your work to avoid repeating past mistakes.',
+      description: 'Read hierarchical memory from previous runs. Returns knowledge at 5 levels: universal rules, trait-level strategies (e.g. core_halo masking), type-level defaults (e.g. galaxy_spiral LHE), data-class parameters, and target-specific overrides. ALWAYS call this at the start.',
       input_schema: { type: 'object', properties: {} }
     },
-    handler: async (_ctx, _store, _brief, _input, agentName) => {
+    handler: async (_ctx, _store, brief, _input, agentName) => {
+      // Try hierarchical memory first
+      try {
+        const { recallForBrief } = await import('../memory/hierarchical-memory.mjs');
+        const result = recallForBrief(brief);
+        const total = result.universal.length + result.trait.length + result.type.length +
+          result.data_class.length + result.target.length;
+        if (total > 0) {
+          return { type: 'text', text: `## Hierarchical Memory (${total} entries across 5 levels)\n\n${result.summary}` };
+        }
+      } catch (e) {
+        // Fall through to legacy
+      }
+      // Fallback: legacy flat memory
       const memDir = path.join(os.homedir(), '.pixinsight-mcp', 'agent-memory');
       const memFile = path.join(memDir, `${agentName}.json`);
       if (!fs.existsSync(memFile)) return { type: 'text', text: 'No memories yet. This is your first run.' };
       const entries = JSON.parse(fs.readFileSync(memFile, 'utf-8'));
-      const summary = entries.map(e => `[${e.date}] **${e.title}**: ${e.content}`).join('\n\n');
-      return { type: 'text', text: `## Your memories (${entries.length} entries)\n\n${summary}` };
+      const summary = entries.map(e => `[${e.date || e.timestamp?.slice(0,10)}] **${e.title}**: ${e.content}`).join('\n\n');
+      return { type: 'text', text: `## Legacy memories (${entries.length} entries)\n\n${summary}` };
     }
   },
 
@@ -1249,36 +1309,46 @@ const TOOL_CATALOG = {
     category: 'memory',
     definition: {
       name: 'save_memory',
-      description: 'Save a lesson or insight for future runs. Use this when you discover something important: a gotcha, a parameter that worked well, a technique to avoid, or a pattern specific to a target type. Be specific and actionable.',
+      description: 'Save a lesson or insight to hierarchical memory. Specify the level: "universal" (applies to all), "trait" (applies to targets with a specific trait like core_halo), "type" (applies to a target classification), "data_class" (applies to similar data), "target" (applies to this specific target). Include param name and value for quantitative memories so the optimizer can track and promote them.',
       input_schema: {
         type: 'object',
         properties: {
-          title: { type: 'string', description: 'Short title for the memory (e.g. "BXT strips WCS", "M81 needs SCNR 0.65")' },
-          content: { type: 'string', description: 'Detailed lesson. Include what happened, why, and what to do differently.' },
-          tags: {
-            type: 'array',
-            items: { type: 'string' },
-            description: 'Tags for retrieval (e.g. ["galaxy", "spcc", "gotcha"])'
-          }
+          level: { type: 'string', enum: ['universal', 'trait', 'type', 'data_class', 'target'], description: 'Memory hierarchy level' },
+          key: { type: 'string', description: 'Scope key: trait name, classification, data class, or target name. Ignored for universal.' },
+          title: { type: 'string', description: 'Short title' },
+          content: { type: 'string', description: 'Detailed lesson' },
+          param: { type: 'string', description: 'Parameter name if this is a quantitative memory (e.g. "lhe_large_amount")' },
+          value: { description: 'Parameter value (e.g. 0.35)' },
+          tags: { type: 'array', items: { type: 'string' }, description: 'Additional tags' }
         },
         required: ['title', 'content']
       }
     },
-    handler: async (_ctx, _store, _brief, input, agentName) => {
-      const memDir = path.join(os.homedir(), '.pixinsight-mcp', 'agent-memory');
-      fs.mkdirSync(memDir, { recursive: true });
-      const memFile = path.join(memDir, `${agentName}.json`);
-      let entries = [];
-      if (fs.existsSync(memFile)) entries = JSON.parse(fs.readFileSync(memFile, 'utf-8'));
-      entries.push({
-        title: input.title,
-        content: input.content,
-        tags: input.tags || [],
-        date: new Date().toISOString().slice(0, 10),
-        timestamp: new Date().toISOString()
-      });
-      fs.writeFileSync(memFile, JSON.stringify(entries, null, 2));
-      return { type: 'text', text: `Memory saved: "${input.title}"` };
+    handler: async (_ctx, _store, brief, input, agentName) => {
+      try {
+        const { saveEntry } = await import('../memory/hierarchical-memory.mjs');
+        const level = input.level || 'target';
+        const key = input.key || brief?.target?.name || agentName;
+        const entry = saveEntry(level, key, {
+          title: input.title,
+          content: input.content,
+          param: input.param,
+          value: input.value,
+          tags: input.tags || [],
+          classification: brief?.target?.classification,
+        }, brief);
+        return { type: 'text', text: `Memory saved at ${level} level (key: ${key}): "${input.title}"` };
+      } catch (e) {
+        // Fallback: legacy save
+        const memDir = path.join(os.homedir(), '.pixinsight-mcp', 'agent-memory');
+        fs.mkdirSync(memDir, { recursive: true });
+        const memFile = path.join(memDir, `${agentName}.json`);
+        let entries = [];
+        if (fs.existsSync(memFile)) entries = JSON.parse(fs.readFileSync(memFile, 'utf-8'));
+        entries.push({ title: input.title, content: input.content, tags: input.tags || [], timestamp: new Date().toISOString() });
+        fs.writeFileSync(memFile, JSON.stringify(entries, null, 2));
+        return { type: 'text', text: `Memory saved (legacy): "${input.title}"` };
+      }
     }
   },
 
@@ -1287,7 +1357,7 @@ const TOOL_CATALOG = {
     category: 'control',
     definition: {
       name: 'finish',
-      description: 'Signal that you are done processing. Call this when satisfied with the result or when you want to submit your best work.',
+      description: 'Signal that you are done processing. Automatically runs quality gates (star quality, ringing) — if any FAIL, finish is REJECTED and you must fix the issues before calling finish again.',
       input_schema: {
         type: 'object',
         properties: {
@@ -1300,9 +1370,56 @@ const TOOL_CATALOG = {
     },
     handler: async (ctx, _store, _brief, input) => {
       const stats = await getStats(ctx, input.view_id);
+
+      // === QUALITY GATE ENFORCEMENT ===
+      // Run automated quality checks — agent cannot bypass these
+      const failures = [];
+
+      // Gate 1: Star quality (FWHM + color)
+      try {
+        const starResult = await checkStarQuality(ctx, input.view_id);
+        if (!starResult.pass) {
+          failures.push(`STAR QUALITY GATE FAILED: ${starResult.details}`);
+        }
+      } catch (e) {
+        // If star check errors out (e.g. no stars in starless image), skip gracefully
+        // This handles the case where finish is called on a starless view
+      }
+
+      // Gate 2: Ringing detection
+      try {
+        const ringingResult = await checkRinging(ctx, input.view_id);
+        if (!ringingResult.pass) {
+          failures.push(`RINGING GATE FAILED: ${ringingResult.details}`);
+        }
+      } catch (e) {
+        // If ringing check fails to execute, warn but don't block
+        failures.push(`RINGING CHECK ERROR: ${e.message} — inspect manually`);
+      }
+
+      // Gate 3: Core burning
+      try {
+        const coreResult = await checkCoreBurning(ctx, input.view_id);
+        if (!coreResult.pass) {
+          failures.push(`CORE BURNING GATE FAILED: ${coreResult.details}`);
+        }
+      } catch (e) {
+        // Non-blocking if check fails
+      }
+
+      if (failures.length > 0) {
+        return {
+          type: 'text',
+          text: `FINISH REJECTED — Quality gates failed:\n${failures.map(f => '  - ' + f).join('\n')}\n\n` +
+            `You MUST fix these issues before calling finish again.\n` +
+            `Use check_star_quality and check_ringing to verify fixes.\n` +
+            `Image stats: median=${stats.median.toFixed(6)}, max=${(stats.max ?? 0).toFixed(4)}`
+        };
+      }
+
       return {
         type: 'text',
-        text: `Finished. Best: ${input.view_id} (median=${stats.median.toFixed(6)}, max=${(stats.max ?? 0).toFixed(4)})\nRationale: ${input.rationale}`
+        text: `Finished (all quality gates PASSED). Best: ${input.view_id} (median=${stats.median.toFixed(6)}, max=${(stats.max ?? 0).toFixed(4)})\nRationale: ${input.rationale}`
       };
     }
   },
@@ -1596,6 +1713,114 @@ const TOOL_CATALOG = {
         await ctx.pjsr(`var w = ImageWindow.windowById('${newImg.id}'); if (!w.isNull) w.mainView.id = '${input.output_id}';`);
       }
       return { type: 'text', text: `Combined into ${input.output_id} (${newImg.width}x${newImg.height})` };
+    }
+  },
+
+  // --- Quality Gates (automated, code-based — cannot be bypassed) ---
+  check_star_quality: {
+    category: 'quality_gate',
+    definition: {
+      name: 'check_star_quality',
+      description: 'Automated quality gate: measures star FWHM and color diversity using StarDetector + pixel sampling. PASS: median FWHM < 6px AND color diversity > 0.05. FAIL: bloated or colorless stars. Run this on the final composite (with stars reintegrated).',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'View ID of the final image (must include stars)' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const result = await checkStarQuality(ctx, input.view_id);
+      const status = result.pass ? 'PASS' : 'FAIL';
+      return {
+        type: 'text',
+        text: `[STAR QUALITY GATE: ${status}] ${result.details}\n` +
+          `  Median FWHM: ${result.medianFWHM?.toFixed(2) || 'N/A'}px (limit: 6.0)\n` +
+          `  Color diversity: ${result.colorDiversity?.toFixed(3) || 'N/A'} (limit: 0.05)\n` +
+          `  Stars found: ${result.starsFound || 0}, measured: ${result.starsMeasured || 0}`
+      };
+    }
+  },
+
+  check_ringing: {
+    category: 'quality_gate',
+    definition: {
+      name: 'check_ringing',
+      description: 'Automated quality gate: detects concentric ring artifacts (HDRMT ringing) around the brightest region. Computes radial brightness profile (150 radii x 36 angles) and counts derivative oscillations. PASS: <= 1 oscillation. FAIL: >= 3 oscillations with amplitude > 0.01.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'View ID to check for ringing artifacts' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const result = await checkRinging(ctx, input.view_id);
+      const status = result.pass ? 'PASS' : 'FAIL';
+      return {
+        type: 'text',
+        text: `[RINGING GATE: ${status}] ${result.details}\n` +
+          `  Oscillations: ${result.oscillations} (limit: 1)\n` +
+          `  Max amplitude: ${result.maxAmplitude?.toFixed(4) || 'N/A'}\n` +
+          `  Brightest region center: [${result.center || 'N/A'}]`
+      };
+    }
+  },
+
+  check_sharpness: {
+    category: 'quality_gate',
+    definition: {
+      name: 'check_sharpness',
+      description: 'Measure image sharpness via Sobel gradient energy in subject ROI. Returns a numeric score (higher = sharper). Use this to compare candidates — it is a RELATIVE metric, not pass/fail.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'View ID to measure' },
+          roi_x: { type: 'number', description: 'ROI x offset (optional, defaults to center 50%)' },
+          roi_y: { type: 'number', description: 'ROI y offset' },
+          roi_w: { type: 'number', description: 'ROI width' },
+          roi_h: { type: 'number', description: 'ROI height' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const roi = (input.roi_x != null && input.roi_w != null)
+        ? { x: input.roi_x, y: input.roi_y, w: input.roi_w, h: input.roi_h }
+        : undefined;
+      const result = await checkSharpness(ctx, input.view_id, roi);
+      return {
+        type: 'text',
+        text: `[SHARPNESS] ${result.details}`
+      };
+    }
+  },
+
+  check_core_burning: {
+    category: 'quality_gate',
+    definition: {
+      name: 'check_core_burning',
+      description: 'Automated quality gate: checks if the brightest region (galaxy core) is burnt/clipped. Measures fraction of pixels > 0.98 in the core. PASS: < 2% burnt. FAIL: >= 2% burnt. Run this after EVERY HDRMT/LHE application and before finish.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'View ID to check' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const result = await checkCoreBurning(ctx, input.view_id);
+      const status = result.pass ? 'PASS' : 'FAIL';
+      return {
+        type: 'text',
+        text: `[CORE BURNING GATE: ${status}] ${result.details}\n` +
+          `  Burnt fraction: ${(result.burntFraction * 100)?.toFixed(1) || 'N/A'}% (limit: 2%)\n` +
+          `  Peak value: ${result.peakValue?.toFixed(4) || 'N/A'}\n` +
+          `  Core center: [${result.coreCenter || 'N/A'}]`
+      };
     }
   },
 

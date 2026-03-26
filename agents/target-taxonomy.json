@@ -1,0 +1,195 @@
+{
+  "version": 2,
+  "description": "Deep sky target taxonomy — traits drive processing decisions",
+  "traitDefinitions": {
+    "signalType": ["broadband", "ha_dominant", "ha_accented", "oiii_dominant", "dual_narrowband"],
+    "structuralZones": ["uniform", "core_halo", "core_arms_ifn", "shell_interior", "filamentary", "multi_zone"],
+    "colorZonation": ["monochromatic", "gradient", "zoned", "diverse"],
+    "starRelationship": ["stars_are_subject", "stars_are_context", "stars_are_distraction", "mixed"],
+    "faintStructureGoal": ["none", "ifn", "outer_halo", "filaments", "background_galaxies"],
+    "subjectScale": ["tiny_multiple", "small", "medium", "large", "field_filling"],
+    "dynamicRange": ["low", "moderate", "high", "extreme"]
+  },
+  "categories": {
+    "galaxy_spiral": {
+      "label": "Spiral Galaxy",
+      "examples": ["M31", "M33", "M51", "M81", "M101", "NGC253"],
+      "traits": {
+        "signalType": "broadband",
+        "structuralZones": "core_arms_ifn",
+        "colorZonation": "gradient",
+        "starRelationship": "stars_are_context",
+        "faintStructureGoal": "ifn",
+        "subjectScale": "large",
+        "dynamicRange": "high",
+        "hasIFN": true, "hasDustLanes": true, "hasBrightCore": true, "hasHIIRegions": true
+      },
+      "processingNotes": "Core protection critical (HDRMT ringing). IFN is a primary goal. Dust lanes need contrast. 3-zone masking: core (protect), arms (enhance), background+IFN (shadow lift). Headroom in stretch essential."
+    },
+    "galaxy_edge_on": {
+      "label": "Edge-on Galaxy",
+      "examples": ["NGC891", "NGC4565", "NGC5907", "NGC4631"],
+      "traits": {
+        "signalType": "broadband",
+        "structuralZones": "core_halo",
+        "colorZonation": "monochromatic",
+        "starRelationship": "stars_are_context",
+        "faintStructureGoal": "ifn",
+        "subjectScale": "large",
+        "dynamicRange": "high",
+        "hasIFN": true, "hasDustLanes": true, "hasBrightCore": true, "hasHIIRegions": false
+      },
+      "processingNotes": "Dust lane is THE feature. No spiral arm color variation. Core vs halo masking. Brighten with spatial mask + gamma."
+    },
+    "galaxy_elliptical": {
+      "label": "Elliptical Galaxy",
+      "examples": ["M87", "M49", "M60"],
+      "traits": {
+        "signalType": "broadband",
+        "structuralZones": "core_halo",
+        "colorZonation": "monochromatic",
+        "starRelationship": "stars_are_context",
+        "faintStructureGoal": "outer_halo",
+        "subjectScale": "medium",
+        "dynamicRange": "moderate",
+        "hasIFN": true, "hasDustLanes": false, "hasBrightCore": true, "hasHIIRegions": false
+      },
+      "processingNotes": "Smooth profile — subtle detail enhancement only. Jets or shells in deep data. Uniform golden color."
+    },
+    "galaxy_cluster": {
+      "label": "Galaxy Cluster",
+      "examples": ["Abell2151", "Abell1656", "Stephan's Quintet"],
+      "traits": {
+        "signalType": "broadband",
+        "structuralZones": "uniform",
+        "colorZonation": "diverse",
+        "starRelationship": "mixed",
+        "faintStructureGoal": "background_galaxies",
+        "subjectScale": "tiny_multiple",
+        "dynamicRange": "low",
+        "hasIFN": false, "hasDustLanes": false, "hasBrightCore": false, "hasHIIRegions": false
+      },
+      "processingNotes": "Many tiny diverse galaxies. Sharpness and fine detail paramount. SXT may remove small galaxies — use conservative overlap. Color diversity across galaxies is a feature. No single bright core."
+    },
+    "emission_nebula": {
+      "label": "Emission Nebula",
+      "examples": ["M42", "NGC7000", "IC1396", "Rosette"],
+      "traits": {
+        "signalType": "ha_dominant",
+        "structuralZones": "multi_zone",
+        "colorZonation": "zoned",
+        "starRelationship": "stars_are_distraction",
+        "faintStructureGoal": "filaments",
+        "subjectScale": "field_filling",
+        "dynamicRange": "high",
+        "hasIFN": false, "hasDustLanes": true, "hasBrightCore": false, "hasHIIRegions": true
+      },
+      "processingNotes": "Ha signal dominates. Bright cores can clip — headroom needed. Faint outer regions need shadow lifting. Star control critical in rich fields. Color depends on workflow (HaRGB, SHO, HOO)."
+    },
+    "planetary_nebula": {
+      "label": "Planetary Nebula",
+      "examples": ["M27", "M57", "M97", "NGC7293", "NGC6543"],
+      "traits": {
+        "signalType": "dual_narrowband",
+        "structuralZones": "core_halo",
+        "colorZonation": "zoned",
+        "starRelationship": "stars_are_context",
+        "faintStructureGoal": "outer_halo",
+        "subjectScale": "small",
+        "dynamicRange": "moderate",
+        "hasIFN": false, "hasDustLanes": false, "hasBrightCore": true, "hasHIIRegions": true
+      },
+      "processingNotes": "Small subject — sharpness paramount. Internal structure (shells, knots) needs fine LHE. Central star visible but not burnt. Outer halo extremely faint. Often OIII (blue/teal) + Ha (red) zoned color — process zones separately via masks."
+    },
+    "reflection_nebula": {
+      "label": "Reflection Nebula",
+      "examples": ["M45", "NGC7023", "IC2118", "vdB series"],
+      "traits": {
+        "signalType": "broadband",
+        "structuralZones": "uniform",
+        "colorZonation": "monochromatic",
+        "starRelationship": "stars_are_context",
+        "faintStructureGoal": "outer_halo",
+        "subjectScale": "medium",
+        "dynamicRange": "low",
+        "hasIFN": false, "hasDustLanes": true, "hasBrightCore": false, "hasHIIRegions": false
+      },
+      "processingNotes": "Blue scattered light IS the subject. Very faint — aggressive stretch. Star halos around illuminating star must be controlled. Natural blue, not cyan."
+    },
+    "dark_nebula": {
+      "label": "Dark Nebula",
+      "examples": ["Barnard 33", "LDN1622", "Barnard 68"],
+      "traits": {
+        "signalType": "broadband",
+        "structuralZones": "uniform",
+        "colorZonation": "monochromatic",
+        "starRelationship": "stars_are_context",
+        "faintStructureGoal": "none",
+        "subjectScale": "medium",
+        "dynamicRange": "low",
+        "hasIFN": false, "hasDustLanes": true, "hasBrightCore": false, "hasHIIRegions": false
+      },
+      "processingNotes": "Subject IS the dark region — silhouette against star field. Over-stretching destroys it. Subtle dust texture via gentle LHE. Star colors in background are a feature."
+    },
+    "supernova_remnant": {
+      "label": "Supernova Remnant",
+      "examples": ["NGC6960", "NGC6992", "Simeis 147", "IC443"],
+      "traits": {
+        "signalType": "dual_narrowband",
+        "structuralZones": "filamentary",
+        "colorZonation": "zoned",
+        "starRelationship": "stars_are_distraction",
+        "faintStructureGoal": "filaments",
+        "subjectScale": "large",
+        "dynamicRange": "moderate",
+        "hasIFN": false, "hasDustLanes": false, "hasBrightCore": false, "hasHIIRegions": true
+      },
+      "processingNotes": "Filamentary structure is THE feature — fine LHE essential, avoid smoothing threads. Ha and OIII show different structures. Very faint outer filaments need aggressive shadow lifting."
+    },
+    "star_cluster_globular": {
+      "label": "Globular Cluster",
+      "examples": ["M13", "M3", "M5", "M92", "47 Tuc"],
+      "traits": {
+        "signalType": "broadband",
+        "structuralZones": "core_halo",
+        "colorZonation": "gradient",
+        "starRelationship": "stars_are_subject",
+        "faintStructureGoal": "outer_halo",
+        "subjectScale": "medium",
+        "dynamicRange": "high",
+        "hasIFN": false, "hasDustLanes": false, "hasBrightCore": true, "hasHIIRegions": false
+      },
+      "processingNotes": "Star resolution in core is the challenge. BXT critical. Core clips easily — headroom essential. Outer halo stars must be resolved. Star colors (red giants, blue stragglers) should be visible. SXT NOT recommended."
+    },
+    "star_cluster_open": {
+      "label": "Open Cluster",
+      "examples": ["NGC884", "NGC869", "M35", "M67"],
+      "traits": {
+        "signalType": "broadband",
+        "structuralZones": "uniform",
+        "colorZonation": "diverse",
+        "starRelationship": "stars_are_subject",
+        "faintStructureGoal": "none",
+        "subjectScale": "large",
+        "dynamicRange": "moderate",
+        "hasIFN": false, "hasDustLanes": false, "hasBrightCore": false, "hasHIIRegions": false
+      },
+      "processingNotes": "Stars ARE the subject. SXT absolutely NOT recommended. Star color diversity is the primary aesthetic. Minimal processing — stretch, calibrate, gentle curves."
+    },
+    "mixed_field": {
+      "label": "Mixed / Wide Field",
+      "examples": ["Rho Ophiuchi", "Cygnus Wall", "Orion complex"],
+      "traits": {
+        "signalType": "broadband",
+        "structuralZones": "multi_zone",
+        "colorZonation": "zoned",
+        "starRelationship": "stars_are_context",
+        "faintStructureGoal": "filaments",
+        "subjectScale": "field_filling",
+        "dynamicRange": "moderate",
+        "hasIFN": false, "hasDustLanes": true, "hasBrightCore": false, "hasHIIRegions": true
+      },
+      "processingNotes": "Multiple object types in one field. Balance competing priorities. Regional processing attention. Color accuracy across nebula types."
+    }
+  }
+}
