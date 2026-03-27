@@ -191,44 +191,76 @@ ${extractWinningParams(brief.target.classification)}
   const xisfPath = path.join(outputDir, `${targetName}_giga.xisf`);
   const pngPath = path.join(outputDir, `${targetName}_giga.png`);
 
-  // Find the best final image to save — prefer COMP_final, then any COMP_, then targetName
-  // The agent often leaves targetName as starless and puts the final composition elsewhere
+  // Robust export: find best processed view, blend stars if needed, save via /tmp/
   try {
+    // Save to /tmp first (reliable), then copy to output dir
+    const tmpXisf = `/tmp/${targetName}_export.xisf`;
+    const tmpPng = `/tmp/${targetName}_export.png`;
+
     const saveResult = await ctx.pjsr(`
-      // Find the best final: prefer views with stars (higher max, name contains 'FINAL' or 'stars')
-      var allColor = [];
+      // Find ALL color views with their medians (exclude stars/masks with median < 0.01)
+      var candidates = [];
       var ws = ImageWindow.windows;
       for (var i = 0; i < ws.length; i++) {
-        if (ws[i].mainView.image.numberOfChannels === 3) {
-          allColor.push({ id: ws[i].mainView.id, max: ws[i].mainView.image.maximum(), w: ws[i] });
+        var img = ws[i].mainView.image;
+        if (img.numberOfChannels === 3 && img.median() > 0.01) {
+          var id = ws[i].mainView.id;
+          var score = 0;
+          // Prefer processed views over baselines
+          if (id.indexOf('FINAL') >= 0 || id.indexOf('final') >= 0) score += 200;
+          if (id.indexOf('COMP') >= 0 || id.indexOf('comp') >= 0) score += 100;
+          if (id.indexOf('work') >= 0 || id.indexOf('detail') >= 0) score += 50;
+          // Penalize baselines and backups
+          if (id.indexOf('baseline') >= 0 || id.indexOf('backup') >= 0) score -= 100;
+          if (id === '${targetName}') score += 10; // original target name = mild preference
+          candidates.push({ id: id, score: score, median: img.median(), w: ws[i] });
         }
       }
-      // Sort by priority: FINAL/stars names first, then by max value (stars push max higher)
-      allColor.sort(function(a, b) {
-        var aScore = 0, bScore = 0;
-        if (a.id.indexOf('FINAL') >= 0) aScore += 100;
-        if (a.id.indexOf('stars') >= 0 || a.id.indexOf('Stars') >= 0) aScore += 50;
-        if (a.id.indexOf('COMP') >= 0) aScore += 10;
-        if (b.id.indexOf('FINAL') >= 0) bScore += 100;
-        if (b.id.indexOf('stars') >= 0 || b.id.indexOf('Stars') >= 0) bScore += 50;
-        if (b.id.indexOf('COMP') >= 0) bScore += 10;
-        if (aScore !== bScore) return bScore - aScore;
-        return b.max - a.max; // Higher max = more likely to have stars
+      candidates.sort(function(a, b) {
+        if (a.score !== b.score) return b.score - a.score;
+        return 0; // Don't sort by median — processed views may be darker
       });
-      var best = allColor.length > 0 ? allColor[0].w : null;
-      if (best) {
-        best.saveAs('${xisfPath.replace(/'/g, "\\'")}', false, false, false, false);
-        best.mainView.id = '${targetName}';
-        best.saveAs('${pngPath.replace(/'/g, "\\'")}', false, false, false, false);
-        best.mainView.id = '${targetName}';
-        'Saved: ' + best.mainView.id;
-      } else {
-        'No color image found';
+
+      if (candidates.length === 0) throw new Error('No color image found for export');
+      var best = candidates[0].w;
+      var bestId = candidates[0].id;
+
+      // Check if stars need blending (look for a star view with median < 0.01)
+      var starView = null;
+      for (var i = 0; i < ws.length; i++) {
+        var sid = ws[i].mainView.id;
+        if (sid.indexOf('stars') >= 0 && ws[i].mainView.image.numberOfChannels === 3 && ws[i].mainView.image.median() < 0.01) {
+          starView = ws[i]; break;
+        }
       }
+      if (starView) {
+        // Screen blend stars into the best view
+        var PM = new PixelMath;
+        PM.expression = '~(~' + bestId + ' * ~' + starView.mainView.id + ')';
+        PM.useSingleExpression = true;
+        PM.createNewImage = false;
+        PM.executeOn(best.mainView);
+      }
+
+      // Save to /tmp (reliable path, no network drives)
+      best.saveAs('${tmpXisf}', false, false, false, false);
+      best.mainView.id = bestId;
+      best.saveAs('${tmpPng}', false, false, false, false);
+      best.mainView.id = bestId;
+      'Exported ' + bestId + ' (med=' + candidates[0].median.toFixed(4) + ', stars=' + (starView ? 'blended' : 'already present or not found') + ')';
     `);
     console.log(`  ${saveResult.outputs?.consoleOutput || 'done'}`);
-    console.log(`  Saved: ${xisfPath}`);
-    console.log(`  Saved: ${pngPath}`);
+
+    // Copy from /tmp to output dir
+    const fsCopy = await import('fs');
+    if (fsCopy.default.existsSync(tmpXisf)) {
+      fsCopy.default.copyFileSync(tmpXisf, xisfPath);
+      console.log(`  Saved: ${xisfPath}`);
+    }
+    if (fsCopy.default.existsSync(tmpPng)) {
+      fsCopy.default.copyFileSync(tmpPng, pngPath);
+      console.log(`  Saved: ${pngPath}`);
+    }
   } catch (e) {
     console.error(`  Save error: ${e.message}`);
   }

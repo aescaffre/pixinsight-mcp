@@ -178,8 +178,8 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     const cols = lines[1].split(/\s+/);
     const availKB = parseInt(cols[3], 10);
     const availGB = availKB / 1024 / 1024;
-    if (availGB < 20) {
-      throw new Error(`Not enough disk space: ${availGB.toFixed(1)} GB free (minimum: 20 GB). Clean up ~/.pixinsight-mcp/runs/ or prep-cache.`);
+    if (availGB < 15) {
+      throw new Error(`Not enough disk space: ${availGB.toFixed(1)} GB free (minimum: 15 GB). Clean up ~/.pixinsight-mcp/runs/ or prep-cache.`);
     }
     log(`[PREP] Disk space: ${availGB.toFixed(1)} GB free`);
   } catch (e) {

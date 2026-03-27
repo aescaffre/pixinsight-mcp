@@ -13,6 +13,7 @@ import {
   createLumMask, applyMask, removeMask, closeMask,
   checkStarQuality, checkRinging, checkSharpness, checkCoreBurning,
   measureSubjectDetail,
+  multiScaleEnhance,
 } from '../ops/index.mjs';
 import { checkHardConstraints, statsToScores, computeAggregate } from '../scoring.mjs';
 import { jpegToContentBlock } from './vision.mjs';
@@ -1437,10 +1438,49 @@ const TOOL_CATALOG = {
         };
       }
 
+      // Auto-blend stars if not already present
+      try {
+        // Check if there's a star view available and the image might be starless
+        const starCheckR = await ctx.pjsr(`
+          var starIds = ['${input.view_id}_stars', 'M81_stars', 'M97_stars', 'Abell2151_stars', 'stars_backup'];
+          var starView = null;
+          for (var i = 0; i < starIds.length; i++) {
+            var sw = ImageWindow.windowById(starIds[i]);
+            if (!sw.isNull && sw.mainView.image.numberOfChannels === 3) { starView = sw; break; }
+          }
+          // Also search for any view with 'stars' in the name
+          if (!starView) {
+            var ws = ImageWindow.windows;
+            for (var i = 0; i < ws.length; i++) {
+              if (ws[i].mainView.id.indexOf('stars') >= 0 && ws[i].mainView.image.numberOfChannels === 3 && ws[i].mainView.image.median() < 0.01) {
+                starView = ws[i]; break;
+              }
+            }
+          }
+          if (starView) {
+            // Screen blend stars
+            var PM = new PixelMath;
+            PM.expression = '~(~${input.view_id} * ~' + starView.mainView.id + ')';
+            PM.useSingleExpression = true;
+            PM.createNewImage = false;
+            PM.executeOn(ImageWindow.windowById('${input.view_id}').mainView);
+            'Stars blended from ' + starView.mainView.id;
+          } else {
+            'No star view found — image may already have stars';
+          }
+        `);
+        if (starCheckR.outputs?.consoleOutput?.includes('blended')) {
+          warnings.push(`Auto-blended stars: ${starCheckR.outputs.consoleOutput}`);
+        }
+      } catch (e) {
+        // Non-fatal
+      }
+
+      const finalStats = await getStats(ctx, input.view_id);
       const warnText = warnings.length > 0 ? `\nWarnings:\n${warnings.map(w => '  - ' + w).join('\n')}` : '';
       return {
         type: 'text',
-        text: `Finished (quality gates PASSED). Best: ${input.view_id} (median=${stats.median.toFixed(6)}, max=${(stats.max ?? 0).toFixed(4)})${warnText}\nRationale: ${input.rationale}`
+        text: `Finished (quality gates PASSED). Best: ${input.view_id} (median=${finalStats.median.toFixed(6)}, max=${(finalStats.max ?? 0).toFixed(4)})${warnText}\nRationale: ${input.rationale}`
       };
     }
   },
@@ -1867,6 +1907,62 @@ const TOOL_CATALOG = {
           `  Detail score: ${result.detailScore?.toFixed(6) || 'N/A'} (higher=better)\n` +
           `  Contrast ratio: ${result.contrastRatio?.toFixed(1) || 'N/A'}× (goal: >3×)\n` +
           `  Subject regions: ${result.subjectCount || 0} / Background median: ${result.backgroundMedian?.toFixed(4) || 'N/A'}`
+      };
+    }
+  },
+
+  multi_scale_enhance: {
+    category: 'detail',
+    definition: {
+      name: 'multi_scale_enhance',
+      description: 'COMPOUND TOOL: applies 3-scale masked LHE + optional HDRMT in ONE call with before/after metrics. Much faster than individual LHE calls. Returns detail score improvement %. Use this INSTEAD of individual run_lhe calls for detail enhancement. Call multiple times with different params to bracket. If improvement < 5%, adjust mask (softer clipLow) or increase amounts.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'View ID to enhance' },
+          mask_clip_low: { type: 'number', description: 'Mask clip low (0.04=soft/faint structure, 0.10=medium, 0.15=tight). Default 0.06' },
+          mask_blur: { type: 'number', description: 'Mask blur sigma (3-10). Default 5' },
+          mask_gamma: { type: 'number', description: 'Mask gamma (1.0-3.0, higher=protect brights more). Default 2.0' },
+          lhe_fine_radius: { type: 'number', description: 'Fine LHE radius (16-32). Default 24' },
+          lhe_fine_amount: { type: 'number', description: 'Fine LHE amount (0.10-0.40). Default 0.20' },
+          lhe_mid_radius: { type: 'number', description: 'Mid LHE radius (35-64). Default 48' },
+          lhe_mid_amount: { type: 'number', description: 'Mid LHE amount (0.15-0.50). Default 0.30' },
+          lhe_large_radius: { type: 'number', description: 'Large LHE radius (80-150). Default 100' },
+          lhe_large_amount: { type: 'number', description: 'Large LHE amount (0.20-0.50). Default 0.30' },
+          lhe_slope_limit: { type: 'number', description: 'LHE slope limit (1.2-2.0). Default 1.5' },
+          do_hdrmt: { type: 'boolean', description: 'Apply HDRMT after LHE. Default true' },
+          hdrmt_layers: { type: 'number', description: 'HDRMT layers (4-7). Default 5' },
+          hdrmt_median_transform: { type: 'boolean', description: 'Use median transform (prevents ringing in star fields). Default true' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const result = await multiScaleEnhance(ctx, input.view_id, {
+        maskClipLow: input.mask_clip_low,
+        maskBlur: input.mask_blur,
+        maskGamma: input.mask_gamma,
+        lheFineRadius: input.lhe_fine_radius,
+        lheFineAmount: input.lhe_fine_amount,
+        lheMidRadius: input.lhe_mid_radius,
+        lheMidAmount: input.lhe_mid_amount,
+        lheLargeRadius: input.lhe_large_radius,
+        lheLargeAmount: input.lhe_large_amount,
+        lheSlopeLimit: input.lhe_slope_limit,
+        doHDRMT: input.do_hdrmt,
+        hdrmtLayers: input.hdrmt_layers,
+        hdrmtMedianTransform: input.hdrmt_median_transform,
+      });
+      if (result.error) {
+        return { type: 'text', text: `multi_scale_enhance FAILED: ${result.error}` };
+      }
+      return {
+        type: 'text',
+        text: `[MULTI-SCALE ENHANCE] ${result.details}\n` +
+          `  Before: detail=${result.before.detailScore.toFixed(6)}, brightPx=${result.before.brightPixels}\n` +
+          `  After:  detail=${result.after.detailScore.toFixed(6)}, brightPx=${result.after.brightPixels}\n` +
+          `  Improvement: ${result.improvement > 0 ? '+' : ''}${result.improvement.toFixed(1)}%\n` +
+          `  Params: LHE fine=${result.params.lhe.fine.r}/${result.params.lhe.fine.a} mid=${result.params.lhe.mid.r}/${result.params.lhe.mid.a} large=${result.params.lhe.large.r}/${result.params.lhe.large.a} | HDRMT=${result.params.hdrmt.applied ? result.params.hdrmt.layers + 'L' : 'off'}`
       };
     }
   },

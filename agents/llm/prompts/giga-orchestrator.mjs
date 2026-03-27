@@ -242,23 +242,27 @@ ${hasL ? `
 Work on FILTER_L. Goal: maximize believable structure (core separation, arm texture, local contrast).
 NOT IFN (that's Branch B). NOT stars. NOT composition.
 
-**MASKING IS CRITICAL**: Do NOT apply LHE/HDRMT globally. Always use masks to target specific brightness zones:
-1. Create luminance mask → apply_mask → process → remove_mask → close_mask
-2. For tiny subjects (galaxy clusters): use SOFT masks (clipLow=0.04-0.06, blur=5-8) to capture faint outer structure (tidal tails, faint arms, galaxy halos) — NOT just bright cores. The faint delicacies around galaxies are what make a processed image special.
-3. For bright cores: use donut mask ($T*(1-$T)*4) to protect cores while enhancing mid-brightness structure
-4. Apply MULTIPLE mask+LHE passes at different scales — this is how you extract detail:
-   - r=32 (fine detail within galaxies) through tight mask
-   - r=64 (mid-scale structure) through moderate mask
-   - r=128 (large-scale contrast) through softer mask
-5. After EACH masked pass, call \`measure_subject_detail\` — detailScore MUST increase. If it doesn't, the mask is wrong or the amount is too low.
+**USE THE COMPOUND TOOL**: \`multi_scale_enhance\` does 3-scale LHE + HDRMT + metrics in ONE call.
+This is 5× faster than individual LHE calls. Use it for ALL detail enhancement work.
+
+**ITERATIVE APPROACH** — do NOT apply once and move on:
+1. Clone baseline → call \`multi_scale_enhance\` with conservative params (amounts 0.20-0.30)
+2. Check improvement %. If < 10%, the mask is wrong — soften clipLow or increase amounts
+3. Clone again → call with stronger params (amounts 0.30-0.50)
+4. Check improvement again. Keep pushing until overdone (artifacts visible)
+5. The BEST candidate is the one with highest detail score before artifacts appear
+
+**Mask tuning is key**:
+- Soft mask (clipLow=0.04-0.06): captures faint galaxy halos/tails — use for galaxy clusters
+- Medium mask (clipLow=0.08-0.12): targets galaxy bodies — use for single large galaxies
+- Donut mask: apply \`$T*(1-$T)*4\` to lum mask — protects both core and background
 
 Required candidates: L_detail_weak, L_detail_target, L_detail_edge, L_detail_overdone
 At least one must be clearly too aggressive (synthetic, crunchy, halos).
 
-Tools: create_luminance_mask, apply_mask, run_lhe, run_hdrmt, remove_mask, close_mask, run_nxt, measure_subject_detail, save_variant
-- LHE multi-scale: r=32 (fine), r=64 (mid), r=128 (large). Push amounts from 0.30 → 0.50 → 0.65+
-- HDRMT inverted: start with layers=5-6, iterations=1. Push to layers=7. Use medianTransform=true for star-rich fields (prevents dark ringing).
-- For each candidate, note: what improved, what regressed, is it still too conservative?
+Tools: multi_scale_enhance (PRIMARY), clone_image, restore_from_clone, measure_subject_detail, save_variant
+- multi_scale_enhance: vary mask_clip_low (0.04→0.06→0.10) and amounts (0.20→0.35→0.50)
+- For each candidate: check detail improvement %. If < 5%, params are wrong.
 - You MUST revert at least once — if you never revert, you didn't push hard enough.
 - **finish will REJECT if subjectBrightness < 0.15 or contrastRatio < 2×**
 ` : 'No L channel. Apply LHE/HDRMT to RGB directly with same bracketing discipline and masking strategy.'}

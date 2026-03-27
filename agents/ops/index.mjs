@@ -11,3 +11,4 @@ export { cloneImage, restoreFromClone, closeImage, purgeUndoHistory } from './im
 export { saveCheckpoint, loadCheckpoint } from './checkpoint.mjs';
 export { checkStarQuality, checkRinging, checkSharpness, checkCoreBurning } from './quality-gates.mjs';
 export { measureSubjectDetail } from './subject-metrics.mjs';
+export { multiScaleEnhance } from './compound-enhance.mjs';
