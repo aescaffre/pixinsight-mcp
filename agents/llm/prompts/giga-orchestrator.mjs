@@ -134,13 +134,13 @@ Stars must be small, colorful, and natural — not white blobs or invisible dots
 - Apply saturation curves to stars: S channel [[0,0],[0.30,0.55],[0.60,0.85],[1,1]]
 - Screen blend stars LAST in composition
 
-### 3. NO CORE BURNING (zero tolerance)
-The galaxy core MUST retain structure — never clip to white.
-- Use \`check_core_burning\` after EVERY HDRMT and LHE application
-- **Gate: < 2% of core pixels > 0.98.** Any more = FAIL.
-- If core is burnt: revert, increase stretch headroom, or use tighter mask protecting the core
-- Seti stretch headroom=0.10 for L channel preserves core detail
-- Previous run (v8) had a slightly burnt core. Protect it.
+### 3. NO BURNT REGIONS (zero tolerance)
+No significant area of the image should be clipped to white — not cores, not bright nebula regions, nothing.
+- Use \`scan_burnt_regions\` after EVERY stretch, HDRMT, LHE, and curves application
+- **Gate: < 1% of 32×32 blocks with >5% clipped pixels.** Any more = FAIL.
+- This catches BOTH small burnt cores AND large burnt nebula regions (like M27's OIII zone)
+- If burning detected: revert, increase stretch headroom, or use masks to protect bright areas
+- Seti stretch headroom=0.10 for L channel. For planetary nebulae: L stretch 0.25 max.
 
 ### 4. NO OVER-DENOISING — this is critical
 NXT denoise too high softens real detail and creates plastic appearance.
@@ -161,7 +161,7 @@ This target has Ha data. Ha injection is NOT optional.
 - If HII knots are not visibly colored, Ha injection failed — push harder` : ''}
 
 ### WORKFLOW: Run quality gates BEFORE calling finish
-1. After EVERY HDRMT/LHE: \`check_core_burning\` + \`check_ringing\`
+1. After EVERY HDRMT/LHE/stretch: \`scan_burnt_regions\` + \`check_ringing\`
 2. After star reintegration: \`check_star_quality\`
 3. Compare candidates: \`check_sharpness\`
 4. Only call \`finish\` when all gates would pass (star quality + ringing + core burning)

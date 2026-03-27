@@ -11,7 +11,7 @@ import {
   runGC, runABE, runPerChannelABE, runSCNR,
   setiStretch,
   createLumMask, applyMask, removeMask, closeMask,
-  checkStarQuality, checkRinging, checkSharpness, checkCoreBurning,
+  checkStarQuality, checkRinging, checkSharpness, checkCoreBurning, scanBurntRegions,
   measureSubjectDetail,
   multiScaleEnhance,
 } from '../ops/index.mjs';
@@ -1400,11 +1400,11 @@ const TOOL_CATALOG = {
         warnings.push(`RINGING CHECK ERROR: ${e.message} — inspect manually`);
       }
 
-      // Gate 3: Core burning
+      // Gate 3: Global burn scan (replaces core-only check — catches wide burnt regions too)
       try {
-        const coreResult = await checkCoreBurning(ctx, input.view_id);
-        if (!coreResult.pass) {
-          failures.push(`CORE BURNING GATE FAILED: ${coreResult.details}`);
+        const burnResult = await scanBurntRegions(ctx, input.view_id);
+        if (!burnResult.pass) {
+          failures.push(`BURN SCAN FAILED: ${burnResult.details}`);
         }
       } catch (e) {
         // Non-blocking if check fails
@@ -1881,6 +1881,30 @@ const TOOL_CATALOG = {
           `  Burnt fraction: ${(result.burntFraction * 100)?.toFixed(1) || 'N/A'}% (limit: 2%)\n` +
           `  Peak value: ${result.peakValue?.toFixed(4) || 'N/A'}\n` +
           `  Core center: [${result.coreCenter || 'N/A'}]`
+      };
+    }
+  },
+
+  scan_burnt_regions: {
+    category: 'quality_gate',
+    definition: {
+      name: 'scan_burnt_regions',
+      description: 'Global burn scanner: tiles the ENTIRE image in 32x32 blocks and reports which areas have clipping (>5% pixels > 0.98). Catches burnt regions ANYWHERE — not just the brightest core. Use this for nebulae where large bright regions can clip. PASS: < 1% of blocks burnt. FAIL: >= 1% burnt.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'View ID to scan' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const result = await scanBurntRegions(ctx, input.view_id);
+      const status = result.pass ? 'PASS' : 'FAIL';
+      return {
+        type: 'text',
+        text: `[BURN SCAN: ${status}] ${result.details}\n` +
+          `  Burnt blocks: ${result.burntBlockCount || 0}/${result.totalBlocks || 0} (${((result.burntAreaFraction || 0) * 100).toFixed(1)}%, limit: 1%)`
       };
     }
   },

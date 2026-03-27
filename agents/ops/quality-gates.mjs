@@ -563,3 +563,111 @@ export async function checkCoreBurning(ctx, viewId) {
     details: details.join('; ')
   };
 }
+
+/**
+ * Global burn scanner — tiles the entire image in 32×32 blocks,
+ * reports how many blocks have significant clipping (>5% pixels > 0.98).
+ * Catches burnt regions ANYWHERE — not just the brightest core.
+ *
+ * PASS: < 1% of blocks are burnt
+ * FAIL: >= 1% of blocks burnt (significant area is clipped)
+ *
+ * @param {object} ctx - Bridge context
+ * @param {string} viewId - View ID to scan
+ * @returns {object} { pass, burntBlockCount, totalBlocks, burntFraction, burntLocations, details }
+ */
+export async function scanBurntRegions(ctx, viewId) {
+  const r = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}');
+    if (w.isNull) throw new Error('scanBurntRegions: view not found: ${viewId}');
+    var img = w.mainView.image;
+
+    var blockSize = 32;
+    var burntBlocks = [];
+    var totalBlocks = 0;
+    var threshold = 0.98;
+    var blockBurntThreshold = 0.05; // block is "burnt" if >5% of its pixels exceed 0.98
+
+    for (var by = 0; by < img.height - blockSize; by += blockSize) {
+      for (var bx = 0; bx < img.width - blockSize; bx += blockSize) {
+        totalBlocks++;
+        var burntInBlock = 0;
+        var pixelsInBlock = 0;
+
+        // Sample every 2nd pixel for speed
+        for (var y = by; y < by + blockSize; y += 2) {
+          for (var x = bx; x < bx + blockSize; x += 2) {
+            pixelsInBlock++;
+            if (img.isColor) {
+              if (img.sample(x, y, 0) > threshold || img.sample(x, y, 1) > threshold || img.sample(x, y, 2) > threshold) {
+                burntInBlock++;
+              }
+            } else {
+              if (img.sample(x, y) > threshold) burntInBlock++;
+            }
+          }
+        }
+
+        var blockFraction = pixelsInBlock > 0 ? burntInBlock / pixelsInBlock : 0;
+        if (blockFraction > blockBurntThreshold) {
+          burntBlocks.push({
+            x: bx, y: by,
+            fraction: blockFraction
+          });
+        }
+      }
+    }
+
+    // Compute total burnt area as fraction of image
+    var burntAreaFraction = totalBlocks > 0 ? burntBlocks.length / totalBlocks : 0;
+
+    // Find worst regions (top 5 by fraction)
+    burntBlocks.sort(function(a, b) { return b.fraction - a.fraction; });
+
+    JSON.stringify({
+      burntBlockCount: burntBlocks.length,
+      totalBlocks: totalBlocks,
+      burntAreaFraction: burntAreaFraction,
+      worstBlocks: burntBlocks.slice(0, 5).map(function(b) {
+        return { x: b.x, y: b.y, pctBurnt: Math.round(b.fraction * 100) };
+      })
+    });
+  `);
+
+  if (r.status === 'error') {
+    return {
+      pass: false,
+      error: r.error?.message || 'PJSR error',
+      details: 'Burn scan failed'
+    };
+  }
+
+  let data;
+  try {
+    data = JSON.parse(r.outputs?.consoleOutput || '{}');
+  } catch {
+    return { pass: false, error: 'Failed to parse output' };
+  }
+
+  const pass = data.burntAreaFraction < 0.01; // < 1% of blocks burnt
+
+  const details = [];
+  if (!pass) {
+    details.push(`BURNT REGIONS DETECTED: ${data.burntBlockCount}/${data.totalBlocks} blocks (${(data.burntAreaFraction * 100).toFixed(1)}%) have >5% clipped pixels.`);
+    if (data.worstBlocks.length > 0) {
+      details.push(`Worst: ${data.worstBlocks.map(b => `[${b.x},${b.y}] ${b.pctBurnt}%`).join(', ')}`);
+    }
+    details.push('Reduce stretch, increase headroom, or use tighter masks to protect bright regions.');
+  } else {
+    details.push(`No significant burning: ${data.burntBlockCount}/${data.totalBlocks} blocks (${(data.burntAreaFraction * 100).toFixed(1)}%)`);
+  }
+
+  return {
+    pass,
+    burntBlockCount: data.burntBlockCount,
+    totalBlocks: data.totalBlocks,
+    burntAreaFraction: data.burntAreaFraction,
+    worstBlocks: data.worstBlocks,
+    details: details.join(' ')
+  };
+}
