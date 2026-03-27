@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "name": "M27 Dumbbell Nebula HaLRGB — LLM Agentic Pipeline",
+  "files": {
+    "sourceFolder": "/Users/aescaffre/M27/Claude",
+    "L": "/Users/aescaffre/M27/Claude/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-L_mono_autocrop.xisf",
+    "R": "/Users/aescaffre/M27/Claude/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-R_mono_autocrop.xisf",
+    "G": "/Users/aescaffre/M27/Claude/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-V_mono_autocrop.xisf",
+    "B": "/Users/aescaffre/M27/Claude/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-B_mono_autocrop.xisf",
+    "Ha": "/Users/aescaffre/M27/Claude/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-HAlpha_mono_autocrop.xisf",
+    "channelSwap": "RB,GB",
+    "outputDir": "/Users/aescaffre/M27/Claude/agentic",
+    "targetName": "M27"
+  }
+}

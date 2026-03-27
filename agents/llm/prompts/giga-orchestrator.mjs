@@ -305,9 +305,13 @@ Tools: run_curves (S channel), run_pixelmath, ha_inject_red, ha_inject_luminance
 - Previous run (v7) had good blue/yellow but overdone pink/red knots.
 ${hasHa ? `
 - **Ha injection is MANDATORY for HaLRGB/HaRGB data.** Do NOT skip it.
-  Apply ha_inject_red (strength=0.30-0.40, brightnessLimit=0.20) + ha_inject_luminance (strength=0.25).
-  HII regions and emission structures MUST show pink/red in the final image.
-  If Ha-emitting features are not visibly colored, Ha injection failed. Push harder.` : ''}
+  **CRITICAL: ALWAYS apply Ha through a LUMINANCE MASK.** Without mask, Ha reddens the entire background.
+  1. Create luminance mask (clipLow=0.04-0.08, blur=5) — captures nebula but excludes sky
+  2. Apply mask
+  3. ha_inject_red (strength=0.30-0.40, brightnessLimit=0.20) + ha_inject_luminance (strength=0.25)
+  4. Remove mask
+  Previous run (M27 v1) reddened the entire background because Ha was injected without mask.
+  HII/emission regions MUST show red/pink but the BACKGROUND must stay NEUTRAL.` : ''}
 - Do not stop at a safe midpoint if the image is still washed out.
 
 ## BRANCH D — STAR POLICY

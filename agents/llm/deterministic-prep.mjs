@@ -296,7 +296,9 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
   log(`  Dimensions: ${JSON.stringify(dims)}`);
 
   const refDim = dims.R;
-  const needsAlign = masters.filter(m => m.path?.trim() && dims[m.key] !== refDim && dims[m.key] !== 'missing' && m.key !== 'R');
+  // Skip alignment for pre-stretched Ha (user provides it already aligned/cropped)
+  const haIsStretched = !!(F.haIsStretched);
+  const needsAlign = masters.filter(m => m.path?.trim() && dims[m.key] !== refDim && dims[m.key] !== 'missing' && m.key !== 'R' && !(m.key === 'Ha' && haIsStretched));
 
   if (needsAlign.length > 0) {
     log(`  Aligning ${needsAlign.map(m => m.key).join(', ')} to R...`);
@@ -608,53 +610,105 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
   // STEP 6: Linear processing on Ha (if present)
   // ========================================================================
   if (hasHa) {
-    log('\n[PREP] Step 6: Linear processing on Ha...');
+    const haIsStretched = !!(F.haIsStretched);
 
-    log('  GC on Ha...');
-    await runGC(ctx, 'FILTER_Ha');
+    if (haIsStretched && F.haIsStarless) {
+      // Ha is already stretched AND starless — crop to match RGB if needed, then use as-is
+      log('\n[PREP] Step 6: Ha already stretched + starless...');
 
-    // Background neutralization on Ha
-    log('  Background neutralization on Ha...');
-    await ctx.pjsr(`
-      var P=new BackgroundNeutralization;
-      P.executeOn(ImageWindow.windowById('FILTER_Ha').mainView);
-    `).catch(() => log('  BN on Ha skipped'));
+      // Check if Ha needs cropping to match RGB dimensions
+      const haDimR = await ctx.pjsr(`var w=ImageWindow.windowById('FILTER_Ha');w.isNull?'missing':w.mainView.image.width+'x'+w.mainView.image.height;`);
+      const haDim = haDimR.outputs?.consoleOutput;
+      const rgbDimR = await ctx.pjsr(`var w=ImageWindow.windowById('${targetName}');w.isNull?'missing':w.mainView.image.width+'x'+w.mainView.image.height;`);
+      const rgbDim = rgbDimR.outputs?.consoleOutput;
 
-    log('  BXT correct on Ha...');
-    await pjsrOrDie(`
-      var P=new BlurXTerminator;
-      P.correct_only=true;P.adjust_star_halos=0.00;P.AI_file='';P.device=0;
-      P.executeOn(ImageWindow.windowById('FILTER_Ha').mainView);
-    `, 'BXT correct on Ha');
+      if (haDim !== rgbDim && haDim !== 'missing' && rgbDim !== 'missing') {
+        log(`  Ha (${haDim}) differs from RGB (${rgbDim}) — center-cropping Ha to match...`);
+        const [rgbW, rgbH] = rgbDim.split('x').map(Number);
+        await ctx.pjsr(`
+          var w = ImageWindow.windowById('FILTER_Ha');
+          var img = w.mainView.image;
+          var dx = Math.floor((img.width - ${rgbW}) / 2);
+          var dy = Math.floor((img.height - ${rgbH}) / 2);
+          if (dx > 0 || dy > 0) {
+            var P = new DynamicCrop;
+            P.centerX = 0.5; P.centerY = 0.5;
+            P.width = ${rgbW} / img.width;
+            P.height = ${rgbH} / img.height;
+            P.executeOn(w.mainView);
+          }
+          'Cropped to ' + w.mainView.image.width + 'x' + w.mainView.image.height;
+        `);
+        log(`  Ha cropped to match RGB`);
+      } else {
+        log(`  Ha dimensions match RGB — no crop needed`);
+      }
 
-    log('  NXT linear on Ha (0.20)...');
-    await pjsrOrDie(`
-      var P=new NoiseXTerminator;
-      P.denoise=0.20;P.detail=0.15;
-      P.executeOn(ImageWindow.windowById('FILTER_Ha').mainView);
-    `, 'NXT linear on Ha');
+    } else if (haIsStretched) {
+      // Ha is already stretched (non-linear) — skip linear processing, just SXT
+      log('\n[PREP] Step 6: Ha already stretched — star removal only...');
 
-    log('  BXT sharpen on Ha (nonstellar=0.70)...');
-    await pjsrOrDie(`
-      var P=new BlurXTerminator;
-      P.correct_only=false;P.sharpen_nonstellar=0.70;P.adjust_star_halos=0.00;P.AI_file='';P.device=0;
-      P.executeOn(ImageWindow.windowById('FILTER_Ha').mainView);
-    `, 'BXT sharpen on Ha');
+      log('  SXT on Ha (non-linear, unscreen)...');
+      await pjsrOrDie(`
+        var P=new StarXTerminator;
+        P.stars=true;P.unscreen=true;P.overlap=0.20;P.AI_file='';P.device=0;
+        P.executeOn(ImageWindow.windowById('FILTER_Ha').mainView);
+      `, 'SXT on Ha');
+      const postHaSxt = await ctx.listImages();
+      const haStars = postHaSxt.find(i => i.id.includes('FILTER_Ha') && i.id.includes('stars'));
+      if (haStars) {
+        await ctx.pjsr(`var w=ImageWindow.windowById('${haStars.id}');if(!w.isNull)w.forceClose();`);
+      }
 
-    log('  SXT on Ha (linear)...');
-    await pjsrOrDie(`
-      var P=new StarXTerminator;
-      P.stars=true;P.unscreen=false;P.overlap=0.20;P.AI_file='';P.device=0;
-      P.executeOn(ImageWindow.windowById('FILTER_Ha').mainView);
-    `, 'SXT on Ha');
-    const postHaSxt = await ctx.listImages();
-    const haStars = postHaSxt.find(i => i.id.includes('FILTER_Ha') && i.id.includes('stars'));
-    if (haStars) {
-      await ctx.pjsr(`var w=ImageWindow.windowById('${haStars.id}');if(!w.isNull)w.forceClose();`);
+    } else {
+      // Ha is linear — full processing
+      log('\n[PREP] Step 6: Linear processing on Ha...');
+
+      log('  GC on Ha...');
+      await runGC(ctx, 'FILTER_Ha');
+
+      log('  Background neutralization on Ha...');
+      await ctx.pjsr(`
+        var P=new BackgroundNeutralization;
+        P.executeOn(ImageWindow.windowById('FILTER_Ha').mainView);
+      `).catch(() => log('  BN on Ha skipped'));
+
+      log('  BXT correct on Ha...');
+      await pjsrOrDie(`
+        var P=new BlurXTerminator;
+        P.correct_only=true;P.adjust_star_halos=0.00;P.AI_file='';P.device=0;
+        P.executeOn(ImageWindow.windowById('FILTER_Ha').mainView);
+      `, 'BXT correct on Ha');
+
+      log('  NXT linear on Ha (0.20)...');
+      await pjsrOrDie(`
+        var P=new NoiseXTerminator;
+        P.denoise=0.20;P.detail=0.15;
+        P.executeOn(ImageWindow.windowById('FILTER_Ha').mainView);
+      `, 'NXT linear on Ha');
+
+      log('  BXT sharpen on Ha (nonstellar=0.70)...');
+      await pjsrOrDie(`
+        var P=new BlurXTerminator;
+        P.correct_only=false;P.sharpen_nonstellar=0.70;P.adjust_star_halos=0.00;P.AI_file='';P.device=0;
+        P.executeOn(ImageWindow.windowById('FILTER_Ha').mainView);
+      `, 'BXT sharpen on Ha');
+
+      log('  SXT on Ha (linear)...');
+      await pjsrOrDie(`
+        var P=new StarXTerminator;
+        P.stars=true;P.unscreen=false;P.overlap=0.20;P.AI_file='';P.device=0;
+        P.executeOn(ImageWindow.windowById('FILTER_Ha').mainView);
+      `, 'SXT on Ha');
+      const postHaSxt = await ctx.listImages();
+      const haStars = postHaSxt.find(i => i.id.includes('FILTER_Ha') && i.id.includes('stars'));
+      if (haStars) {
+        await ctx.pjsr(`var w=ImageWindow.windowById('${haStars.id}');if(!w.isNull)w.forceClose();`);
+      }
+
+      log('  Seti stretch Ha (target=0.15)...');
+      await setiStretch(ctx, 'FILTER_Ha', { targetMedian: 0.15, hdrAmount: 0.25, hdrKnee: 0.35 });
     }
-
-    log('  Seti stretch Ha (target=0.15)...');
-    await setiStretch(ctx, 'FILTER_Ha', { targetMedian: 0.15, hdrAmount: 0.25, hdrKnee: 0.35 });
 
     result.views.ha = 'FILTER_Ha';
     result.stats.ha = await getStats(ctx, 'FILTER_Ha');

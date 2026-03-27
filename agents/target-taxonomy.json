@@ -99,7 +99,7 @@
         "dynamicRange": "moderate",
         "hasIFN": false, "hasDustLanes": false, "hasBrightCore": true, "hasHIIRegions": true
       },
-      "processingNotes": "Small subject — sharpness paramount. Internal structure (shells, knots) needs fine LHE. Central star visible but not burnt. Outer halo extremely faint. Often OIII (blue/teal) + Ha (red) zoned color — process zones separately via masks."
+      "processingNotes": "Small subject — sharpness paramount. Internal structure (shells, knots) needs fine LHE. CORE BURNS EASILY — L stretch 0.25 max with headroom 0.10 (NOT 0.30). Outer halo extremely faint. Often OIII (blue/teal) + Ha (red) zoned color — process zones separately via masks. Ha injection MUST use luminance mask (clipLow=0.04-0.08) — without mask, background turns red. The faint outer veil needs Ha through SOFT mask."
     },
     "reflection_nebula": {
       "label": "Reflection Nebula",

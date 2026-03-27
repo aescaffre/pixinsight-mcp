@@ -493,8 +493,27 @@ export async function checkCoreBurning(ctx, viewId) {
 
     var fraction = totalCount > 0 ? burntCount / totalCount : 0;
 
+    // Also check a tighter 32x32 inner core (catches small PN cores)
+    var innerSize = 32;
+    var icx = Math.max(0, Math.min(bestX + blockSize / 2 - innerSize / 2, img.width - innerSize));
+    var icy = Math.max(0, Math.min(bestY + blockSize / 2 - innerSize / 2, img.height - innerSize));
+    var innerBurnt = 0;
+    var innerTotal = 0;
+    for (var y = icy; y < icy + innerSize; y++) {
+      for (var x = icx; x < icx + innerSize; x++) {
+        if (img.isColor) {
+          if (img.sample(x, y, 0) > 0.98 || img.sample(x, y, 1) > 0.98 || img.sample(x, y, 2) > 0.98) innerBurnt++;
+        } else {
+          if (img.sample(x, y) > 0.98) innerBurnt++;
+        }
+        innerTotal++;
+      }
+    }
+    var innerFraction = innerTotal > 0 ? innerBurnt / innerTotal : 0;
+
     JSON.stringify({
       burntFraction: fraction,
+      innerBurntFraction: innerFraction,
       burntPixels: burntCount,
       totalSampled: totalCount,
       peakValue: peakVal,
@@ -519,14 +538,22 @@ export async function checkCoreBurning(ctx, viewId) {
     return { pass: false, error: 'Failed to parse PJSR output', burntFraction: 999 };
   }
 
-  const pass = data.burntFraction < 0.02; // < 2% burnt = pass
+  // Check both wide (128×128) and tight (32×32) core regions
+  const widePass = data.burntFraction < 0.02;  // < 2% in 128×128 region
+  const innerPass = (data.innerBurntFraction || 0) < 0.10;  // < 10% in tight 32×32 inner core
+  const pass = widePass && innerPass;
 
   const details = [];
-  if (!pass) {
-    details.push(`CORE BURNT: ${(data.burntFraction * 100).toFixed(1)}% of core pixels > 0.98 (limit: 2%). Peak=${data.peakValue.toFixed(4)} at [${data.coreCenter}]`);
-  } else {
-    details.push(`Core OK: ${(data.burntFraction * 100).toFixed(1)}% burnt, peak=${data.peakValue.toFixed(4)}`);
+  if (!widePass) {
+    details.push(`CORE BURNT (wide): ${(data.burntFraction * 100).toFixed(1)}% of 128×128 core > 0.98 (limit: 2%).`);
   }
+  if (!innerPass) {
+    details.push(`CORE BURNT (inner): ${((data.innerBurntFraction || 0) * 100).toFixed(1)}% of 32×32 inner core > 0.98 (limit: 10%). Compact core is clipped.`);
+  }
+  if (pass) {
+    details.push(`Core OK: wide=${(data.burntFraction * 100).toFixed(1)}%, inner=${((data.innerBurntFraction || 0) * 100).toFixed(1)}%, peak=${data.peakValue.toFixed(4)}`);
+  }
+  details.push(`Peak=${data.peakValue.toFixed(4)} at [${data.coreCenter}]`);
 
   return {
     pass,
