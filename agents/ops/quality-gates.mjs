@@ -152,7 +152,7 @@ export async function checkStarQuality(ctx, viewId) {
     return { pass: false, error: 'Failed to parse PJSR output', medianFWHM: 999, colorDiversity: 0 };
   }
 
-  const fwhmPass = data.medianFWHM < 6.0;
+  const fwhmPass = data.medianFWHM <= 6.0;
   const colorPass = data.colorDiversity > 0.05;
   const countPass = data.starsFound >= 50; // minimum star presence
   const pass = fwhmPass && colorPass && countPass;

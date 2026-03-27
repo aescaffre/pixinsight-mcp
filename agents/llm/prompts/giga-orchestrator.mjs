@@ -143,8 +143,9 @@ The galaxy core MUST retain structure — never clip to white.
 - Previous run (v8) had a slightly burnt core. Protect it.
 
 ### 4. NO OVER-DENOISING — this is critical
-NXT denoise > 0.25 softens real detail and creates plastic appearance.
-- Keep denoise=0.40-0.50 for branch-level passes (post-stretch, through masks)
+NXT denoise too high softens real detail and creates plastic appearance.
+- Prep already applied NXT 0.20 linear + 0.25 post-stretch — detail is preserved
+- Branch-level passes: 0.25-0.35 through masks (post-LHE/HDRMT cleanup)
 - Final polish pass: 0.15 MAX, or skip if background is already clean
 - **Plastic smoothness is WORSE than slight noise** — err on the side of less denoising
 - Previous run (v5) over-denoised and killed all detail. Do not repeat.
@@ -241,15 +242,26 @@ ${hasL ? `
 Work on FILTER_L. Goal: maximize believable structure (core separation, arm texture, local contrast).
 NOT IFN (that's Branch B). NOT stars. NOT composition.
 
+**MASKING IS CRITICAL**: Do NOT apply LHE/HDRMT globally. Always use masks to target specific brightness zones:
+1. Create luminance mask → apply_mask → process → remove_mask → close_mask
+2. For tiny subjects (galaxy clusters): use SOFT masks (clipLow=0.04-0.06, blur=5-8) to capture faint outer structure (tidal tails, faint arms, galaxy halos) — NOT just bright cores. The faint delicacies around galaxies are what make a processed image special.
+3. For bright cores: use donut mask ($T*(1-$T)*4) to protect cores while enhancing mid-brightness structure
+4. Apply MULTIPLE mask+LHE passes at different scales — this is how you extract detail:
+   - r=32 (fine detail within galaxies) through tight mask
+   - r=64 (mid-scale structure) through moderate mask
+   - r=128 (large-scale contrast) through softer mask
+5. After EACH masked pass, call \`measure_subject_detail\` — detailScore MUST increase. If it doesn't, the mask is wrong or the amount is too low.
+
 Required candidates: L_detail_weak, L_detail_target, L_detail_edge, L_detail_overdone
 At least one must be clearly too aggressive (synthetic, crunchy, halos).
 
-Tools: create_luminance_mask, apply_mask, run_lhe, run_hdrmt, remove_mask, close_mask, run_nxt, save_variant
-- LHE multi-scale: r=128 (large), r=64 (mid). Push amount from 0.30 → 0.50 → 0.65+
-- HDRMT inverted: start with layers=6, iterations=2. Push to layers=7-8.
+Tools: create_luminance_mask, apply_mask, run_lhe, run_hdrmt, remove_mask, close_mask, run_nxt, measure_subject_detail, save_variant
+- LHE multi-scale: r=32 (fine), r=64 (mid), r=128 (large). Push amounts from 0.30 → 0.50 → 0.65+
+- HDRMT inverted: start with layers=5-6, iterations=1. Push to layers=7. Use medianTransform=true for star-rich fields (prevents dark ringing).
 - For each candidate, note: what improved, what regressed, is it still too conservative?
 - You MUST revert at least once — if you never revert, you didn't push hard enough.
-` : 'No L channel. Apply LHE/HDRMT to RGB directly with same bracketing discipline.'}
+- **finish will REJECT if subjectBrightness < 0.15 or contrastRatio < 2×**
+` : 'No L channel. Apply LHE/HDRMT to RGB directly with same bracketing discipline and masking strategy.'}
 
 ## BRANCH B — IFN REVEAL *** HIGHEST PRIORITY BRANCH ***
 ${hasIFN ? `
@@ -409,15 +421,16 @@ Rules:
 
 After composition but BEFORE quality gates. Check for color gradients in the background.
 
-1. **Measure**: get_image_stats — check per-channel medians. If one channel's background is significantly higher on one side, there's a gradient.
-2. **Diagnose**: measure_uniformity — compare corner medians per channel. If G corners differ by > 0.005, green gradient present.
-3. **Fix options** (try in order, save_variant after each):
-   - \`run_scnr\` through INVERTED luminance mask (background only) — for green casts. Amount 0.30-0.50.
-   - \`run_per_channel_abe\` with polyDegree=1 — for channel-specific spatial gradients. Very gentle.
-   - \`run_gradient_correction\` — for broadband gradients on the final composition.
-4. **Verify**: measure_uniformity again. If corner uniformity improved, keep. If galaxy colors affected, revert.
+1. **Measure**: measure_uniformity — compare corner medians. If corners differ by > 0.003, gradient present.
+2. **Try ALL three methods on the RGB composition**, save_variant for each:
+   - \`run_abe\` with polyDegree=2 (gentle) — saves as variant
+   - \`run_gradient_correction\` — saves as variant
+   - Compare both with measure_uniformity — pick the one with lowest corner stddev
+3. If green cast remains: \`run_scnr\` through INVERTED luminance mask (background only). Amount 0.30-0.50.
+4. **Verify**: measure_uniformity again. If corner uniformity improved AND galaxy colors preserved, keep. Otherwise revert.
 
-Do NOT over-correct. A slight residual gradient is better than a flattened background that kills IFN.
+Do NOT use per-channel gradient correction — it can create color artifacts. Work on the full RGB composition.
+Do NOT over-correct. A slight residual gradient is better than a flattened background.
 
 # ======================================================================
 # PHASE 8 — TECHNICAL VALIDATION + QUALITY GATES

@@ -189,32 +189,37 @@ ${extractWinningParams(brief.target.classification)}
   fs.mkdirSync(outputDir, { recursive: true });
 
   const xisfPath = path.join(outputDir, `${targetName}_giga.xisf`);
-  const jpgPath = path.join(outputDir, `${targetName}_giga.jpg`);
+  const pngPath = path.join(outputDir, `${targetName}_giga.png`);
 
   // Find the best final image to save — prefer COMP_final, then any COMP_, then targetName
   // The agent often leaves targetName as starless and puts the final composition elsewhere
   try {
     const saveResult = await ctx.pjsr(`
-      var candidates = ['COMP_final', 'COMP_final_v2', 'COMP_balanced', 'COMP_boldIFN', 'COMP_edge', '${targetName}'];
-      var best = null;
-      for (var i = 0; i < candidates.length; i++) {
-        var w = ImageWindow.windowById(candidates[i]);
-        if (!w.isNull && w.mainView.image.numberOfChannels === 3) {
-          best = w;
-          break;
+      // Find the best final: prefer views with stars (higher max, name contains 'FINAL' or 'stars')
+      var allColor = [];
+      var ws = ImageWindow.windows;
+      for (var i = 0; i < ws.length; i++) {
+        if (ws[i].mainView.image.numberOfChannels === 3) {
+          allColor.push({ id: ws[i].mainView.id, max: ws[i].mainView.image.maximum(), w: ws[i] });
         }
       }
-      // Fallback: any 3-channel image
-      if (!best) {
-        var ws = ImageWindow.windows;
-        for (var i = 0; i < ws.length; i++) {
-          if (ws[i].mainView.image.numberOfChannels === 3) { best = ws[i]; break; }
-        }
-      }
+      // Sort by priority: FINAL/stars names first, then by max value (stars push max higher)
+      allColor.sort(function(a, b) {
+        var aScore = 0, bScore = 0;
+        if (a.id.indexOf('FINAL') >= 0) aScore += 100;
+        if (a.id.indexOf('stars') >= 0 || a.id.indexOf('Stars') >= 0) aScore += 50;
+        if (a.id.indexOf('COMP') >= 0) aScore += 10;
+        if (b.id.indexOf('FINAL') >= 0) bScore += 100;
+        if (b.id.indexOf('stars') >= 0 || b.id.indexOf('Stars') >= 0) bScore += 50;
+        if (b.id.indexOf('COMP') >= 0) bScore += 10;
+        if (aScore !== bScore) return bScore - aScore;
+        return b.max - a.max; // Higher max = more likely to have stars
+      });
+      var best = allColor.length > 0 ? allColor[0].w : null;
       if (best) {
         best.saveAs('${xisfPath.replace(/'/g, "\\'")}', false, false, false, false);
         best.mainView.id = '${targetName}';
-        best.saveAs('${jpgPath.replace(/'/g, "\\'")}', false, false, false, false);
+        best.saveAs('${pngPath.replace(/'/g, "\\'")}', false, false, false, false);
         best.mainView.id = '${targetName}';
         'Saved: ' + best.mainView.id;
       } else {
@@ -223,7 +228,7 @@ ${extractWinningParams(brief.target.classification)}
     `);
     console.log(`  ${saveResult.outputs?.consoleOutput || 'done'}`);
     console.log(`  Saved: ${xisfPath}`);
-    console.log(`  Saved: ${jpgPath}`);
+    console.log(`  Saved: ${pngPath}`);
   } catch (e) {
     console.error(`  Save error: ${e.message}`);
   }
@@ -243,7 +248,7 @@ ${extractWinningParams(brief.target.classification)}
 
   console.log(`\n${'='.repeat(60)}`);
   console.log(`  GIGA Processing complete!`);
-  console.log(`  Final: ${jpgPath}`);
+  console.log(`  Final: ${pngPath}`);
   console.log(`  Run: ${store.baseDir}`);
   console.log(`${'='.repeat(60)}`);
 }

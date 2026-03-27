@@ -1409,6 +1409,24 @@ const TOOL_CATALOG = {
         // Non-blocking if check fails
       }
 
+      // Gate 4: Subject detail (soft gate — warns strongly but doesn't block)
+      try {
+        const detailResult = await measureSubjectDetail(ctx, input.view_id);
+        if (detailResult.subjectBrightness < 0.15) {
+          failures.push(`SUBJECT TOO DIM: brightness=${detailResult.subjectBrightness.toFixed(3)} (minimum: 0.15). Subjects are barely visible — stretch harder, boost through masks, or increase LRGB lightness.`);
+        } else if (detailResult.subjectBrightness < 0.20) {
+          warnings.push(`Subjects still dim (brightness=${detailResult.subjectBrightness.toFixed(3)}, goal: >0.25). Consider pushing harder.`);
+        }
+        if (detailResult.contrastRatio < 2.0) {
+          failures.push(`CONTRAST TOO LOW: ratio=${detailResult.contrastRatio.toFixed(1)}× (minimum: 2×). Subjects don't separate from background. Use masked curves/LHE to boost subjects selectively.`);
+        }
+        if (detailResult.detailScore < 0.0005) {
+          warnings.push(`Low detail score (${detailResult.detailScore.toFixed(6)}). Subjects may look like smooth blobs. Fine-scale LHE (r=32, r=64) through tight masks can help.`);
+        }
+      } catch (e) {
+        // Non-blocking
+      }
+
       if (failures.length > 0) {
         return {
           type: 'text',

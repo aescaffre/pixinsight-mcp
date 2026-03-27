@@ -469,19 +469,19 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     throw new Error('SPCC failed — color calibration is required. Check WCS/astrometric solution on the target image. Previous images may need to be closed first.');
   }
 
-  // NXT linear
-  log('  NXT linear (0.45)...');
+  // NXT linear (balanced — reduce noise while preserving faint detail)
+  log('  NXT linear (0.30)...');
   await pjsrOrDie(`
     var P=new NoiseXTerminator;
-    P.denoise=0.45;P.detail=0.15;
+    P.denoise=0.30;P.detail=0.15;
     P.executeOn(ImageWindow.windowById('${targetName}').mainView);
   `, 'NXT linear on RGB');
 
-  // BXT sharpen
-  log('  BXT sharpen...');
+  // BXT sharpen (aggressive nonstellar for small galaxy detail)
+  log('  BXT sharpen (nonstellar=0.70)...');
   await pjsrOrDie(`
     var P=new BlurXTerminator;
-    P.correct_only=false;P.sharpen_nonstellar=0.40;P.adjust_star_halos=0.00;
+    P.correct_only=false;P.sharpen_nonstellar=0.70;P.adjust_star_halos=0.00;
     P.AI_file='';P.device=0;
     P.executeOn(ImageWindow.windowById('${targetName}').mainView);
   `, 'BXT sharpen on RGB');
@@ -502,9 +502,9 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     log(`  Stars extracted: ${starView.id}`);
   }
 
-  // Seti stretch RGB
-  log('  Seti stretch RGB (target=0.12, headroom=0.05)...');
-  await setiStretch(ctx, targetName, { targetMedian: 0.12, hdrAmount: 0.25, hdrKnee: 0.35, hdrHeadroom: 0.05 });
+  // Seti stretch RGB (darker background for cleaner result — L provides detail via LRGB)
+  log('  Seti stretch RGB (target=0.10, headroom=0.05)...');
+  await setiStretch(ctx, targetName, { targetMedian: 0.10, hdrAmount: 0.25, hdrKnee: 0.35, hdrHeadroom: 0.05 });
 
   // NXT post-stretch
   log('  NXT post-stretch (0.25)...');
@@ -554,19 +554,19 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
       P.executeOn(ImageWindow.windowById('FILTER_L').mainView);
     `, 'BXT correct on L');
 
-    // NXT linear on L
-    log('  NXT linear on L (0.45)...');
+    // NXT linear on L (balanced)
+    log('  NXT linear on L (0.30)...');
     await pjsrOrDie(`
       var P=new NoiseXTerminator;
-      P.denoise=0.45;P.detail=0.15;
+      P.denoise=0.30;P.detail=0.15;
       P.executeOn(ImageWindow.windowById('FILTER_L').mainView);
     `, 'NXT linear on L');
 
-    // BXT sharpen on L
-    log('  BXT sharpen on L...');
+    // BXT sharpen on L (aggressive nonstellar)
+    log('  BXT sharpen on L (nonstellar=0.70)...');
     await pjsrOrDie(`
       var P=new BlurXTerminator;
-      P.correct_only=false;P.sharpen_nonstellar=0.40;P.adjust_star_halos=0.00;P.AI_file='';P.device=0;
+      P.correct_only=false;P.sharpen_nonstellar=0.70;P.adjust_star_halos=0.00;P.AI_file='';P.device=0;
       P.executeOn(ImageWindow.windowById('FILTER_L').mainView);
     `, 'BXT sharpen on L');
 
@@ -584,9 +584,9 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
       await ctx.pjsr(`var w=ImageWindow.windowById('${lStars.id}');if(!w.isNull)w.forceClose();`);
     }
 
-    // Seti stretch L (brighter for IFN, with headroom for HDRMT)
-    log('  Seti stretch L (target=0.25, headroom=0.10)...');
-    await setiStretch(ctx, 'FILTER_L', { targetMedian: 0.25, hdrAmount: 0.25, hdrKnee: 0.35, hdrHeadroom: 0.10 });
+    // Seti stretch L (brighter to extract faint detail, with headroom for HDRMT)
+    log('  Seti stretch L (target=0.30, headroom=0.10)...');
+    await setiStretch(ctx, 'FILTER_L', { targetMedian: 0.30, hdrAmount: 0.25, hdrKnee: 0.35, hdrHeadroom: 0.10 });
 
     result.views.l = 'FILTER_L';
     result.stats.l = await getStats(ctx, 'FILTER_L');
@@ -627,17 +627,17 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
       P.executeOn(ImageWindow.windowById('FILTER_Ha').mainView);
     `, 'BXT correct on Ha');
 
-    log('  NXT linear on Ha (0.45)...');
+    log('  NXT linear on Ha (0.20)...');
     await pjsrOrDie(`
       var P=new NoiseXTerminator;
-      P.denoise=0.45;P.detail=0.15;
+      P.denoise=0.20;P.detail=0.15;
       P.executeOn(ImageWindow.windowById('FILTER_Ha').mainView);
     `, 'NXT linear on Ha');
 
-    log('  BXT sharpen on Ha...');
+    log('  BXT sharpen on Ha (nonstellar=0.70)...');
     await pjsrOrDie(`
       var P=new BlurXTerminator;
-      P.correct_only=false;P.sharpen_nonstellar=0.40;P.adjust_star_halos=0.00;P.AI_file='';P.device=0;
+      P.correct_only=false;P.sharpen_nonstellar=0.70;P.adjust_star_halos=0.00;P.AI_file='';P.device=0;
       P.executeOn(ImageWindow.windowById('FILTER_Ha').mainView);
     `, 'BXT sharpen on Ha');
 

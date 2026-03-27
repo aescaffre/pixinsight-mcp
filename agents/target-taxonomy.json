@@ -69,7 +69,7 @@
         "dynamicRange": "low",
         "hasIFN": false, "hasDustLanes": false, "hasBrightCore": false, "hasHIIRegions": false
       },
-      "processingNotes": "Many tiny diverse galaxies. STRETCH HARDER than normal — Seti RGB target 0.15-0.18, L target 0.30+. Galaxies are faint and need to be bright enough to show internal structure. Fine-scale LHE (r=32, r=64) essential to reveal spiral arms, tidal tails, shells within individual galaxies. LRGB lightness push hard — L has the detail. SXT may remove small galaxies — use conservative overlap. Color diversity across galaxies is a feature to preserve."
+      "processingNotes": "Many tiny diverse galaxies. Background target DARKER than single galaxies (0.08-0.10 RGB). 3-scale LHE through soft masks (r=16-24 fine, r=35-64 medium, r=94-150 large) — medium scale is most useful. HDRMT with medianTransform=ON to prevent dark ringing in star-rich fields. NXT post-stretch 0.25-0.35 (NOT aggressive in linear — kills fine detail). Consider range mask selective stretch to brighten faint members without blowing cores. SXT may remove small galaxies — use conservative overlap. Color diversity across galaxies is a feature. LRGB lightness 0.45-0.55."
     },
     "emission_nebula": {
       "label": "Emission Nebula",
