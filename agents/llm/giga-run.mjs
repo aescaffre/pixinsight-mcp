@@ -296,12 +296,42 @@ ${extractWinningParams(brief.target.classification)}
   const xisfPath = path.join(outputDir, `${targetName}_giga.xisf`);
   const pngPath = path.join(outputDir, `${targetName}_giga.png`);
 
-  // Robust export: use the view_id from the agent's finish call, fall back to heuristic
-  const finishViewId = result.finishResult?.view_id || null;
+  // Robust export: use the view_id from the agent's finish call, fall back to parsing last output
+  let finishViewId = result.finishResult?.view_id || null;
+  let viewIdSource = finishViewId ? 'finishResult' : null;
+
+  // If finishResult didn't yield a view_id, try to parse the agent's last output text
+  if (!finishViewId) {
+    const lastText = result.transcript?.[result.transcript.length - 1]?.content || '';
+    console.log(`  [DEBUG] finishResult: ${JSON.stringify(result.finishResult)}`);
+    console.log(`  [DEBUG] Last transcript text (first 500): ${lastText.slice(0, 500)}`);
+
+    // Try multiple patterns on the agent's last output
+    const patterns = [
+      /Finished\b[^.]*\.\s*Best:\s*(\w+)/,        // Exact tool output
+      /\bBest:\s*[`'"]?(\w+)[`'"]?/i,              // "Best: VIEW_ID"
+      /\bwinner[:\s]+[`'"]?(\w+)[`'"]?/i,          // "winner: VIEW_ID"
+      /\bfinal(?:ized?)?\s+(?:image|result|view|output)\s+(?:is\s+)?[`'"]*(\w+)/i,
+      /\bview[_\s]?id[:\s]+[`'"]*(\w+)/i,          // "view_id: X"
+      /\b(COMP_\w+)\b/,                            // COMP_ prefixed names
+      /\b(FINAL_\w+)\b/,                           // FINAL_ prefixed names
+      /\b([A-Za-z]\w*_FINAL)\b/,                   // _FINAL suffixed names
+    ];
+
+    for (const pat of patterns) {
+      const m = lastText.match(pat);
+      if (m) {
+        finishViewId = m[1];
+        viewIdSource = `transcript-regex(${pat.source.slice(0, 30)})`;
+        break;
+      }
+    }
+  }
+
   if (finishViewId) {
-    console.log(`  Agent finished with view: ${finishViewId}`);
+    console.log(`  Agent finished with view: ${finishViewId} (source: ${viewIdSource})`);
   } else {
-    console.log(`  No view_id from agent finish — will use heuristic`);
+    console.log(`  No view_id from agent finish or transcript — will use heuristic`);
   }
 
   try {

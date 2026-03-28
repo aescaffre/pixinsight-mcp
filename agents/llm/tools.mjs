@@ -14,7 +14,7 @@ import {
   checkStarQuality, checkRinging, checkSharpness, checkCoreBurning, scanBurntRegions,
   measureSubjectDetail,
   multiScaleEnhance,
-  extractPseudoOIII, continuumSubtractHa, dynamicNarrowbandBlend, createSyntheticLuminance, createZoneMasks,
+  extractPseudoOIII, continuumSubtractHa, dynamicNarrowbandBlend, createSyntheticLuminance, createZoneMasks, continuousClamp,
 } from '../ops/index.mjs';
 import { checkHardConstraints, statsToScores, computeAggregate } from '../scoring.mjs';
 import { jpegToContentBlock } from './vision.mjs';
@@ -28,8 +28,8 @@ function statsLine(stats, label = 'Stats') {
   const med = stats.median?.toFixed(6) ?? '?';
   const max = (stats.max ?? 0).toFixed(4);
   let warn = '';
-  if (stats.max > 0.93) warn = ' ⚠️ BURN WARNING: max=' + max + ' exceeds 0.93 — apply zone-based clamping (core: min($T,0.80), shell: min($T,0.85) through masks).';
-  else if (stats.max > 0.88) warn = ' ⚡ max=' + max + ' approaching burn threshold (0.93). Use zone masks to clamp core/shell independently.';
+  if (stats.max > 0.93) warn = ' ⚠️ BURN WARNING: max=' + max + ' exceeds 0.93 — apply continuous_clamp (min_clamp=0.80, max_clamp=0.95) for smooth brightness clamping with zero boundary artifacts.';
+  else if (stats.max > 0.88) warn = ' ⚡ max=' + max + ' approaching burn threshold (0.93). Consider continuous_clamp to smoothly limit brightness (core clamped harder, faint regions barely affected).';
   return `${label}: median=${med}, max=${max}${warn}`;
 }
 
@@ -1360,7 +1360,7 @@ const TOOL_CATALOG = {
     category: 'narrowband',
     definition: {
       name: 'dynamic_narrowband_blend',
-      description: 'Inject Ha and OIII (real or pseudo) into RGB using dynamic weighting formula. Creates natural dual-zone color: Ha-dominant regions become red/pink, OIII-dominant regions become teal/blue, with smooth transitions. The community-proven formula f=(OIII*Ha)^(1-OIII*Ha) weights the green channel dynamically. Includes soft-clamp to prevent burning.',
+      description: 'Inject Ha and OIII (real or pseudo) into RGB using dynamic weighting formula. Creates natural dual-zone color: Ha-dominant regions become red/pink, OIII-dominant regions become teal/blue, with smooth transitions. The community-proven formula f=(OIII*Ha)^(1-OIII*Ha) weights the green channel dynamically. Includes soft-clamp to prevent burning. Applied through a luminance mask to protect background from blue contamination (OIII noise residuals in B-R subtraction).',
       input_schema: {
         type: 'object',
         properties: {
@@ -1370,7 +1370,8 @@ const TOOL_CATALOG = {
           ha_strength: { type: 'number', description: 'Ha injection into R (0.10-0.50, default 0.35)' },
           oiii_strength: { type: 'number', description: 'OIII injection into B (0.10-0.60, default 0.40)' },
           g_strength: { type: 'number', description: 'OIII contribution to G (0.10-0.40, default 0.30)' },
-          max_output: { type: 'number', description: 'Soft-clamp per channel (0.80-0.95, default 0.90)' }
+          max_output: { type: 'number', description: 'Soft-clamp per channel (0.80-0.95, default 0.90)' },
+          mask_clip: { type: 'number', description: 'Luminance mask clip threshold — pixels below this value are excluded from the blend (protects background from blue contamination). Lower = more inclusive, higher = tighter mask. (0.01-0.10, default 0.04)' }
         },
         required: ['target_id', 'ha_id', 'oiii_id']
       }
@@ -1380,7 +1381,8 @@ const TOOL_CATALOG = {
         ha_strength: input.ha_strength,
         oiii_strength: input.oiii_strength,
         g_strength: input.g_strength,
-        max_output: input.max_output
+        max_output: input.max_output,
+        mask_clip: input.mask_clip
       });
       let warn = '';
       if (result.rMax > 0.92) warn += ' ⚠️ R hot';
@@ -1435,6 +1437,32 @@ const TOOL_CATALOG = {
         halo_clip: input.halo_clip
       });
       return { type: 'text', text: `Zone masks created: ${result.coreId} (>${result.thresholds.core}), ${result.shellId} (${result.thresholds.shell}-${result.thresholds.core}), ${result.haloId} (${result.thresholds.halo}-${result.thresholds.shell})` };
+    }
+  },
+
+  continuous_clamp: {
+    category: 'narrowband',
+    definition: {
+      name: 'continuous_clamp',
+      description: 'Apply smooth brightness clamping that varies by brightness — bright cores clamped harder, faint regions barely affected. Uses a single smooth luminance mask with large blur. ZERO mask boundary artifacts. Replaces zone-based clamping. Core (brightest) gets clamped near min_clamp (default 0.80), shell (~0.5 brightness) near midpoint (~0.875), background (faint) near max_clamp (default 0.95). One tool call replaces three zone mask operations.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'Target view to clamp (modified in place)' },
+          min_clamp: { type: 'number', description: 'Clamp level for brightest regions (default 0.80). Lower = harder clamp on core.' },
+          max_clamp: { type: 'number', description: 'Clamp level for faintest regions (default 0.95). Higher = less effect on background.' },
+          blur_sigma: { type: 'number', description: 'Gaussian blur sigma for luminance mask (default: auto = max(60, imageWidth/100)). Larger = smoother transitions.' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const result = await continuousClamp(ctx, input.view_id, {
+        min_clamp: input.min_clamp,
+        max_clamp: input.max_clamp,
+        blur_sigma: input.blur_sigma
+      });
+      return { type: 'text', text: `Continuous clamp applied: median=${result.median?.toFixed(6)}, max=${result.max?.toFixed(4)}, range=[${result.clampRange?.[0]}, ${result.clampRange?.[1]}], blur_sigma=${result.blur_sigma}` };
     }
   },
 

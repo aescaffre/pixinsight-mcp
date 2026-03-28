@@ -121,26 +121,90 @@ export async function continuumSubtractHa(ctx, haId, rgbId, factor = 0.28) {
  *   B += oiii_strength * OIII
  * where dynamic_weight = (OIII*Ha)^(1-(OIII*Ha))
  *
- * Applied through a mask to protect background.
+ * Applied through a luminance mask to protect background from blue
+ * contamination caused by OIII noise residuals in the B-R subtraction.
  *
  * @param {object} ctx - Bridge context
  * @param {string} targetId - Target RGB view
  * @param {string} haId - Ha view (mono, stretched)
  * @param {string} oiiiId - OIII view (mono, real or pseudo)
- * @param {object} opts - { ha_strength, oiii_strength, g_strength, max_output }
- * @returns {object} { median, max, rMax, bMax }
+ * @param {object} opts - { ha_strength, oiii_strength, g_strength, max_output, mask_clip }
+ * @param {number} [opts.mask_clip=0.04] - Luminance mask clip threshold; pixels below this are excluded from blend
+ * @returns {object} { median, max, rMax, bMax, maskClip }
  */
 export async function dynamicNarrowbandBlend(ctx, targetId, haId, oiiiId, opts = {}) {
   const haStr = opts.ha_strength ?? 0.35;
   const oiiiStr = opts.oiii_strength ?? 0.40;
   const gStr = opts.g_strength ?? 0.30;
   const maxOut = opts.max_output ?? 0.90;
+  const maskClip = opts.mask_clip ?? 0.04;
 
   // Dynamic weight: where both Ha and OIII are bright → Ha dominates G (warm core)
   // where OIII alone is bright → OIII dominates G (teal shell)
   // PixelMath: pow not available, use exp(b*ln(a))
   // f = (OIII*Ha)^(1-(OIII*Ha)) = exp((1-OIII*Ha)*ln(max(OIII*Ha, 0.00001)))
+  //
+  // Applied through a luminance mask to prevent background contamination:
+  // OIII pseudo (B-R) has noise residuals that, when multiplied by oiii_strength,
+  // create a blue color cast across the entire background. The mask ensures
+  // the blend only affects nebula/subject regions.
   const r = await ctx.pjsr(`
+    var tgtW = ImageWindow.windowById('${targetId}');
+    if (tgtW.isNull) throw new Error('dynamicNarrowbandBlend: target not found: ${targetId}');
+    var img = tgtW.mainView.image;
+    var w = img.width;
+    var h = img.height;
+
+    // --- Create temporary luminance mask to protect background ---
+    var nbMaskId = '__nb_blend_mask';
+    var oldMask = ImageWindow.windowById(nbMaskId);
+    if (!oldMask.isNull) oldMask.forceClose();
+
+    var maskW = new ImageWindow(w, h, 1, 32, true, false, nbMaskId);
+    var maskImg = maskW.mainView.image;
+
+    // Extract luminance from target
+    maskW.mainView.beginProcess();
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        var lum = 0.2126 * img.sample(x, y, 0) + 0.7152 * img.sample(x, y, 1) + 0.0722 * img.sample(x, y, 2);
+        maskImg.setSample(lum, x, y);
+      }
+    }
+    maskW.mainView.endProcess();
+
+    // Blur the mask for smooth transitions
+    var C = new Convolution;
+    C.mode = Convolution.prototype.Parametric;
+    C.sigma = 10;
+    C.shape = 2;
+    C.aspectRatio = 1;
+    C.rotationAngle = 0;
+    C.executeOn(maskW.mainView);
+
+    // Clip mask: values below mask_clip become zero (background excluded),
+    // remap remaining range to 0-1
+    var clipVal = ${maskClip};
+    if (clipVal > 0) {
+      var PMclip = new PixelMath;
+      PMclip.expression = 'iif($T<' + clipVal + ',0,($T-' + clipVal + ')/' + (1 - clipVal).toFixed(6) + ')';
+      PMclip.useSingleExpression = true;
+      PMclip.createNewImage = false;
+      PMclip.use64BitWorkingImage = true;
+      PMclip.truncate = true;
+      PMclip.truncateLower = 0;
+      PMclip.truncateUpper = 1;
+      PMclip.executeOn(maskW.mainView);
+    }
+
+    maskW.show();
+
+    // Apply mask to target
+    tgtW.mask = maskW;
+    tgtW.maskVisible = false;
+    tgtW.maskInverted = false;
+
+    // --- Apply narrowband blend (only affects masked areas = nebula) ---
     var PM = new PixelMath;
     // R: add Ha emission
     var rawR = "${targetId}[0] + ${haStr} * ${haId}";
@@ -161,13 +225,17 @@ export async function dynamicNarrowbandBlend(ctx, targetId, haId, oiiiId, opts =
     PM.use64BitWorkingImage = true;
     PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1;
     PM.createNewImage = false;
-    PM.executeOn(ImageWindow.windowById('${targetId}').mainView);
+    PM.executeOn(tgtW.mainView);
 
-    var img = ImageWindow.windowById('${targetId}').mainView.image;
-    img.selectedChannel = 0; var rMax = img.maximum();
-    img.selectedChannel = 2; var bMax = img.maximum();
-    img.resetChannelSelection();
-    JSON.stringify({ median: img.median(), max: img.maximum(), rMax: rMax, bMax: bMax });
+    // --- Remove and close the mask ---
+    tgtW.removeMask();
+    maskW.forceClose();
+
+    var finalImg = tgtW.mainView.image;
+    finalImg.selectedChannel = 0; var rMax = finalImg.maximum();
+    finalImg.selectedChannel = 2; var bMax = finalImg.maximum();
+    finalImg.resetChannelSelection();
+    JSON.stringify({ median: finalImg.median(), max: finalImg.maximum(), rMax: rMax, bMax: bMax, maskClip: clipVal });
   `);
 
   if (r.status === 'error') {
@@ -215,6 +283,126 @@ export async function createSyntheticLuminance(ctx, haId, oiiiId, haWeight = 0.5
 
   if (r.status === 'error') {
     throw new Error('createSyntheticLuminance failed: ' + (r.error?.message || 'unknown'));
+  }
+
+  return JSON.parse(r.outputs?.consoleOutput || '{}');
+}
+
+/**
+ * Continuous brightness clamping using a smooth luminance mask.
+ * Replaces discrete zone-mask clamping (core/shell/halo) which creates
+ * visible boundary artifacts at mask edges.
+ *
+ * How it works:
+ *   1. Extract luminance, blur with LARGE sigma (60-100px proportional to image)
+ *   2. Compute per-pixel clamp level:
+ *      clamp_level = min_clamp + (max_clamp - min_clamp) * (1 - smooth_lum)
+ *      Bright core (mask~1.0) → clamped near min_clamp (0.80)
+ *      Shell (mask~0.5)       → clamped near midpoint (0.875)
+ *      Background (mask~0)    → clamped near max_clamp (0.95)
+ *   3. result = min($T, clamp_level)
+ *
+ * Zero boundary artifacts because the mask is a single continuous gradient.
+ *
+ * @param {object} ctx - Bridge context
+ * @param {string} viewId - Target view to clamp (modified in place)
+ * @param {object} opts - { min_clamp, max_clamp, blur_sigma }
+ * @returns {object} { median, max, clampRange: [min_clamp, max_clamp], blur_sigma }
+ */
+export async function continuousClamp(ctx, viewId, opts = {}) {
+  const minClamp = opts.min_clamp ?? 0.80;
+  const maxClamp = opts.max_clamp ?? 0.95;
+  // blur_sigma: default auto = max(60, imageWidth/100)
+  const blurSigmaExpr = opts.blur_sigma != null ? String(opts.blur_sigma) : null;
+
+  const r = await ctx.pjsr(`
+    var src = ImageWindow.windowById('${viewId}');
+    if (src.isNull) throw new Error('continuousClamp: view not found: ${viewId}');
+    var img = src.mainView.image;
+    var w = img.width;
+    var h = img.height;
+
+    // Determine blur sigma
+    var blurSigma = ${blurSigmaExpr !== null ? blurSigmaExpr : 'Math.max(60, Math.round(w / 100))'};
+
+    // Close any existing temp mask
+    var tmpId = '__cont_clamp_lum';
+    var old = ImageWindow.windowById(tmpId);
+    if (!old.isNull) old.forceClose();
+
+    // Create luminance mask from source
+    var maskW = new ImageWindow(w, h, 1, 32, true, false, tmpId);
+    var maskImg = maskW.mainView.image;
+
+    var isColor = img.isColor;
+    maskW.mainView.beginProcess();
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        var lum;
+        if (isColor) {
+          lum = 0.2126 * img.sample(x, y, 0) + 0.7152 * img.sample(x, y, 1) + 0.0722 * img.sample(x, y, 2);
+        } else {
+          lum = img.sample(x, y);
+        }
+        maskImg.setSample(lum, x, y);
+      }
+    }
+    maskW.mainView.endProcess();
+
+    // Apply large Gaussian blur for perfectly smooth transitions
+    var conv = new Convolution;
+    conv.mode = Convolution.prototype.Parametric;
+    conv.sigma = blurSigma;
+    conv.shape = 2;
+    conv.aspectRatio = 1;
+    conv.rotationAngle = 0;
+    conv.executeOn(maskW.mainView);
+
+    // Normalize mask to 0-1 range (after blur, max may have shifted)
+    var mMax = maskImg.maximum();
+    if (mMax > 0) {
+      maskW.mainView.beginProcess();
+      for (var y2 = 0; y2 < h; y2++) {
+        for (var x2 = 0; x2 < w; x2++) {
+          maskImg.setSample(maskImg.sample(x2, y2) / mMax, x2, y2);
+        }
+      }
+      maskW.mainView.endProcess();
+    }
+
+    maskW.show();
+
+    // Apply continuous clamp via PixelMath:
+    // clamp_level = min_clamp + (max_clamp - min_clamp) * (1 - smooth_lum)
+    // result = min($T, clamp_level)
+    var PM = new PixelMath;
+    var clampExpr = "min($T, ${minClamp} + ${maxClamp - minClamp} * (1 - " + tmpId + "))";
+    PM.expression = clampExpr;
+    PM.expression1 = clampExpr;
+    PM.expression2 = clampExpr;
+    PM.useSingleExpression = false;
+    PM.use64BitWorkingImage = true;
+    PM.truncate = true;
+    PM.truncateLower = 0;
+    PM.truncateUpper = 1;
+    PM.createNewImage = false;
+    PM.executeOn(src.mainView);
+
+    // Clean up temp mask
+    maskW.forceClose();
+
+    // Report stats
+    var finalImg = src.mainView.image;
+    JSON.stringify({
+      median: finalImg.median(),
+      max: finalImg.maximum(),
+      clampRange: [${minClamp}, ${maxClamp}],
+      blur_sigma: blurSigma
+    });
+  `);
+
+  if (r.status === 'error') {
+    throw new Error('continuousClamp failed: ' + (r.error?.message || 'unknown'));
   }
 
   return JSON.parse(r.outputs?.consoleOutput || '{}');
@@ -293,7 +481,10 @@ export async function createZoneMasks(ctx, viewId, thresholds = {}) {
 
     // Blur masks for smooth transitions
     var conv = new Convolution;
-    conv.mode = 1; // Gaussian
+    conv.mode = Convolution.prototype.Parametric;
+    conv.shape = 2;
+    conv.aspectRatio = 1;
+    conv.rotationAngle = 0;
     conv.sigma = 8;
     conv.executeOn(coreW.mainView);
     conv.sigma = 12;

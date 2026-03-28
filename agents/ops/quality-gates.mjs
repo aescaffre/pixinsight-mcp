@@ -584,7 +584,7 @@ export async function checkCoreBurning(ctx, viewId) {
  * @returns {object} { pass, burntBlockCount, totalBlocks, burntLocations, details }
  */
 export async function scanBurntRegions(ctx, viewId, opts = {}) {
-  const blockSize = opts.blockSize ?? 100;
+  const blockSize = opts.blockSize ?? 50;
   const threshold = opts.threshold ?? 0.93;
   const blockBurntPct = opts.blockBurntPct ?? 3; // % of pixels in block above threshold to consider it burnt
 

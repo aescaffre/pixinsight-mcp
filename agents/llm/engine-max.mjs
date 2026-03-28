@@ -243,29 +243,62 @@ export class MaxAgent {
    * Parse the result text to extract finish/scoring information.
    * Claude Code agents call the `finish` or `submit_scores` MCP tools,
    * and the result text will contain the tool output.
+   *
+   * NOTE: With --output-format json, the `result` field is the assistant's
+   * conversational summary, NOT raw tool outputs. The assistant may paraphrase
+   * the finish tool's output, so we need multiple regex strategies.
    */
   _parseFinishResult(text) {
-    if (!text) return null;
+    if (!text) {
+      this._log('[_parseFinishResult] text is null/undefined — returning null');
+      return null;
+    }
 
-    // Look for finish tool output pattern: "Finished (quality gates PASSED). Best: <view_id>"
-    // Also matches simpler "Finished. Best: <view_id>" form
+    // Debug: log first 800 chars of text being parsed so we can see the format
+    this._log(`[_parseFinishResult] Parsing text (${text.length} chars). First 800: ${text.slice(0, 800).replace(/\n/g, '\\n')}`);
+
+    // Strategy 1: Exact tool output — "Finished (quality gates PASSED). Best: <view_id>"
     const finishMatch = text.match(/Finished\b[^.]*\.\s*Best:\s*(\w+)/);
     if (finishMatch) {
-      const viewId = finishMatch[1];
-      // Extract rationale if present
+      this._log(`[_parseFinishResult] Strategy 1 matched (exact tool output): view_id=${finishMatch[1]}`);
       const rationaleMatch = text.match(/Rationale:\s*(.+?)(?:\n|$)/);
       return {
         type: 'finish',
-        view_id: viewId,
+        view_id: finishMatch[1],
         rationale: rationaleMatch?.[1] || text.slice(0, 500),
       };
     }
 
-    // Look for view_id patterns in various forms
-    const viewMatch = text.match(/view[_\s]?id[:\s]+['"`]?(\w+)/i) ||
-                     text.match(/best result[:\s]+['"`]?(\w+)/i) ||
-                     text.match(/\bfinish\b.*?['"`](\w+)['"`]/i);
+    // Strategy 2: Agent says "Best: VIEW_ID" anywhere (common in summaries)
+    const bestMatch = text.match(/\bBest:\s*[`'"]?(\w+)[`'"]?/i) ||
+                      text.match(/\bbest result[:\s]+[`'"]?(\w+)[`'"]?/i) ||
+                      text.match(/\bwinner[:\s]+[`'"]?(\w+)[`'"]?/i);
+    if (bestMatch) {
+      this._log(`[_parseFinishResult] Strategy 2 matched (Best/winner pattern): view_id=${bestMatch[1]}`);
+      return {
+        type: 'finish',
+        view_id: bestMatch[1],
+        rationale: text.slice(0, 500),
+      };
+    }
+
+    // Strategy 3: Agent mentions "finish" tool with view_id parameter
+    // e.g., "I called finish with view_id COMP_balanced" or "finish(view_id='COMP_balanced')"
+    const finishCallMatch = text.match(/finish\b.*?\bview[_\s]?id[:\s=]+[`'"]*(\w+)/i) ||
+                            text.match(/\bfinish\b.*?[`'"](\w+)[`'"]/i);
+    if (finishCallMatch) {
+      this._log(`[_parseFinishResult] Strategy 3 matched (finish call pattern): view_id=${finishCallMatch[1]}`);
+      return {
+        type: 'finish',
+        view_id: finishCallMatch[1],
+        rationale: text.slice(0, 500),
+      };
+    }
+
+    // Strategy 4: view_id mentioned in various forms
+    const viewMatch = text.match(/view[_\s]?id[:\s]+[`'"]*(\w+)/i);
     if (viewMatch) {
+      this._log(`[_parseFinishResult] Strategy 4 matched (view_id pattern): view_id=${viewMatch[1]}`);
       return {
         type: 'finish',
         view_id: viewMatch[1],
@@ -273,9 +306,35 @@ export class MaxAgent {
       };
     }
 
+    // Strategy 5: Look for "final image/result is VIEW_ID" or "finalized VIEW_ID"
+    const finalMatch = text.match(/\bfinal(?:ized?)?\s+(?:image|result|view|output)\s+(?:is\s+)?[`'"]*(\w+)[`'"]?/i) ||
+                       text.match(/\bfinalized?\s+[`'"]?(\w+)[`'"]?/i);
+    if (finalMatch) {
+      this._log(`[_parseFinishResult] Strategy 5 matched (finalized pattern): view_id=${finalMatch[1]}`);
+      return {
+        type: 'finish',
+        view_id: finalMatch[1],
+        rationale: text.slice(0, 500),
+      };
+    }
+
+    // Strategy 6: Look for COMP_ or FINAL_ prefixed view names (common naming convention)
+    const compMatch = text.match(/\b(COMP_\w+)\b/) ||
+                      text.match(/\b(FINAL_\w+)\b/) ||
+                      text.match(/\b([A-Za-z]\w*_FINAL)\b/);
+    if (compMatch) {
+      this._log(`[_parseFinishResult] Strategy 6 matched (COMP_/FINAL_ naming): view_id=${compMatch[1]}`);
+      return {
+        type: 'finish',
+        view_id: compMatch[1],
+        rationale: text.slice(0, 500),
+      };
+    }
+
     // Look for submit_scores output (critic agents)
     const verdictMatch = text.match(/Verdict:\s*(accept|reject)/i);
     if (verdictMatch) {
+      this._log(`[_parseFinishResult] Matched verdict: ${verdictMatch[1]}`);
       const feedbackMatch = text.match(/feedback[:\s]+['"]*(.+?)['"]*(?:\n|$)/i);
       return {
         type: 'scores',
@@ -284,22 +343,13 @@ export class MaxAgent {
       };
     }
 
-    // Fallback: return raw text
+    // Fallback: no pattern matched
+    this._log(`[_parseFinishResult] No pattern matched — returning null view_id. Last 300 chars: ${text.slice(-300).replace(/\n/g, '\\n')}`);
     return {
       type: 'finish',
-      view_id: this._extractViewId(text),
+      view_id: null,
       rationale: text.slice(0, 500),
     };
-  }
-
-  /**
-   * Try to extract a PixInsight view ID from the result text.
-   */
-  _extractViewId(text) {
-    const match = text.match(/view[_\s]?id[:\s]+['"`]?(\w+)/i) ||
-                  text.match(/finish.*['"`](\w+)['"`]/i) ||
-                  text.match(/best result[:\s]+['"`]?(\w+)/i);
-    return match?.[1] || null;
   }
 
   getTranscript() { return []; }

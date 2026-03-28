@@ -138,18 +138,18 @@ Stars must be small, colorful, and natural — not white blobs or invisible dots
 
 ### 3. NO BURNT REGIONS — ZERO TOLERANCE
 No extended region of the image may lose detail. Not cores, not bright nebula, nothing.
-The burn scan uses **100×100px blocks** — large enough that individual stars (PSF < 10px) can't false-positive.
+The burn scan uses **50×50px blocks** — catches smaller over-bright patches while stars (PSF < 10px) rarely false-positive.
 Only EXTENDED burnt regions trigger this gate.
 
 - Use \`scan_burnt_regions\` after EVERY stretch, HDRMT, LHE, curves, Ha injection, and L enhancement
-- **Gate: ZERO burnt blocks. Even ONE 100×100 block with >3% pixels above 0.93 = FAIL.**
+- **Gate: ZERO burnt blocks. Even ONE 50×50 block with >3% pixels above 0.93 = FAIL.**
 - This is absolute. You cannot finish with any burnt extended region anywhere in the image.
 - Previous v3-v11 ALL had burnt cores because the old gate allowed 1% of blocks — for small subjects that meant 100% of the core could burn and still pass. Now it cannot.
-- If burning detected: apply \`min($T, 0.80)\` through a luminance mask on the bright region, or reduce processing strength.
+- If burning detected: use \`continuous_clamp\` (min_clamp=0.80, max_clamp=0.95) for smooth brightness limiting, or reduce processing strength.
 - Seti stretch headroom=0.10 for L channel. For planetary nebulae: L stretch 0.25 max.
-- **Apply TWO hard clamps — one BEFORE star blend AND one AFTER:**
-  1. Pre-star: \`min($T, 0.85)\` globally after all LHE/curves/L-enhancement
-  2. Post-star: \`min($T, 0.88)\` through CORE MASK (not global — don't dim background stars)
+- **Apply TWO continuous clamps — one BEFORE star blend AND one AFTER:**
+  1. Pre-star: \`continuous_clamp\` (min_clamp=0.80, max_clamp=0.95) after all LHE/curves/L-enhancement
+  2. Post-star: \`continuous_clamp\` (min_clamp=0.83, max_clamp=0.92) — tighter to catch screen blend push-back
   Run \`scan_burnt_regions\` AFTER EACH clamp to verify zero burnt blocks before proceeding.
 
 ### 4. NO OVER-DENOISING — this is critical
@@ -188,7 +188,7 @@ A burnt branch will contaminate every composition that uses it.
 Additional gates:
 1. After star reintegration: \`check_star_quality\`
 2. Compare candidates: \`check_sharpness\`
-3. **After star blend: apply \`min($T, 0.88)\` through a CORE MASK** (luminance mask, clipLow=0.15-0.25, blur=8-12). Do NOT clamp globally (dims background stars). Screen blend pushes clamped values back above limits — this post-star clamp is the absolute last pixel-modifying step.
+3. **After star blend: use \`continuous_clamp\` (min_clamp=0.83, max_clamp=0.92)** — smoothly re-clamps bright areas pushed back by screen blend, without dimming background stars. This is the absolute last pixel-modifying step.
 4. Only call \`finish\` when all gates would pass
 
 # ======================================================================
@@ -354,6 +354,7 @@ the B channel captures significant OIII signal. Use the narrowband tools for ric
 
 This approach replaces separate ha_inject_red + ha_inject_luminance calls with a single unified blend.
 The dynamic formula gives you natural zone separation that manual injection cannot match.
+The blend is automatically masked to protect the background from blue contamination. If background still shows color cast after blend, run run_background_neutralization.
 ` : `
 **TWO-STAGE saturation:**
 1. **Global S-curve**: S channel [[0,0],[0.50,midpoint],[1,1]] with midpoint from 0.65 → 0.75 → 0.85
@@ -470,48 +471,45 @@ The contrast gate is relaxed to 2× for PNe (from 3×) specifically to allow hal
 3. The halo-lifted background must survive into the final image — if it disappears, REJECT the composition
 4. Use zone masks to maintain core/shell contrast while keeping the lifted halo
 
-**ZONE-BASED HDR COMPOSITION — MANDATORY FOR PNe:**
+**CONTINUOUS CLAMP + GLOBAL HDRMT — MANDATORY FOR PNe:**
 The core and halo have fundamentally conflicting requirements. Brightening for halo burns the core.
-Clamping for core kills the halo. The ONLY solution is zone-based processing.
+Clamping for core kills the halo. Use continuous clamping + zone masks for LHE targeting (NOT clamping).
 
 After initial composition, BEFORE stars:
-1. \`create_zone_masks\` to get core/shell/halo masks (tune thresholds to your image)
-2. **GLOBAL inverted HDRMT** (UNMASKED — do NOT apply through zone masks):
+1. **GLOBAL inverted HDRMT** (UNMASKED):
    - Apply \`run_hdrmt\` (inverted=true, layers=4, iterations=1) GLOBALLY — no mask
-   - MILD settings only: 4 layers, 1 iteration. This gently compresses bright core structure without flattening faint halo/shell
-   - **WHY unmasked**: zone mask blur sigma (8-20px) is too small for HDRMT spatial processing, creating visible boundary artifacts at mask edges. HDRMT must see the full image to work correctly.
+   - MILD settings only: 4 layers, 1 iteration. Gently compresses bright core structure without flattening faint halo/shell
    - Verify with \`check_ringing\` — if oscillations detected, reduce to 3 layers
-3. **CORE zone** (the bright center that tends to burn):
-   - Apply brightness clamping ONLY: \`run_pixelmath\` \`min($T, 0.80)\` through core mask
-   - Clamping through masks is artifact-free (it's just a pixel value limit, no spatial processing)
-   - This is the KEY step that prevents the blown white core from v7-v8
-4. **SHELL zone** (main nebula body):
-   - Strongest LHE for internal structure (knots, filaments, the "red X")
-   - Clamp to \`min($T, 0.85)\` through shell mask
-5. **HALO zone** (faint outer envelope — #1 PRIORITY):
-   - Shadow-lift curves through halo mask: [[0,0],[0.03,0.08],[0.06,0.15],[0.10,0.20],[0.50,0.52],[1,1]]
-   - NO clamp — the halo is faint, it won't burn
-   - Push until the outer shell is OBVIOUSLY visible to a casual viewer
-6. Remove all zone masks, verify with \`scan_burnt_regions\` (gate: 0.93 threshold)
-7. Blend stars (see step 8 below)
-8. **POST-STAR-BLEND CLAMP (MANDATORY — absolute last processing step):**
+2. **CONTINUOUS CLAMP** (replaces discrete zone clamping):
+   - Use \`continuous_clamp\` (min_clamp=0.80, max_clamp=0.95) — this smoothly varies the clamp level from 0.80 at the brightest core to 0.95 at faint regions, with ZERO boundary artifacts
+   - One tool call replaces three zone mask operations
+   - The function creates a luminance mask with large blur (sigma=60-100px proportional to image size), then applies: \`min($T, min_clamp + (max_clamp - min_clamp) * (1 - smooth_lum))\`
+   - Perfectly smooth transitions: core clamped hard, shell clamped moderately, background barely touched
+   - This is the KEY step that prevents the blown white core from v7-v8 WITHOUT the dark rim artifacts from v12
+3. **ZONE MASKS for LHE targeting** (NOT for clamping):
+   - \`create_zone_masks\` — use these ONLY for applying different LHE strengths per zone
+   - Shell zone: strongest LHE for internal structure (knots, filaments, the "red X")
+   - Halo zone: shadow-lift curves: [[0,0],[0.03,0.08],[0.06,0.15],[0.10,0.20],[0.50,0.52],[1,1]]
+   - Push halo until the outer shell is OBVIOUSLY visible to a casual viewer
+   - Do NOT use zone masks for brightness clamping — use continuous_clamp instead
+4. Remove all zone masks, verify with \`scan_burnt_regions\` (gate: 0.93 threshold)
+5. Blend stars
+6. **POST-STAR CONTINUOUS CLAMP (MANDATORY — absolute last processing step):**
    - Screen blend pushes clamped values back above limits. You MUST clamp AFTER stars.
-   - Create a CORE MASK (luminance mask, clipLow=0.15-0.25, blur=8-12) — do NOT clamp globally (that dims stars in background)
-   - Apply \`run_pixelmath\` \`min($T, 0.88)\` through the core mask
-   - Remove core mask
+   - Use \`continuous_clamp\` (min_clamp=0.83, max_clamp=0.92) — slightly tighter to catch screen blend push-back
+   - This smoothly re-clamps only the bright areas that screen blend pushed back up, without dimming background stars
    - This is the ABSOLUTE LAST step before save_variant/finish — nothing else modifies pixels after this
-   - Alternative: blend stars through an inverted core mask (stars only appear outside the core). This avoids the re-clamp but is harder to tune.
 
-**Why this works:** Global HDRMT compresses dynamic range everywhere (no mask boundary artifacts). Zone masks are used ONLY for brightness clamping (pixel value limits), which is inherently artifact-free because it has no spatial component. Post-star clamp catches the screen blend push-back.
+**Why this works:** Global HDRMT compresses dynamic range everywhere (no mask boundary artifacts). Continuous clamp uses a single heavily-blurred luminance mask — perfectly smooth gradient from core to background, zero boundary artifacts. Zone masks are used ONLY for LHE targeting where boundary artifacts are acceptable at the spatial scale of LHE processing.
 
-**Key principle:** Spatial processing (HDRMT, LHE) = NEVER through small-blur masks. Value clamping (min/max) = safe through any mask.
+**Key principle:** Spatial processing (HDRMT, LHE) = NEVER through small-blur masks (but OK through zone masks for LHE since LHE is itself spatial). Value clamping = ALWAYS use continuous_clamp (never discrete zone masks — they create dark rim artifacts).
 
 **Previous failures:**
-- v7: core burnt to 0.997 (no per-zone clamp)
+- v7: core burnt to 0.997 (no clamping at all)
 - v8: global 0.85 clamp made everything dim (halo killed)
-- v9: 0.90 burn threshold too aggressive (agent over-corrected globally)
-- v10: HDRMT through core zone mask created visible boundary rings at mask edge (blur sigma too small for spatial processing)
-- v11: clamped before stars, but screen blend pushed core back to 0.94 (no post-star clamp)
+- v10: HDRMT through core zone mask created visible boundary rings
+- v11: clamped before stars, but screen blend pushed core back to 0.94
+- v12: discrete zone-mask clamping (core/shell/halo with blur 8/12/20px) created visible dark rims at zone boundaries
 
 **Halo visibility check:** After composition, verify with measure_subject_detail that subject coverage is > 5%.
 If the halo is invisible (coverage < 3%), the shadow-lift was too weak or got crushed — push harder.
@@ -538,9 +536,8 @@ ${hasL ? '1. Match RGB brightness to L (curves if needed), then lrgb_combine (FI
 3. Apply IFN shadow-lift if applicable (through inverted mask for faint structure)
 4. Apply saturation
 5. star_screen_blend with branch D winner
-6. **POST-STAR CLAMP** (MANDATORY): Screen blend pushes clamped pixels back above limits.
-   Apply \`min($T, 0.88)\` through a CORE MASK (luminance mask, clipLow=0.15-0.25, blur=8-12).
-   Do NOT clamp globally — that dims stars in the background. Only clamp the bright subject core.
+6. **POST-STAR CONTINUOUS CLAMP** (MANDATORY): Screen blend pushes clamped pixels back above limits.
+   Use \`continuous_clamp\` (min_clamp=0.83, max_clamp=0.92) — smoothly re-clamps bright areas without dimming background stars.
    This is the ABSOLUTE LAST pixel-modifying step before save_variant/finish.
 7. measure_subject_detail — verify brightness > 0.25, contrast > 3×
 8. save_variant
@@ -549,8 +546,25 @@ ${hasL ? '1. Match RGB brightness to L (curves if needed), then lrgb_combine (FI
 # PHASE 6 — COMPOSITION CRITIC PASS
 # ======================================================================
 
+## VISUAL COMPARISON — MANDATORY (metrics lie, eyes do not)
+
+After generating ALL COMP variants, you MUST visually compare them:
+
+1. Call \`save_and_show_preview\` on EACH composition candidate. View EVERY preview image with the Read tool.
+2. **LOOK at the previews** — do not skip this. Metrics (median, max, detail score) frequently rank a bad image higher than a good one because they measure aggregate statistics, not perceptual quality.
+3. Check EACH preview specifically for:
+   - "Is the core a featureless white/gray blob, or can I see internal structure (dust lanes, knots, arms)?"
+   - "Is there a visible dark rim or halo artifact around the subject?" (mask boundary artifact from LHE/HDRMT)
+   - "Are the colors vivid and natural, or washed/muddy?"
+   - "Is the background smooth and neutral, or does it have gradients/color casts?"
+   - "Are faint structures (IFN, outer halos, tidal tails) actually visible to my eyes?"
+4. **Visual assessment OVERRIDES metric-based ranking.** If a composition scores well on metrics but LOOKS bad visually (flat core, mask artifacts, washed colors, invisible faint structure), REJECT it regardless of scores.
+5. Pick the one that LOOKS best to your trained eye, THEN verify it passes the quality gates.
+
+## Metric evaluation (secondary to visual)
+
 Judge compositions. Identify:
-- Final winner
+- Final winner (the one that LOOKS best AND passes gates)
 - Boundary candidate that's too far
 - Main remaining imperfection
 - Whether one final narrow refinement is justified
@@ -565,6 +579,18 @@ REJECT compositions that undo branch work:
 # ======================================================================
 
 Style target: **near-edge but credible**
+
+## VISUAL CONFIRMATION — FINAL CHECK
+
+Before making your art director decision:
+1. \`save_and_show_preview\` on your top 2 candidates side by side (label them clearly)
+2. View both previews with the Read tool. Ask yourself:
+   - "Would I be proud to submit this to an astrophotography competition?"
+   - "Does the subject have DEPTH — multiple layers of detail, not just a bright blob?"
+   - "Do the colors tell a story (emission zones, reflection, thermal gradients)?"
+   - "Is there anything that looks artificial or processed (halos, ringing, plastic smoothness)?"
+3. If the image looks artificial or flat despite good metrics, it IS artificial or flat. Trust your eyes.
+4. The art director picks the image that makes you FEEL something, not the one with the best numbers.
 
 Priority (unless brief overrides):
 1. Obvious faint structure when present in data
