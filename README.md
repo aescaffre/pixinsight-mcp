@@ -4,6 +4,8 @@ An autonomous deep sky astrophotography processing pipeline that uses Claude (vi
 
 **Status**: Work in progress. Actively developed and used for production processing.
 
+> **Note on `scripts/run-pipeline.mjs`**: The original fully-scripted pipeline in `scripts/run-pipeline.mjs` was the first approach — a deterministic, config-driven processing chain with no LLM involvement. It is now **superseded by the GIGA agentic pipeline** (`agents/llm/giga-run.mjs`) which uses Claude as a creative processing director. The scripted pipeline remains in the repo for reference but is no longer actively maintained. All new development targets the agentic architecture.
+
 ---
 
 ## What It Does
@@ -81,7 +83,7 @@ The creative agent runs via `claude -p` subprocess (`agents/llm/engine-max.mjs`)
 
 ## The Tool Inventory
 
-53 tools organized into categories (`agents/llm/tools.mjs`):
+60 tools organized into categories (`agents/llm/tools.mjs`):
 
 | Category | Tools | Purpose |
 |----------|-------|---------|
@@ -96,9 +98,10 @@ The creative agent runs via `claude -p` subprocess (`agents/llm/engine-max.mjs`)
 | detail | run_lhe, run_hdrmt | LocalHistogramEqualization, HDRMultiscaleTransform |
 | curves | run_curves, run_pixelmath | Tonal and color adjustments, arbitrary expressions |
 | lrgb | lrgb_combine | Luminance-RGB combination with LinearFit |
-| ha_injection | ha_inject_red, ha_inject_luminance | Narrowband Ha blending into RGB |
+| ha_injection | ha_inject_red, ha_inject_luminance | Narrowband Ha blending into RGB (soft-clamp prevents burning) |
+| narrowband | extract_pseudo_oiii, continuum_subtract_ha, dynamic_narrowband_blend, create_synthetic_luminance, create_zone_masks | Emission-line extraction from broadband, dual-zone color, zone-based HDR |
 | stars | star_screen_blend | Star reintegration via screen blend |
-| quality_gate | check_star_quality, check_ringing, check_core_burning, check_sharpness | Automated pixel-level quality checks |
+| quality_gate | check_star_quality, check_ringing, check_core_burning, check_sharpness, scan_burnt_regions | Zero-tolerance burn scan (100×100 blocks), star quality, ringing detection |
 | memory | recall_memory, save_memory | Hierarchical knowledge store access |
 | scoring | compute_scores, submit_scores | Multi-dimensional image scoring (8 dimensions) |
 | control | save_variant, list_variants, load_variant, finish | Candidate management and workflow control |
@@ -111,9 +114,10 @@ The creative agent runs via `claude -p` subprocess (`agents/llm/engine-max.mjs`)
 
 Quality gates (`agents/ops/quality-gates.mjs`) execute actual PJSR pixel analysis inside PixInsight -- they are not prompt suggestions that the agent might ignore. The `finish` tool runs all gates automatically; the agent cannot complete processing until every gate passes.
 
-- **Ringing detection**: Scans bright cores for concentric oscillation patterns caused by HDRMT or aggressive sharpening. Zero oscillations allowed. Any oscillation = immediate fail.
+- **Zero-tolerance burn scan**: Tiles the image in 100×100px blocks (large enough that individual stars can't false-positive). If ANY block has >3% pixels above 0.93 luminance, the image fails. Zero burnt blocks allowed — the agent literally cannot finish with a blown-out core, regardless of how small the subject is relative to the frame. Every brightness-modifying tool also reports inline burn warnings (`⚠️ BURN WARNING: max=X`).
 - **Star quality**: Detects stars via local-maximum scanning on a 16px grid, refines positions in 5x5 windows, measures FWHM via half-maximum radius in 4 directions (must be < 6px), and color diversity via normalized channel spread (must be > 0.05). Minimum 50 detected stars required.
-- **Core burning**: Measures the percentage of core pixels exceeding 0.98 intensity. Less than 2% allowed.
+- **Subject metrics**: Subject brightness ≥ 0.25 (hard gate), contrast ratio ≥ 2× for PNe / 3× for others, detail score ≥ 0.001.
+- **Ringing detection**: Radial brightness profile around brightest region, counts derivative sign changes.
 - **Over-denoising**: NXT denoise values above 0.25 are flagged; the prompt enforces a 0.15 maximum for final passes.
 
 ### Target Taxonomy and Classifier
