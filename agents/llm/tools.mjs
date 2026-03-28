@@ -14,9 +14,24 @@ import {
   checkStarQuality, checkRinging, checkSharpness, checkCoreBurning, scanBurntRegions,
   measureSubjectDetail,
   multiScaleEnhance,
+  extractPseudoOIII, continuumSubtractHa, dynamicNarrowbandBlend, createSyntheticLuminance, createZoneMasks,
 } from '../ops/index.mjs';
 import { checkHardConstraints, statsToScores, computeAggregate } from '../scoring.mjs';
 import { jpegToContentBlock } from './vision.mjs';
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/** Format stats with burn warning if max > 0.90 */
+function statsLine(stats, label = 'Stats') {
+  const med = stats.median?.toFixed(6) ?? '?';
+  const max = (stats.max ?? 0).toFixed(4);
+  let warn = '';
+  if (stats.max > 0.93) warn = ' ⚠️ BURN WARNING: max=' + max + ' exceeds 0.93 — apply zone-based clamping (core: min($T,0.80), shell: min($T,0.85) through masks).';
+  else if (stats.max > 0.88) warn = ' ⚡ max=' + max + ' approaching burn threshold (0.93). Use zone masks to clamp core/shell independently.';
+  return `${label}: median=${med}, max=${max}${warn}`;
+}
 
 // ============================================================================
 // Tool definition catalog
@@ -781,7 +796,7 @@ const TOOL_CATALOG = {
         P.executeOn(ImageWindow.windowById('${input.view_id}').mainView);
       `);
       const stats = await getStats(ctx, input.view_id);
-      return { type: 'text', text: `LHE complete (r=${input.radius}, a=${input.amount}). Stats: median=${stats.median.toFixed(6)}, max=${(stats.max ?? 0).toFixed(4)}` };
+      return { type: 'text', text: `LHE complete (r=${input.radius}, a=${input.amount}). ${statsLine(stats)}` };
     }
   },
 
@@ -834,7 +849,7 @@ const TOOL_CATALOG = {
         P.executeOn(ImageWindow.windowById('${input.view_id}').mainView);
       `);
       const stats = await getStats(ctx, input.view_id);
-      return { type: 'text', text: `HDRMT complete (layers=${input.layers}, inverted=${inverted}). Stats: median=${stats.median.toFixed(6)}, max=${(stats.max ?? 0).toFixed(4)}` };
+      return { type: 'text', text: `HDRMT complete (layers=${input.layers}, inverted=${inverted}). ${statsLine(stats)}` };
     }
   },
 
@@ -956,7 +971,7 @@ const TOOL_CATALOG = {
         P.executeOn(ImageWindow.windowById('${input.view_id}').mainView);
       `);
       const stats = await getStats(ctx, input.view_id);
-      return { type: 'text', text: `Curves (${input.channel}) applied. Stats: median=${stats.median.toFixed(6)}, max=${(stats.max ?? 0).toFixed(4)}` };
+      return { type: 'text', text: `Curves (${input.channel}) applied. ${statsLine(stats)}` };
     }
   },
 
@@ -989,7 +1004,7 @@ const TOOL_CATALOG = {
         P.executeOn(ImageWindow.windowById('${input.view_id}').mainView);
       `);
       const stats = await getStats(ctx, input.view_id);
-      return { type: 'text', text: `PixelMath applied. Stats: median=${stats.median.toFixed(6)}, max=${(stats.max ?? 0).toFixed(4)}` };
+      return { type: 'text', text: `PixelMath applied. ${statsLine(stats)}` };
     }
   },
 
@@ -1204,7 +1219,7 @@ const TOOL_CATALOG = {
       }
 
       const stats = await getStats(ctx, input.rgb_id);
-      return { type: 'text', text: `LRGB combined via ${method} (lightness=${lightness}, saturation=${saturation}). Stats: median=${stats.median.toFixed(6)}, max=${(stats.max ?? 0).toFixed(4)}` };
+      return { type: 'text', text: `LRGB combined via ${method} (lightness=${lightness}, saturation=${saturation}). ${statsLine(stats)}` };
     }
   },
 
@@ -1220,7 +1235,8 @@ const TOOL_CATALOG = {
           target_id: { type: 'string', description: 'Target RGB view ID' },
           ha_id: { type: 'string', description: 'Ha view ID (must be same dimensions, stretched to similar range)' },
           strength: { type: 'number', description: 'Ha injection strength (0.0-1.0, recommend 0.20-0.40)' },
-          brightness_limit: { type: 'number', description: 'Only inject where Ha exceeds this fraction of red channel (0.0-0.50, default 0.25)' }
+          brightness_limit: { type: 'number', description: 'Only inject where Ha exceeds this fraction of red channel (0.0-0.50, default 0.25)' },
+          max_output: { type: 'number', description: 'Soft-clamp R channel output. Values above this are compressed with 20% rolloff to prevent burnt Ha spots. Default 0.85. Range 0.70-0.95.' }
         },
         required: ['target_id', 'ha_id', 'strength']
       }
@@ -1228,10 +1244,17 @@ const TOOL_CATALOG = {
     handler: async (ctx, _store, _brief, input) => {
       const str = input.strength ?? 0.30;
       const limit = input.brightness_limit ?? 0.25;
-      // Conditional R-channel boost: add Ha where it exceeds R by limit fraction
+      const maxOut = input.max_output ?? 0.85;
+      // Conditional R-channel boost with soft-clamp: add Ha where it exceeds R by limit fraction,
+      // then compress values above maxOut with a soft knee to prevent burnt Ha spots.
+      // PixelMath: compute raw injection, then apply soft-clamp inline (no variables in PM expressions).
+      // Soft-clamp: iif(raw > maxOut, maxOut + (raw - maxOut) * 0.20, raw)
+      // We duplicate the raw expression in the outer iif — verbose but correct for PM.
+      const rawExpr = `iif(${input.ha_id} > ${input.target_id}[0] * (1 + ${limit}), ${input.target_id}[0] + ${str} * (${input.ha_id} - ${input.target_id}[0]), ${input.target_id}[0])`;
+      const clampedExpr = `iif(${rawExpr} > ${maxOut}, ${maxOut} + (${rawExpr} - ${maxOut}) * 0.20, ${rawExpr})`;
       await ctx.pjsr(`
         var PM = new PixelMath;
-        PM.expression = "iif(${input.ha_id} > ${input.target_id}[0] * (1 + ${limit}), ${input.target_id}[0] + ${str} * (${input.ha_id} - ${input.target_id}[0]), ${input.target_id}[0])";
+        PM.expression = "${clampedExpr.replace(/"/g, '\\"')}";
         PM.expression1 = "${input.target_id}[1]";
         PM.expression2 = "${input.target_id}[2]";
         PM.useSingleExpression = false;
@@ -1241,7 +1264,21 @@ const TOOL_CATALOG = {
         PM.executeOn(ImageWindow.windowById('${input.target_id}').mainView);
       `);
       const stats = await getStats(ctx, input.target_id);
-      return { type: 'text', text: `Ha injected into red channel (strength=${str}, limit=${limit}). Stats: median=${stats.median.toFixed(6)}` };
+      // Check per-channel max to warn about potential burning
+      const chStats = await ctx.pjsr(`
+        var w = ImageWindow.windowById('${input.target_id}');
+        var img = w.mainView.image;
+        img.selectedChannel = 0; var rMax = img.maximum();
+        img.resetChannelSelection();
+        JSON.stringify({ rMax: rMax });
+      `);
+      let rMaxInfo = '';
+      try {
+        const ch = JSON.parse(chStats.outputs?.consoleOutput || '{}');
+        rMaxInfo = ` R_max=${ch.rMax?.toFixed(4) || 'N/A'}`;
+        if (ch.rMax > 0.92) rMaxInfo += ' ⚠️ R channel near clipping — reduce Ha strength or max_output';
+      } catch {}
+      return { type: 'text', text: `Ha injected into red channel (strength=${str}, limit=${limit}, max_output=${maxOut}).${rMaxInfo} ${statsLine(stats)}` };
     }
   },
 
@@ -1273,6 +1310,131 @@ const TOOL_CATALOG = {
         PM.executeOn(ImageWindow.windowById('${input.target_id}').mainView);
       `);
       return { type: 'text', text: `Ha luminance blended (strength=${str})` };
+    }
+  },
+
+  // --- Narrowband Enhancement ---
+  extract_pseudo_oiii: {
+    category: 'narrowband',
+    definition: {
+      name: 'extract_pseudo_oiii',
+      description: 'Extract pseudo-OIII emission from B channel by subtracting scaled R continuum. Creates a mono view of OIII signal. For emission objects (PNe, HII regions) where OIII data is in the broadband B filter. Use with dynamic_narrowband_blend for rich dual-zone color.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          rgb_id: { type: 'string', description: 'Source RGB view ID' },
+          continuum_factor: { type: 'number', description: 'R scaling factor for continuum (0.10-0.50, default 0.25). Higher = more aggressive continuum removal.' },
+          output_id: { type: 'string', description: 'Output view ID (default: OIII_pseudo)' }
+        },
+        required: ['rgb_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const result = await extractPseudoOIII(ctx, input.rgb_id, input.continuum_factor ?? 0.25, input.output_id ?? 'OIII_pseudo');
+      return { type: 'text', text: `Pseudo-OIII extracted: ${result.viewId} (median=${result.median?.toFixed(6)}, max=${result.max?.toFixed(4)})` };
+    }
+  },
+
+  continuum_subtract_ha: {
+    category: 'narrowband',
+    definition: {
+      name: 'continuum_subtract_ha',
+      description: 'Remove broadband continuum from Ha to isolate pure emission. Ha_pure = max(0, Ha - factor*R). Reduces star contamination and sharpens emission structures. Apply BEFORE Ha injection for cleaner results.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          ha_id: { type: 'string', description: 'Ha view ID (mono)' },
+          rgb_id: { type: 'string', description: 'RGB view ID (for R channel continuum reference)' },
+          continuum_factor: { type: 'number', description: 'Scaling factor (0.20-0.40, default 0.28). Test in 0.02 increments.' }
+        },
+        required: ['ha_id', 'rgb_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const result = await continuumSubtractHa(ctx, input.ha_id, input.rgb_id, input.continuum_factor ?? 0.28);
+      return { type: 'text', text: `Ha continuum-subtracted (factor=${input.continuum_factor ?? 0.28}). median=${result.median?.toFixed(6)}, max=${result.max?.toFixed(4)}` };
+    }
+  },
+
+  dynamic_narrowband_blend: {
+    category: 'narrowband',
+    definition: {
+      name: 'dynamic_narrowband_blend',
+      description: 'Inject Ha and OIII (real or pseudo) into RGB using dynamic weighting formula. Creates natural dual-zone color: Ha-dominant regions become red/pink, OIII-dominant regions become teal/blue, with smooth transitions. The community-proven formula f=(OIII*Ha)^(1-OIII*Ha) weights the green channel dynamically. Includes soft-clamp to prevent burning.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          target_id: { type: 'string', description: 'Target RGB view ID (modified in place)' },
+          ha_id: { type: 'string', description: 'Ha view ID (mono)' },
+          oiii_id: { type: 'string', description: 'OIII view ID (real or pseudo, mono)' },
+          ha_strength: { type: 'number', description: 'Ha injection into R (0.10-0.50, default 0.35)' },
+          oiii_strength: { type: 'number', description: 'OIII injection into B (0.10-0.60, default 0.40)' },
+          g_strength: { type: 'number', description: 'OIII contribution to G (0.10-0.40, default 0.30)' },
+          max_output: { type: 'number', description: 'Soft-clamp per channel (0.80-0.95, default 0.90)' }
+        },
+        required: ['target_id', 'ha_id', 'oiii_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const result = await dynamicNarrowbandBlend(ctx, input.target_id, input.ha_id, input.oiii_id, {
+        ha_strength: input.ha_strength,
+        oiii_strength: input.oiii_strength,
+        g_strength: input.g_strength,
+        max_output: input.max_output
+      });
+      let warn = '';
+      if (result.rMax > 0.92) warn += ' ⚠️ R hot';
+      if (result.bMax > 0.92) warn += ' ⚠️ B hot';
+      return { type: 'text', text: `Narrowband blend applied. median=${result.median?.toFixed(6)}, R_max=${result.rMax?.toFixed(4)}, B_max=${result.bMax?.toFixed(4)}${warn}` };
+    }
+  },
+
+  create_synthetic_luminance: {
+    category: 'narrowband',
+    definition: {
+      name: 'create_synthetic_luminance',
+      description: 'Create synthetic luminance from Ha + OIII blend. For emission objects, this gives better nebula contrast than broadband L. Creates a new mono view. Use as L source for PixelMath L enhancement.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          ha_id: { type: 'string', description: 'Ha view ID (mono)' },
+          oiii_id: { type: 'string', description: 'OIII view ID (real or pseudo, mono)' },
+          ha_weight: { type: 'number', description: 'Ha contribution (0.0-1.0, default 0.50)' },
+          oiii_weight: { type: 'number', description: 'OIII contribution (0.0-1.0, default 0.50)' },
+          output_id: { type: 'string', description: 'Output view ID (default: SYNTH_L)' }
+        },
+        required: ['ha_id', 'oiii_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const result = await createSyntheticLuminance(ctx, input.ha_id, input.oiii_id, input.ha_weight ?? 0.50, input.oiii_weight ?? 0.50, input.output_id ?? 'SYNTH_L');
+      return { type: 'text', text: `Synthetic luminance: ${result.viewId} (median=${result.median?.toFixed(6)}, max=${result.max?.toFixed(4)})` };
+    }
+  },
+
+  create_zone_masks: {
+    category: 'narrowband',
+    definition: {
+      name: 'create_zone_masks',
+      description: 'Create 3-zone masks for planetary nebulae: core (bright center), shell (main nebula body), halo (faint outer structure). Each zone gets a separate Gaussian-blurred mask for independent processing. Apply LHE with different amounts per zone, or enhance halo independently.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'Source view to derive masks from' },
+          core_clip: { type: 'number', description: 'Core threshold (default 0.40)' },
+          shell_clip: { type: 'number', description: 'Shell threshold (default 0.15)' },
+          halo_clip: { type: 'number', description: 'Halo threshold (default 0.04)' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const result = await createZoneMasks(ctx, input.view_id, {
+        core_clip: input.core_clip,
+        shell_clip: input.shell_clip,
+        halo_clip: input.halo_clip
+      });
+      return { type: 'text', text: `Zone masks created: ${result.coreId} (>${result.thresholds.core}), ${result.shellId} (${result.thresholds.shell}-${result.thresholds.core}), ${result.haloId} (${result.thresholds.halo}-${result.thresholds.shell})` };
     }
   },
 
@@ -1370,7 +1532,7 @@ const TOOL_CATALOG = {
         required: ['view_id', 'rationale']
       }
     },
-    handler: async (ctx, _store, _brief, input) => {
+    handler: async (ctx, _store, brief, input) => {
       const stats = await getStats(ctx, input.view_id);
 
       // === QUALITY GATE ENFORCEMENT ===
@@ -1378,11 +1540,11 @@ const TOOL_CATALOG = {
       const failures = [];
       const warnings = [];
 
-      // Gate 1: Star quality (FWHM + color)
+      // Gate 1: Star quality (FWHM + color) — non-blocking (native PSF can exceed 6px)
       try {
         const starResult = await checkStarQuality(ctx, input.view_id);
         if (!starResult.pass) {
-          failures.push(`STAR QUALITY GATE FAILED: ${starResult.details}`);
+          warnings.push(`STAR QUALITY WARNING: ${starResult.details}`);
         }
       } catch (e) {
         // If star check errors out (e.g. no stars in starless image), skip gracefully
@@ -1410,19 +1572,73 @@ const TOOL_CATALOG = {
         // Non-blocking if check fails
       }
 
-      // Gate 4: Subject detail (soft gate — warns strongly but doesn't block)
+      // Gate 4: Subject detail — HARD GATE for brightness and contrast
       try {
         const detailResult = await measureSubjectDetail(ctx, input.view_id);
-        if (detailResult.subjectBrightness < 0.15) {
-          failures.push(`SUBJECT TOO DIM: brightness=${detailResult.subjectBrightness.toFixed(3)} (minimum: 0.15). Subjects are barely visible — stretch harder, boost through masks, or increase LRGB lightness.`);
-        } else if (detailResult.subjectBrightness < 0.20) {
-          warnings.push(`Subjects still dim (brightness=${detailResult.subjectBrightness.toFixed(3)}, goal: >0.25). Consider pushing harder.`);
+        if (detailResult.subjectBrightness < 0.25) {
+          failures.push(`SUBJECT TOO DIM: brightness=${detailResult.subjectBrightness.toFixed(3)} (minimum: 0.25). Subjects must be clearly visible and impactful. Stretch harder, apply shadow-lifting curves, boost through masks. For PNe: outer halo must be visible.`);
+        } else if (detailResult.subjectBrightness < 0.30) {
+          warnings.push(`Subjects could be brighter (brightness=${detailResult.subjectBrightness.toFixed(3)}, goal: >0.35). Consider shadow-lift curves or masked brightness boost.`);
         }
-        if (detailResult.contrastRatio < 2.0) {
-          failures.push(`CONTRAST TOO LOW: ratio=${detailResult.contrastRatio.toFixed(1)}× (minimum: 2×). Subjects don't separate from background. Use masked curves/LHE to boost subjects selectively.`);
+        // Contrast gate: adaptive for targets with faint outer structure (PNe, IFN)
+        // Halo visibility requires brighter background which inherently lowers contrast
+        const contrastGate = brief?.target?.fieldCharacteristics?.faintStructureGoal === 'outer_halo' ? 2.0 : 3.0;
+        const contrastGoal = contrastGate * 1.5;
+        if (detailResult.contrastRatio < contrastGate) {
+          failures.push(`CONTRAST TOO LOW: ratio=${detailResult.contrastRatio.toFixed(1)}× (minimum: ${contrastGate}×). Subjects don't separate from background. Use masked curves/LHE to boost subjects selectively.`);
+        } else if (detailResult.contrastRatio < contrastGoal) {
+          warnings.push(`Moderate contrast (ratio=${detailResult.contrastRatio.toFixed(1)}×, goal: >${contrastGoal}×). Could improve with masked luminance boost.`);
         }
-        if (detailResult.detailScore < 0.0005) {
-          warnings.push(`Low detail score (${detailResult.detailScore.toFixed(6)}). Subjects may look like smooth blobs. Fine-scale LHE (r=32, r=64) through tight masks can help.`);
+        if (detailResult.detailScore < 0.001) {
+          failures.push(`DETAIL TOO LOW: score=${detailResult.detailScore.toFixed(6)} (minimum: 0.001). Subjects look like smooth blobs. Apply LHE (r=32-128) through luminance masks to bring out internal structure.`);
+        } else if (detailResult.detailScore < 0.003) {
+          warnings.push(`Low detail score (${detailResult.detailScore.toFixed(6)}, goal: >0.005). Fine-scale LHE (r=32, r=64) through tight masks can help.`);
+        }
+        // Check subject coverage — tiny subjects indicate under-stretched outer structure
+        const totalBlocks = detailResult.raw?.totalBlocks || 1;
+        const subjectCoverage = (detailResult.subjectCount || 0) / totalBlocks;
+        if (subjectCoverage < 0.02) {
+          warnings.push(`Subject covers only ${(subjectCoverage * 100).toFixed(1)}% of image — outer halo/faint structure may be invisible. Consider shadow-lifting curves through inverted mask.`);
+        }
+      } catch (e) {
+        // Non-blocking
+      }
+
+      // Gate 5: Overall exposure — composite must not be absurdly dark
+      // Uses the processing profile target if available
+      const targetMedian = brief?.processingProfile?.stretch?.target_median || 0.15;
+      const minMedian = targetMedian * 0.35; // e.g. 0.18 * 0.35 = 0.063
+      if (stats.median < minMedian) {
+        failures.push(`IMAGE TOO DARK: median=${stats.median.toFixed(4)} (minimum: ${minMedian.toFixed(4)}, based on target ${targetMedian}). The overall exposure is far below target. Stretch RGB harder before LRGB, apply brightness curves, or reduce background clipping.`);
+      } else if (stats.median < targetMedian * 0.5) {
+        warnings.push(`Image darker than target: median=${stats.median.toFixed(4)} vs target=${targetMedian}. May be OK for small subjects in large fields, but verify outer structure is visible.`);
+      }
+
+      // Gate 6: Per-channel peak check — detect Ha burning or single-channel clipping
+      // In dark images (median < 0.10), any channel peaking above 0.92 looks visually burnt
+      try {
+        const chPeaks = await ctx.pjsr(`
+          var w = ImageWindow.windowById('${input.view_id}');
+          var img = w.mainView.image;
+          if (img.isColor) {
+            img.selectedChannel = 0; var rMax = img.maximum(); var rMed = img.median();
+            img.selectedChannel = 1; var gMax = img.maximum(); var gMed = img.median();
+            img.selectedChannel = 2; var bMax = img.maximum(); var bMed = img.median();
+            img.resetChannelSelection();
+            JSON.stringify({ R: { max: rMax, med: rMed }, G: { max: gMax, med: gMed }, B: { max: bMax, med: bMed } });
+          } else {
+            JSON.stringify({ mono: true });
+          }
+        `);
+        const chData = JSON.parse(chPeaks.outputs?.consoleOutput || '{}');
+        if (!chData.mono) {
+          for (const [ch, d] of Object.entries(chData)) {
+            // Dynamic threshold: in dark images (channel median < 0.10), peak above 0.92 = burnt
+            const burnThreshold = d.med < 0.10 ? 0.92 : 0.95;
+            if (d.max > burnThreshold) {
+              warnings.push(`${ch} CHANNEL HOT: max=${d.max.toFixed(4)} (threshold: ${burnThreshold} for median=${d.med.toFixed(4)}). ${ch === 'R' ? 'Ha injection may be too strong — reduce ha_inject_red strength or max_output.' : 'Bright region in ' + ch + ' channel needs masking.'}`);
+            }
+          }
         }
       } catch (e) {
         // Non-blocking
@@ -1438,39 +1654,13 @@ const TOOL_CATALOG = {
         };
       }
 
-      // Auto-blend stars if not already present
+      // Do NOT auto-blend stars here — the agent blends stars during composition
+      // (star_screen_blend in Phase 5). Double-blending washes out nebula core detail.
+      // Only warn if the image appears to have no stars at all.
       try {
-        // Check if there's a star view available and the image might be starless
-        const starCheckR = await ctx.pjsr(`
-          var starIds = ['${input.view_id}_stars', 'M81_stars', 'M97_stars', 'Abell2151_stars', 'stars_backup'];
-          var starView = null;
-          for (var i = 0; i < starIds.length; i++) {
-            var sw = ImageWindow.windowById(starIds[i]);
-            if (!sw.isNull && sw.mainView.image.numberOfChannels === 3) { starView = sw; break; }
-          }
-          // Also search for any view with 'stars' in the name
-          if (!starView) {
-            var ws = ImageWindow.windows;
-            for (var i = 0; i < ws.length; i++) {
-              if (ws[i].mainView.id.indexOf('stars') >= 0 && ws[i].mainView.image.numberOfChannels === 3 && ws[i].mainView.image.median() < 0.01) {
-                starView = ws[i]; break;
-              }
-            }
-          }
-          if (starView) {
-            // Screen blend stars
-            var PM = new PixelMath;
-            PM.expression = '~(~${input.view_id} * ~' + starView.mainView.id + ')';
-            PM.useSingleExpression = true;
-            PM.createNewImage = false;
-            PM.executeOn(ImageWindow.windowById('${input.view_id}').mainView);
-            'Stars blended from ' + starView.mainView.id;
-          } else {
-            'No star view found — image may already have stars';
-          }
-        `);
-        if (starCheckR.outputs?.consoleOutput?.includes('blended')) {
-          warnings.push(`Auto-blended stars: ${starCheckR.outputs.consoleOutput}`);
+        const starCheck = await checkStarQuality(ctx, input.view_id);
+        if (starCheck.starsFound < 20) {
+          warnings.push(`Very few stars detected (${starCheck.starsFound}). If the image is starless, the agent may have forgotten to blend stars during composition.`);
         }
       } catch (e) {
         // Non-fatal
@@ -1913,7 +2103,7 @@ const TOOL_CATALOG = {
     category: 'measurement',
     definition: {
       name: 'measure_subject_detail',
-      description: 'Measure subject brightness, detail resolution, and contrast ratio. Returns numeric goals: subjectBrightness (goal: >0.25), detailScore (higher=sharper internal structure), contrastRatio (goal: >3x background). Use this AFTER each processing step to verify improvement. If subjects are still dim or smooth blobs, push harder.',
+      description: 'Measure subject brightness, detail resolution, and contrast ratio. HARD GATES: subjectBrightness >= 0.25 (goal: >0.35), detailScore >= 0.001 (goal: >0.005), contrastRatio >= 3× (goal: >5×). finish WILL REJECT if any hard gate fails. Use AFTER each processing step to verify improvement.',
       input_schema: {
         type: 'object',
         properties: {
@@ -1927,9 +2117,9 @@ const TOOL_CATALOG = {
       return {
         type: 'text',
         text: `[SUBJECT METRICS] ${result.details}\n` +
-          `  Brightness: ${result.subjectBrightness?.toFixed(4) || 'N/A'} (goal: >0.25)\n` +
-          `  Detail score: ${result.detailScore?.toFixed(6) || 'N/A'} (higher=better)\n` +
-          `  Contrast ratio: ${result.contrastRatio?.toFixed(1) || 'N/A'}× (goal: >3×)\n` +
+          `  Brightness: ${result.subjectBrightness?.toFixed(4) || 'N/A'} (HARD GATE: 0.25, goal: >0.35)\n` +
+          `  Detail score: ${result.detailScore?.toFixed(6) || 'N/A'} (HARD GATE: 0.001, goal: >0.005)\n` +
+          `  Contrast ratio: ${result.contrastRatio?.toFixed(1) || 'N/A'}× (HARD GATE: 3×, goal: >5×)\n` +
           `  Subject regions: ${result.subjectCount || 0} / Background median: ${result.backgroundMedian?.toFixed(4) || 'N/A'}`
       };
     }
@@ -2031,8 +2221,8 @@ const AGENT_TOOL_CATEGORIES = {
   rgb_cleanliness: ['measurement', 'preview', 'image_mgmt', 'gradient', 'denoise', 'sharpen', 'stretch', 'calibration', 'star_removal', 'memory', 'artifacts', 'control'],
   luminance_detail: ['measurement', 'preview', 'image_mgmt', 'detail', 'masks', 'denoise', 'sharpen', 'stretch', 'gradient', 'calibration', 'readiness', 'star_removal', 'memory', 'artifacts', 'control'],
   star_policy: ['measurement', 'preview', 'image_mgmt', 'star_removal', 'stretch', 'curves', 'memory', 'artifacts', 'control'],
-  ha_integration: ['measurement', 'preview', 'image_mgmt', 'gradient', 'denoise', 'sharpen', 'stretch', 'masks', 'ha_injection', 'star_removal', 'memory', 'artifacts', 'control'],
-  composition: ['measurement', 'preview', 'image_mgmt', 'curves', 'stars', 'lrgb', 'masks', 'memory', 'artifacts', 'control'],
+  ha_integration: ['measurement', 'preview', 'image_mgmt', 'gradient', 'denoise', 'sharpen', 'stretch', 'masks', 'ha_injection', 'narrowband', 'star_removal', 'memory', 'artifacts', 'control'],
+  composition: ['measurement', 'preview', 'image_mgmt', 'curves', 'stars', 'lrgb', 'narrowband', 'masks', 'memory', 'artifacts', 'control'],
   aesthetic_critic: ['measurement', 'memory', 'control', 'scoring'],
   technical_critic: ['measurement', 'memory', 'control', 'scoring'],
 };

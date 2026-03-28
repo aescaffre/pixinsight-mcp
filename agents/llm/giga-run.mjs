@@ -19,6 +19,8 @@ if (fs.existsSync(envPath)) {
   }
 }
 
+import { execSync } from 'child_process';
+
 import { createBridgeContext } from '../ops/bridge.mjs';
 import { getStats, measureUniformity } from '../ops/stats.mjs';
 import { ArtifactStore } from '../artifact-store.mjs';
@@ -30,6 +32,97 @@ import { buildGigaOrchestratorPrompt } from './prompts/giga-orchestrator.mjs';
 import { runDeterministicPrep } from './deterministic-prep.mjs';
 
 const home = os.homedir();
+
+// ============================================================================
+// P2a: PixInsight swap file management
+// ============================================================================
+function cleanPISwapFiles() {
+  try {
+    // Find all PI swap files and compute total size
+    const findResult = execSync(
+      "find /var/folders -name '~PI~*.swp' -type f 2>/dev/null || true",
+      { encoding: 'utf-8', timeout: 10000 }
+    ).trim();
+
+    if (!findResult) {
+      console.log('  PI swap: no swap files found');
+      return { cleaned: false, totalBytes: 0, fileCount: 0 };
+    }
+
+    const files = findResult.split('\n').filter(Boolean);
+    let totalBytes = 0;
+    for (const f of files) {
+      try {
+        const stat = fs.statSync(f);
+        totalBytes += stat.size;
+      } catch { /* file may have disappeared */ }
+    }
+
+    const totalGB = totalBytes / (1024 ** 3);
+    console.log(`  PI swap: ${files.length} file(s), ${totalGB.toFixed(2)} GB total`);
+
+    if (totalGB > 20) {
+      console.log(`  PI swap: exceeds 20 GB threshold — cleaning...`);
+      execSync("find /var/folders -name '~PI~*.swp' -type f -delete 2>/dev/null || true", { timeout: 30000 });
+      console.log(`  PI swap: deleted ${files.length} file(s) (${totalGB.toFixed(2)} GB freed)`);
+      return { cleaned: true, totalBytes, fileCount: files.length };
+    }
+
+    return { cleaned: false, totalBytes, fileCount: files.length };
+  } catch (err) {
+    console.log(`  PI swap: cleanup check failed (${err.message}) — continuing`);
+    return { cleaned: false, totalBytes: 0, fileCount: 0, error: err.message };
+  }
+}
+
+// ============================================================================
+// P2b: Automatic disk space monitoring
+// ============================================================================
+function checkDiskSpace() {
+  console.log('\n--- Pre-flight: Disk Space Check ---');
+
+  function getFreeGB(mountPoint) {
+    try {
+      // df -g gives output in GB on macOS
+      const output = execSync(`df -g '${mountPoint}' 2>/dev/null`, { encoding: 'utf-8' });
+      const lines = output.trim().split('\n');
+      if (lines.length < 2) return null;
+      // Columns: Filesystem 1G-blocks Used Available Capacity Mounted
+      const cols = lines[1].split(/\s+/);
+      return parseInt(cols[3], 10); // Available column in GB
+    } catch {
+      return null;
+    }
+  }
+
+  const rootFreeGB = getFreeGB('/');
+  const varFreeGB = getFreeGB('/var');
+
+  if (rootFreeGB !== null) console.log(`  / (data): ${rootFreeGB} GB free`);
+  if (varFreeGB !== null) console.log(`  /var (swap): ${varFreeGB} GB free`);
+
+  const minFree = Math.min(rootFreeGB ?? Infinity, varFreeGB ?? Infinity);
+
+  if (minFree < 15) {
+    console.log('  WARNING: Low disk space (<15 GB) — auto-cleaning PI swap files...');
+    cleanPISwapFiles();
+
+    // Re-check after cleaning
+    const rootAfter = getFreeGB('/');
+    const varAfter = getFreeGB('/var');
+    const minAfter = Math.min(rootAfter ?? Infinity, varAfter ?? Infinity);
+
+    if (rootAfter !== null) console.log(`  / (data) after cleanup: ${rootAfter} GB free`);
+    if (varAfter !== null) console.log(`  /var (swap) after cleanup: ${varAfter} GB free`);
+
+    if (minAfter < 5) {
+      console.error('  FATAL: Less than 5 GB free after cleanup — aborting to prevent data loss');
+      process.exit(1);
+    }
+  }
+
+  return { rootFreeGB, varFreeGB };
+}
 
 // ============================================================================
 // Parse args
@@ -60,6 +153,10 @@ async function main() {
   console.log('  Config:', configPath);
   console.log('='.repeat(60));
 
+  // Pre-flight: disk space check and PI swap cleanup
+  checkDiskSpace();
+  cleanPISwapFiles();
+
   // Bridge
   const ctx = createBridgeContext({ log: console.log });
   try {
@@ -85,8 +182,13 @@ async function main() {
 
   // Artifact store
   const store = new ArtifactStore();
+
+  // Add run label for internal version naming (last 8 chars of run ID)
+  brief.runLabel = store.runId.split('_').pop().slice(0, 8);
+
   store.saveBrief(brief);
   console.log(`  Run ID: ${store.runId}`);
+  console.log(`  Run label: ${brief.runLabel}`);
   console.log(`  Artifacts: ${store.baseDir}`);
 
   // ================================================================
@@ -178,6 +280,9 @@ ${extractWinningParams(brief.target.classification)}
 
   console.log(`\n--- GIGA Agent completed in ${Math.round(elapsed / 1000)}s ---`);
 
+  // Post-run: clean PI swap files to free disk space
+  cleanPISwapFiles();
+
   if (result.crashError) {
     console.error(`CRASH: ${result.crashError.message}`);
     process.exit(77);
@@ -191,63 +296,79 @@ ${extractWinningParams(brief.target.classification)}
   const xisfPath = path.join(outputDir, `${targetName}_giga.xisf`);
   const pngPath = path.join(outputDir, `${targetName}_giga.png`);
 
-  // Robust export: find best processed view, blend stars if needed, save via /tmp/
+  // Robust export: use the view_id from the agent's finish call, fall back to heuristic
+  const finishViewId = result.finishResult?.view_id || null;
+  if (finishViewId) {
+    console.log(`  Agent finished with view: ${finishViewId}`);
+  } else {
+    console.log(`  No view_id from agent finish — will use heuristic`);
+  }
+
   try {
     // Save to /tmp first (reliable), then copy to output dir
     const tmpXisf = `/tmp/${targetName}_export.xisf`;
     const tmpPng = `/tmp/${targetName}_export.png`;
 
+    // Sanitize agent view_id for safe PJSR injection (strip non-alphanumeric/underscore)
+    const safeAgentViewId = finishViewId ? finishViewId.replace(/[^a-zA-Z0-9_]/g, '') : '';
+
     const saveResult = await ctx.pjsr(`
-      // Find ALL color views with their medians (exclude stars/masks with median < 0.01)
-      var candidates = [];
-      var ws = ImageWindow.windows;
-      for (var i = 0; i < ws.length; i++) {
-        var img = ws[i].mainView.image;
-        if (img.numberOfChannels === 3 && img.median() > 0.01) {
-          var id = ws[i].mainView.id;
-          var score = 0;
-          // Prefer processed views over baselines
-          if (id.indexOf('FINAL') >= 0 || id.indexOf('final') >= 0) score += 200;
-          if (id.indexOf('COMP') >= 0 || id.indexOf('comp') >= 0) score += 100;
-          if (id.indexOf('work') >= 0 || id.indexOf('detail') >= 0) score += 50;
-          // Penalize baselines and backups
-          if (id.indexOf('baseline') >= 0 || id.indexOf('backup') >= 0) score -= 100;
-          if (id === '${targetName}') score += 10; // original target name = mild preference
-          candidates.push({ id: id, score: score, median: img.median(), w: ws[i] });
+      var best = null;
+      var bestId = '';
+      var bestMedian = 0;
+
+      // First: try the exact view the agent's finish tool specified
+      var agentId = '${safeAgentViewId}';
+      if (agentId) {
+        var w = ImageWindow.windowById(agentId);
+        if (!w.isNull && w.mainView.image.numberOfChannels === 3 && w.mainView.image.median() > 0.01) {
+          best = w;
+          bestId = agentId;
+          bestMedian = w.mainView.image.median();
         }
       }
-      candidates.sort(function(a, b) {
-        if (a.score !== b.score) return b.score - a.score;
-        return 0; // Don't sort by median — processed views may be darker
-      });
 
-      if (candidates.length === 0) throw new Error('No color image found for export');
-      var best = candidates[0].w;
-      var bestId = candidates[0].id;
-
-      // Check if stars need blending (look for a star view with median < 0.01)
-      var starView = null;
-      for (var i = 0; i < ws.length; i++) {
-        var sid = ws[i].mainView.id;
-        if (sid.indexOf('stars') >= 0 && ws[i].mainView.image.numberOfChannels === 3 && ws[i].mainView.image.median() < 0.01) {
-          starView = ws[i]; break;
+      // Fallback: heuristic name scoring if agent view not found
+      if (!best) {
+        var candidates = [];
+        var ws = ImageWindow.windows;
+        for (var i = 0; i < ws.length; i++) {
+          var img = ws[i].mainView.image;
+          if (img.numberOfChannels === 3 && img.median() > 0.01) {
+            var id = ws[i].mainView.id;
+            var score = 0;
+            // Prefer processed views over baselines
+            if (id.indexOf('FINAL') >= 0 || id.indexOf('final') >= 0) score += 200;
+            if (id.indexOf('COMP') >= 0 || id.indexOf('comp') >= 0) score += 100;
+            if (id.indexOf('work') >= 0 || id.indexOf('detail') >= 0) score += 50;
+            // Penalize baselines and backups
+            if (id.indexOf('baseline') >= 0 || id.indexOf('backup') >= 0) score -= 100;
+            if (id === '${targetName}') score += 10; // original target name = mild preference
+            candidates.push({ id: id, score: score, median: img.median(), w: ws[i] });
+          }
         }
+        candidates.sort(function(a, b) {
+          if (a.score !== b.score) return b.score - a.score;
+          return 0; // Don't sort by median — processed views may be darker
+        });
+
+        if (candidates.length === 0) throw new Error('No color image found for export');
+        best = candidates[0].w;
+        bestId = candidates[0].id;
+        bestMedian = candidates[0].median;
       }
-      if (starView) {
-        // Screen blend stars into the best view
-        var PM = new PixelMath;
-        PM.expression = '~(~' + bestId + ' * ~' + starView.mainView.id + ')';
-        PM.useSingleExpression = true;
-        PM.createNewImage = false;
-        PM.executeOn(best.mainView);
-      }
+
+      // Stars: do NOT blend here — the agent already blends stars during composition,
+      // and the finish handler also auto-blends. Adding stars a third time washes out
+      // nebula detail and makes the core look flat/monotone.
+      var starView = null; // kept for reporting only
 
       // Save to /tmp (reliable path, no network drives)
       best.saveAs('${tmpXisf}', false, false, false, false);
       best.mainView.id = bestId;
       best.saveAs('${tmpPng}', false, false, false, false);
       best.mainView.id = bestId;
-      'Exported ' + bestId + ' (med=' + candidates[0].median.toFixed(4) + ', stars=' + (starView ? 'blended' : 'already present or not found') + ')';
+      'Exported ' + bestId + ' (med=' + bestMedian.toFixed(4) + ', agent_requested=' + agentId + ', stars=' + (starView ? 'blended' : 'already present or not found') + ')';
     `);
     console.log(`  ${saveResult.outputs?.consoleOutput || 'done'}`);
 
@@ -278,11 +399,118 @@ ${extractWinningParams(brief.target.classification)}
     console.log(`  Memory optimizer skipped: ${e.message}`);
   }
 
+  // P3b: Update processing profile with learned parameters from this run
+  try {
+    updateProcessingProfile(brief.target.classification, store);
+  } catch (e) {
+    console.log(`  Profile learning skipped: ${e.message}`);
+  }
+
   console.log(`\n${'='.repeat(60)}`);
   console.log(`  GIGA Processing complete!`);
   console.log(`  Final: ${pngPath}`);
   console.log(`  Run: ${store.baseDir}`);
   console.log(`${'='.repeat(60)}`);
+}
+
+// ============================================================================
+// P3b: Processing profile learning — update learned_overrides from winning params
+// ============================================================================
+function updateProcessingProfile(classification, store) {
+  const profilePath = path.join(__dirname, '../../agents/processing-profiles.json');
+  if (!fs.existsSync(profilePath)) {
+    console.log('  Profile learning: no processing-profiles.json found');
+    return;
+  }
+
+  const profiles = JSON.parse(fs.readFileSync(profilePath, 'utf-8'));
+  const profile = profiles[classification];
+  if (!profile) {
+    console.log(`  Profile learning: no profile for "${classification}"`);
+    return;
+  }
+
+  // Strategy 1: Extract from artifact store winner variant metadata
+  const learned = {};
+  const manifest = store.manifest;
+  const winnerAgents = Object.keys(manifest.agents || {});
+
+  for (const agentName of winnerAgents) {
+    try {
+      const winner = store.getWinner(agentName);
+      if (!winner?.params) continue;
+      const p = winner.params;
+
+      if (p.ha_strength !== undefined) learned.ha_strength = p.ha_strength;
+      if (p.oiii_strength !== undefined) learned.oiii_strength = p.oiii_strength;
+      if (p.lhe_amounts) learned.lhe_amounts = p.lhe_amounts;
+      if (p.star_power !== undefined) learned.star_power = p.star_power;
+      if (p.composition_method) learned.composition_method = p.composition_method;
+      if (p.screen_blend_strength !== undefined) learned.screen_blend_strength = p.screen_blend_strength;
+      if (p.lrgb_lightness !== undefined) learned.lrgb_lightness = p.lrgb_lightness;
+      if (p.lrgb_saturation !== undefined) learned.lrgb_saturation = p.lrgb_saturation;
+      if (p.saturation_midpoint !== undefined) learned.saturation_midpoint = p.saturation_midpoint;
+      if (p.hdrmt_layers !== undefined) learned.hdrmt_layers = p.hdrmt_layers;
+      if (p.hdrmt_iterations !== undefined) learned.hdrmt_iterations = p.hdrmt_iterations;
+    } catch { /* skip unreadable winner */ }
+  }
+
+  // Strategy 2: Parse agent memory for winning_param entries from this run
+  if (Object.keys(learned).length === 0) {
+    const memDir = path.join(home, '.pixinsight-mcp', 'agent-memory');
+    const gigaMemFile = path.join(memDir, 'giga_orchestrator.json');
+    if (fs.existsSync(gigaMemFile)) {
+      const entries = JSON.parse(fs.readFileSync(gigaMemFile, 'utf-8'));
+      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      const recentWinners = entries.filter(e =>
+        e.tags?.includes('winning_param') &&
+        (e.timestamp || e.date || '') >= oneHourAgo
+      );
+
+      for (const entry of recentWinners) {
+        const content = entry.content || '';
+        const title = (entry.title || '').toLowerCase();
+
+        const haMatch = content.match(/ha[_ ]?(?:inject(?:ion)?|strength)[=: ]*(\d+\.?\d*)/i);
+        if (haMatch) learned.ha_strength = parseFloat(haMatch[1]);
+
+        const oiiiMatch = content.match(/oiii[_ ]?strength[=: ]*(\d+\.?\d*)/i);
+        if (oiiiMatch) learned.oiii_strength = parseFloat(oiiiMatch[1]);
+
+        const lheMatches = content.match(/(?:lhe|amount)[=: ]*(\d+\.?\d*)/gi);
+        if (lheMatches) {
+          learned.lhe_amounts = lheMatches.map(m => parseFloat(m.match(/(\d+\.?\d*)/)[1]));
+        }
+
+        const starMatch = content.match(/star[_ ]?(?:power|reduction|factor)[=: ]*(\d+\.?\d*)/i);
+        if (starMatch) learned.star_power = parseFloat(starMatch[1]);
+
+        if (title.includes('composition') || title.includes('comp')) {
+          const methodMatch = content.match(/(rgb[_ ]?only|lrgb|pixelmath[_ ]?l|synth(?:etic)?[_ ]?l)/i);
+          if (methodMatch) learned.composition_method = methodMatch[1].toLowerCase().replace(/\s+/g, '_');
+        }
+
+        const blendMatch = content.match(/(?:screen[_ ]?)?blend[_ ]?strength[=: ]*(\d+\.?\d*)/i);
+        if (blendMatch) learned.screen_blend_strength = parseFloat(blendMatch[1]);
+
+        const lightnessMatch = content.match(/lightness[=: ]*(\d+\.?\d*)/i);
+        if (lightnessMatch) learned.lrgb_lightness = parseFloat(lightnessMatch[1]);
+
+        const satMatch = content.match(/(?:lrgb[_ ])?saturation[=: ]*(\d+\.?\d*)/i);
+        if (satMatch) learned.lrgb_saturation = parseFloat(satMatch[1]);
+      }
+    }
+  }
+
+  if (Object.keys(learned).length > 0) {
+    profile.learned_overrides = { ...profile.learned_overrides, ...learned };
+    profile.learned_overrides._lastUpdated = new Date().toISOString();
+    profile.learned_overrides._runId = store.runId;
+    fs.writeFileSync(profilePath, JSON.stringify(profiles, null, 2) + '\n');
+    console.log(`  Profile learning: updated "${classification}" with ${Object.keys(learned).length} param(s): ${Object.keys(learned).join(', ')}`);
+  } else {
+    console.log('  Profile learning: no extractable params from this run');
+  }
 }
 
 // ============================================================================

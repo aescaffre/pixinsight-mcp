@@ -12,3 +12,4 @@ export { saveCheckpoint, loadCheckpoint } from './checkpoint.mjs';
 export { checkStarQuality, checkRinging, checkSharpness, checkCoreBurning, scanBurntRegions } from './quality-gates.mjs';
 export { measureSubjectDetail } from './subject-metrics.mjs';
 export { multiScaleEnhance } from './compound-enhance.mjs';
+export { extractPseudoOIII, continuumSubtractHa, dynamicNarrowbandBlend, createSyntheticLuminance, createZoneMasks } from './narrowband-enhance.mjs';

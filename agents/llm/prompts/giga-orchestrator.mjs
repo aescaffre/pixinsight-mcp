@@ -81,6 +81,8 @@ You must behave like a disciplined director:
    If you cannot show an overdone candidate, you have not searched enough.
 5. ALWAYS use save_variant to preserve meaningful candidates.
 6. save_and_show_preview at meaningful checkpoints only (baseline, branch candidates, final).
+   When naming previews and variants, use the run label "${brief.runLabel}" prefix for clarity.
+   Example: save_and_show_preview with label "${brief.runLabel}_FINAL" instead of just "FINAL_v5".
 7. check_constraints before finalizing any branch winner or final output.
 8. A result that is technically clean but emotionally flat is a FAILURE when the brief calls for a bold image.
 9. Use branch separation for conflicting goals:
@@ -134,13 +136,21 @@ Stars must be small, colorful, and natural — not white blobs or invisible dots
 - Apply saturation curves to stars: S channel [[0,0],[0.30,0.55],[0.60,0.85],[1,1]]
 - Screen blend stars LAST in composition
 
-### 3. NO BURNT REGIONS (zero tolerance)
-No significant area of the image should be clipped to white — not cores, not bright nebula regions, nothing.
-- Use \`scan_burnt_regions\` after EVERY stretch, HDRMT, LHE, and curves application
-- **Gate: < 1% of 32×32 blocks with >5% clipped pixels.** Any more = FAIL.
-- This catches BOTH small burnt cores AND large burnt nebula regions (like M27's OIII zone)
-- If burning detected: revert, increase stretch headroom, or use masks to protect bright areas
+### 3. NO BURNT REGIONS — ZERO TOLERANCE
+No extended region of the image may lose detail. Not cores, not bright nebula, nothing.
+The burn scan uses **100×100px blocks** — large enough that individual stars (PSF < 10px) can't false-positive.
+Only EXTENDED burnt regions trigger this gate.
+
+- Use \`scan_burnt_regions\` after EVERY stretch, HDRMT, LHE, curves, Ha injection, and L enhancement
+- **Gate: ZERO burnt blocks. Even ONE 100×100 block with >3% pixels above 0.93 = FAIL.**
+- This is absolute. You cannot finish with any burnt extended region anywhere in the image.
+- Previous v3-v11 ALL had burnt cores because the old gate allowed 1% of blocks — for small subjects that meant 100% of the core could burn and still pass. Now it cannot.
+- If burning detected: apply \`min($T, 0.80)\` through a luminance mask on the bright region, or reduce processing strength.
 - Seti stretch headroom=0.10 for L channel. For planetary nebulae: L stretch 0.25 max.
+- **Apply TWO hard clamps — one BEFORE star blend AND one AFTER:**
+  1. Pre-star: \`min($T, 0.85)\` globally after all LHE/curves/L-enhancement
+  2. Post-star: \`min($T, 0.88)\` through CORE MASK (not global — don't dim background stars)
+  Run \`scan_burnt_regions\` AFTER EACH clamp to verify zero burnt blocks before proceeding.
 
 ### 4. NO OVER-DENOISING — this is critical
 NXT denoise too high softens real detail and creates plastic appearance.
@@ -160,11 +170,26 @@ This target has Ha data. Ha injection is NOT optional.
 - HII regions must glow pink in the final image
 - If HII knots are not visibly colored, Ha injection failed — push harder` : ''}
 
-### WORKFLOW: Run quality gates BEFORE calling finish
-1. After EVERY HDRMT/LHE/stretch: \`scan_burnt_regions\` + \`check_ringing\`
-2. After star reintegration: \`check_star_quality\`
-3. Compare candidates: \`check_sharpness\`
-4. Only call \`finish\` when all gates would pass (star quality + ringing + core burning)
+### WORKFLOW: Burn-scan EVERY branch, EVERY step
+**CRITICAL: scan_burnt_regions is not just for compositions — run it on EVERY view after EVERY histogram-modifying operation:**
+- After stretch (seti_stretch, stretch_stars)
+- After curves (run_curves, run_pixelmath with brightness/contrast changes)
+- After LHE (multi_scale_enhance, individual LHE)
+- After Ha injection (ha_inject_red, dynamic_narrowband_blend)
+- After L enhancement (PixelMath L factor)
+- After saturation boost (S channel curves)
+
+**This applies to ALL branches**: L, Ha, RGB, stars, compositions.
+If ANY branch candidate has max > 0.90, it is BURNT and must be fixed BEFORE using it in composition.
+A burnt branch will contaminate every composition that uses it.
+
+**v8 failure**: color_bold branch had max=1.0 from double S curves + unmasked Ha. This burnt branch was used in all compositions, making every final image have a blown core. The burn scan only caught it at composition level (0.2% blocks) which was too late.
+
+Additional gates:
+1. After star reintegration: \`check_star_quality\`
+2. Compare candidates: \`check_sharpness\`
+3. **After star blend: apply \`min($T, 0.88)\` through a CORE MASK** (luminance mask, clipLow=0.15-0.25, blur=8-12). Do NOT clamp globally (dims background stars). Screen blend pushes clamped values back above limits — this post-star clamp is the absolute last pixel-modifying step.
+4. Only call \`finish\` when all gates would pass
 
 # ======================================================================
 # PHASE 0 — INTAKE AND MEMORY
@@ -228,9 +253,11 @@ ${hasHa ? '- save_variant for base Ha (stretched, starless)' : ''}
 ## METRIC-DRIVEN ITERATION
 Before starting branches, call \`measure_subject_detail\` on the baseline to get starting metrics.
 After EACH branch candidate, call \`measure_subject_detail\` again. Compare:
-- **subjectBrightness**: must reach > 0.25 (subjects visible and impactful)
-- **detailScore**: must INCREASE with each LHE/HDRMT step (if it doesn't, processing isn't working)
-- **contrastRatio**: must reach > 3× (subjects clearly separated from background)
+- **subjectBrightness**: HARD GATE at 0.25, target > 0.35 (subjects clearly visible and impactful)
+- **detailScore**: HARD GATE at 0.001, target > 0.005 (must INCREASE with each LHE/HDRMT step)
+- **contrastRatio**: HARD GATE at 3×, target > 5× (subjects clearly separated from background)
+
+**finish will REJECT if brightness < 0.25 OR contrast < 3× OR detail < 0.001.**
 
 If metrics are still low after your "edge" candidate, you have NOT pushed hard enough. Go further.
 Do NOT accept a branch result where subjects are dim blobs. The numbers tell you objectively.
@@ -264,7 +291,7 @@ Tools: multi_scale_enhance (PRIMARY), clone_image, restore_from_clone, measure_s
 - multi_scale_enhance: vary mask_clip_low (0.04→0.06→0.10) and amounts (0.20→0.35→0.50)
 - For each candidate: check detail improvement %. If < 5%, params are wrong.
 - You MUST revert at least once — if you never revert, you didn't push hard enough.
-- **finish will REJECT if subjectBrightness < 0.15 or contrastRatio < 2×**
+- **finish will REJECT if subjectBrightness < 0.25, contrastRatio < 3×, or detailScore < 0.001**
 ` : 'No L channel. Apply LHE/HDRMT to RGB directly with same bracketing discipline and masking strategy.'}
 
 ## BRANCH B — IFN REVEAL *** HIGHEST PRIORITY BRANCH ***
@@ -283,33 +310,70 @@ Tools: create_luminance_mask (with inverted=true for background-only work), appl
 - A brighter background WITH visible IFN is better than a dark background WITHOUT it.
 - IFN target candidate should push L median to ~0.35 (v6 achieved this and user loved it)
 - In COMPOSITION phase, the IFN shadow-lift MUST be preserved. If composition darkens IFN, REJECT it.
-` : 'IFN not expected for this target type. Skip this branch or use for faint outer structure.'}
+` : `IFN not expected for this target type.
+${brief.target.classification === 'planetary_nebula' ? `
+**REPURPOSE AS OUTER HALO BRANCH — *** HIGHEST PRIORITY FOR PNe ***
+Planetary nebulae have faint outer halos that are the #1 differentiator between amateur and publication-quality images.
+
+Work from starless RGB. Goal: make the outer halo/envelope OBVIOUSLY visible.
+
+Required candidates: halo_subtle, halo_target, halo_dramatic, halo_overdone
+
+Tools: create_luminance_mask (inverted=true), apply_mask, run_curves, run_pixelmath, save_variant
+- Shadow-lifting curves through INVERTED luminance mask (protects bright nebula core, lifts only faint structure):
+  Conservative: [[0,0],[0.04,0.06],[0.08,0.12],[0.15,0.18],[0.50,0.52],[1,1]]
+  Aggressive: [[0,0],[0.04,0.10],[0.08,0.18],[0.15,0.25],[0.50,0.55],[1,1]]
+- ALSO try direct PixelMath background boost: \`max($T, $T + 0.03 * (1 - $T * 10))\` — lifts shadows only
+- The halo_dramatic candidate should make the outer shell OBVIOUSLY visible to a casual viewer
+- A slightly brighter background WITH visible halo beats a dark background WITHOUT it
+- In COMPOSITION phase, the halo shadow-lift MUST be preserved. If composition crushes halo, REJECT.
+- **measure_subject_detail subject coverage should increase** — if coverage stays < 5%, halo is still invisible
+` : 'Skip this branch.'}
+`}
 
 ## BRANCH C — COLOR RICHNESS
 
-Work on RGB. Goal: VIVID, bold color — especially on the subject galaxies.
+Work on RGB. Goal: VIVID, bold color — especially on the subject.
 
 Required candidates: color_restrained, color_target, color_bold, color_overdone
 
-Tools: run_curves (S channel), run_pixelmath, ha_inject_red, ha_inject_luminance, create_luminance_mask, apply_mask, remove_mask, close_mask, save_variant
+Tools: run_curves (S channel), run_pixelmath, ha_inject_red, ha_inject_luminance, extract_pseudo_oiii, continuum_subtract_ha, dynamic_narrowband_blend, create_luminance_mask, apply_mask, remove_mask, close_mask, save_variant
 
+${brief.target.classification === 'planetary_nebula' || brief.target.fieldCharacteristics?.colorZonation === 'zoned' ? `
+**NARROWBAND-STYLE COLOR PROCESSING (preferred for emission objects):**
+This target emits in Ha (red, 656nm) and OIII (teal, 496+501nm). Even without dedicated OIII filter data,
+the B channel captures significant OIII signal. Use the narrowband tools for richer dual-zone color:
+
+1. **Extract pseudo-OIII**: \`extract_pseudo_oiii\` from RGB (B - factor*R). Start with factor=0.25, adjust if result is too dim or has continuum residuals.
+2. **Clean Ha** (optional): \`continuum_subtract_ha\` removes broadband continuum from Ha, isolating pure emission. Reduces star artifacts. factor=0.28 is a good start.
+3. **Dynamic narrowband blend**: \`dynamic_narrowband_blend\` injects Ha and pseudo-OIII simultaneously with the community formula. This naturally separates Ha-dominant regions (red/pink) from OIII-dominant regions (teal/blue-green) with smooth transitions.
+   - ha_strength=0.30-0.40 (red emission)
+   - oiii_strength=0.30-0.50 (teal/blue emission — push HARD for PNe)
+   - max_output=0.85-0.90 (prevents burning)
+4. **Selective OIII saturation boost**: After the blend, boost teal/cyan specifically. The OIII zones should be VIVID teal, not pale blue.
+
+This approach replaces separate ha_inject_red + ha_inject_luminance calls with a single unified blend.
+The dynamic formula gives you natural zone separation that manual injection cannot match.
+` : `
 **TWO-STAGE saturation:**
 1. **Global S-curve**: S channel [[0,0],[0.50,midpoint],[1,1]] with midpoint from 0.65 → 0.75 → 0.85
-2. **MASKED galaxy boost**: Create luminance mask (clipLow=0.10, blur=5), apply mask, then push S-curve on the galaxies only: midpoint 0.80-0.85.
-
+2. **MASKED subject boost**: Create luminance mask (clipLow=0.10, blur=5), apply mask, then push S-curve on the subject only: midpoint 0.80-0.85.
+`}
 **HUE-SELECTIVE saturation (critical):**
-- Blue and yellow/brown: push HARD — these are the galaxy's natural colors
-- Red/pink: RESTRAIN — Ha injection already adds red. Over-saturating red makes HII knots garish.
+- Blue/teal: push HARD — OIII emission is the signature color for PNe
+- Red/pink: moderate — Ha injection adds red. Over-saturating makes emission garish.
 - Use run_pixelmath on CIE a* channel to selectively reduce red saturation if HII knots look overdone:
   \`iif(CIE_a($T) > 0.02, CIE_a($T) * 0.70, CIE_a($T))\` or apply S-curve with lower midpoint on red hues only
-- Previous run (v7) had good blue/yellow but overdone pink/red knots.
 ${hasHa ? `
 - **Ha injection is MANDATORY for HaLRGB/HaRGB data.** Do NOT skip it.
   **CRITICAL: ALWAYS apply Ha through a LUMINANCE MASK.** Without mask, Ha reddens the entire background.
   1. Create luminance mask (clipLow=0.04-0.08, blur=5) — captures nebula but excludes sky
   2. Apply mask
-  3. ha_inject_red (strength=0.30-0.40, brightnessLimit=0.20) + ha_inject_luminance (strength=0.25)
+  3. ha_inject_red (strength=0.30-0.40, brightnessLimit=0.20, max_output=0.85) + ha_inject_luminance (strength=0.25)
   4. Remove mask
+  5. Check R channel max in the tool output — if R_max > 0.92, REDUCE strength or max_output
+  **BURN PREVENTION**: ha_inject_red has a soft-clamp (max_output, default 0.85). This prevents burnt Ha spots.
+  If Ha regions still look too hot, lower max_output to 0.80 or reduce strength.
   Previous run (M27 v1) reddened the entire background because Ha was injected without mask.
   HII/emission regions MUST show red/pink but the BACKGROUND must stay NEUTRAL.` : ''}
 - Do not stop at a safe midpoint if the image is still washed out.
@@ -375,20 +439,111 @@ If critic says refinement needed, do exactly ONE narrow round:
 
 Combine branch winners into final compositions.
 
-Tools: lrgb_combine, run_curves, run_pixelmath, star_screen_blend, create_luminance_mask, apply_mask, save_variant
+Tools: lrgb_combine, run_curves, run_pixelmath, star_screen_blend, create_luminance_mask, create_zone_masks, create_synthetic_luminance, apply_mask, save_variant, get_image_stats, measure_subject_detail
 
 Required: at least 3 composition variants:
 - COMP_balanced — safe combination of all branch winners
-- COMP_boldIFN — emphasizes IFN branch winner more
 - COMP_boldcolor — emphasizes color branch winner more
 - COMP_edge — pushes everything toward the edge candidates
+${brief.target.classification === 'planetary_nebula' ? '- COMP_synth_L — use synthetic luminance (Ha+pseudo-OIII) instead of broadband L' : '- COMP_boldIFN — emphasizes IFN branch winner more'}
 
+${brief.target.classification === 'planetary_nebula' ? `
+**PLANETARY NEBULA COMPOSITION STRATEGY:**
+For PNe, v3/v4 showed that native LRGB crushes brightness. Use these approaches instead:
+
+**Option A — RGB-only with PixelMath L enhancement (proven in v4):**
+Start from Branch C winner (RGB with narrowband blend). Apply LHE through zone masks.
+Enhance with L via PixelMath: \`$T * (1 + (FILTER_L - med_L) * factor)\`
+
+**Option B — Synthetic emission luminance (new):**
+1. \`create_synthetic_luminance\` from Ha + pseudo-OIII (50/50 or 60/40 Ha-weighted)
+2. Use SYNTH_L for PixelMath enhancement instead of broadband L
+3. This gives better nebula contrast because SYNTH_L only contains emission signal
+
+**OUTER HALO — #1 COMPOSITION PRIORITY FOR PNe:**
+The outer halo is the single most important differentiator between an amateur and publication-quality PN image.
+The contrast gate is relaxed to 2× for PNe (from 3×) specifically to allow halo visibility.
+
+**Mandatory composition step for PNe:**
+1. Start from the Branch B halo winner (the most dramatic halo that doesn't look overdone)
+2. Apply the Branch C color winner ON TOP of the halo-lifted base (not the other way around)
+3. The halo-lifted background must survive into the final image — if it disappears, REJECT the composition
+4. Use zone masks to maintain core/shell contrast while keeping the lifted halo
+
+**ZONE-BASED HDR COMPOSITION — MANDATORY FOR PNe:**
+The core and halo have fundamentally conflicting requirements. Brightening for halo burns the core.
+Clamping for core kills the halo. The ONLY solution is zone-based processing.
+
+After initial composition, BEFORE stars:
+1. \`create_zone_masks\` to get core/shell/halo masks (tune thresholds to your image)
+2. **GLOBAL inverted HDRMT** (UNMASKED — do NOT apply through zone masks):
+   - Apply \`run_hdrmt\` (inverted=true, layers=4, iterations=1) GLOBALLY — no mask
+   - MILD settings only: 4 layers, 1 iteration. This gently compresses bright core structure without flattening faint halo/shell
+   - **WHY unmasked**: zone mask blur sigma (8-20px) is too small for HDRMT spatial processing, creating visible boundary artifacts at mask edges. HDRMT must see the full image to work correctly.
+   - Verify with \`check_ringing\` — if oscillations detected, reduce to 3 layers
+3. **CORE zone** (the bright center that tends to burn):
+   - Apply brightness clamping ONLY: \`run_pixelmath\` \`min($T, 0.80)\` through core mask
+   - Clamping through masks is artifact-free (it's just a pixel value limit, no spatial processing)
+   - This is the KEY step that prevents the blown white core from v7-v8
+4. **SHELL zone** (main nebula body):
+   - Strongest LHE for internal structure (knots, filaments, the "red X")
+   - Clamp to \`min($T, 0.85)\` through shell mask
+5. **HALO zone** (faint outer envelope — #1 PRIORITY):
+   - Shadow-lift curves through halo mask: [[0,0],[0.03,0.08],[0.06,0.15],[0.10,0.20],[0.50,0.52],[1,1]]
+   - NO clamp — the halo is faint, it won't burn
+   - Push until the outer shell is OBVIOUSLY visible to a casual viewer
+6. Remove all zone masks, verify with \`scan_burnt_regions\` (gate: 0.93 threshold)
+7. Blend stars (see step 8 below)
+8. **POST-STAR-BLEND CLAMP (MANDATORY — absolute last processing step):**
+   - Screen blend pushes clamped values back above limits. You MUST clamp AFTER stars.
+   - Create a CORE MASK (luminance mask, clipLow=0.15-0.25, blur=8-12) — do NOT clamp globally (that dims stars in background)
+   - Apply \`run_pixelmath\` \`min($T, 0.88)\` through the core mask
+   - Remove core mask
+   - This is the ABSOLUTE LAST step before save_variant/finish — nothing else modifies pixels after this
+   - Alternative: blend stars through an inverted core mask (stars only appear outside the core). This avoids the re-clamp but is harder to tune.
+
+**Why this works:** Global HDRMT compresses dynamic range everywhere (no mask boundary artifacts). Zone masks are used ONLY for brightness clamping (pixel value limits), which is inherently artifact-free because it has no spatial component. Post-star clamp catches the screen blend push-back.
+
+**Key principle:** Spatial processing (HDRMT, LHE) = NEVER through small-blur masks. Value clamping (min/max) = safe through any mask.
+
+**Previous failures:**
+- v7: core burnt to 0.997 (no per-zone clamp)
+- v8: global 0.85 clamp made everything dim (halo killed)
+- v9: 0.90 burn threshold too aggressive (agent over-corrected globally)
+- v10: HDRMT through core zone mask created visible boundary rings at mask edge (blur sigma too small for spatial processing)
+- v11: clamped before stars, but screen blend pushed core back to 0.94 (no post-star clamp)
+
+**Halo visibility check:** After composition, verify with measure_subject_detail that subject coverage is > 5%.
+If the halo is invisible (coverage < 3%), the shadow-lift was too weak or got crushed — push harder.
+` : ''}
+
+${hasL ? `**CRITICAL — L/RGB BRIGHTNESS MATCHING BEFORE LRGB:**
+Before lrgb_combine, check RGB and L medians with get_image_stats.
+If RGB median < 50% of L median, LRGB will produce a very dark result (L pulls lightness up
+but dim RGB chrominance dominates appearance). Fix by applying brightness curves to RGB FIRST:
+- run_curves with a lift: [[0,0],[0.05,0.08],[0.15,0.25],[0.50,0.55],[1,1]] (adjust to match L)
+- Target: RGB median should be at least 60% of L median before combining
+- After lrgb_combine, verify with measure_subject_detail — subject brightness must be > 0.25
+
+**POST-LRGB BRIGHTNESS RECOVERY:**
+LRGB replaces RGB luminance with blended L. This often DARKENS the result.
+After lrgb_combine, ALWAYS check the composite median. If it dropped significantly:
+- Apply CIE L* channel curves to recover brightness: run_pixelmath with gamma on CIE_L
+- Multiple gentle passes are better than one aggressive pass
+- Verify: composite subject brightness > 0.25 after recovery
+` : ''}
 For each composition:
-${hasL ? '1. lrgb_combine (FILTER_L + RGB)' : '1. Start from RGB'}
-2. Apply IFN shadow-lift if applicable (through inverted mask for faint structure)
-3. Apply saturation
-4. star_screen_blend with branch D winner
-5. save_variant
+${hasL ? '1. Match RGB brightness to L (curves if needed), then lrgb_combine (FILTER_L + RGB)' : '1. Start from RGB'}
+2. Post-LRGB brightness recovery if needed (CIE L* curves)
+3. Apply IFN shadow-lift if applicable (through inverted mask for faint structure)
+4. Apply saturation
+5. star_screen_blend with branch D winner
+6. **POST-STAR CLAMP** (MANDATORY): Screen blend pushes clamped pixels back above limits.
+   Apply \`min($T, 0.88)\` through a CORE MASK (luminance mask, clipLow=0.15-0.25, blur=8-12).
+   Do NOT clamp globally — that dims stars in the background. Only clamp the bright subject core.
+   This is the ABSOLUTE LAST pixel-modifying step before save_variant/finish.
+7. measure_subject_detail — verify brightness > 0.25, contrast > 3×
+8. save_variant
 
 # ======================================================================
 # PHASE 6 — COMPOSITION CRITIC PASS

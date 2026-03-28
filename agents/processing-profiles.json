@@ -9,7 +9,7 @@
       "star_density": "moderate"
     },
     "stretch": {
-      "target_median": 0.18,
+      "target_median": 0.22,
       "headroom": 0.05
     },
     "tools": {
@@ -20,22 +20,26 @@
       "SCNR": { "use": "try", "reason": "Only if SPCC fails" },
       "NXT": { "use": true, "denoise_linear": 0.20, "denoise_post_stretch": 0.25 },
       "SXT": { "use": true, "safe": true },
-      "LHE": { "use": true, "start_amount": 0.25, "start_radius": 64, "mask_blur": 8, "mask_clipLow": 0.06 },
-      "HDRMT": { "use": false, "reason": "No bright core to compress. Faint structure only — LHE is sufficient." },
-      "LRGB": { "use": true, "lightness": 0.50, "saturation": 0.80 },
-      "Ha_injection": { "use": "try", "reason": "Can enhance shell structure if Ha data available" }
+      "LHE": { "use": true, "start_amount": 0.35, "start_radius": 64, "mask_blur": 8, "mask_clipLow": 0.06 },
+      "HDRMT": { "use": "core_only", "inverted": true, "layers": 5, "iterations": 1, "reason": "Apply ONLY through core zone mask — compresses core dynamic range to reveal detail. Do NOT apply globally (flattens faint structure). v7-v9 showed core burns without it." },
+      "LRGB": { "use": "avoid", "reason": "v3 showed native LRGB crushes PN brightness. Use RGB-only + PixelMath L enhancement instead." },
+      "Ha_injection": { "use": true, "reason": "MANDATORY for HaLRGB — enhances shell structure. Use max_output=0.85 to prevent R burning." }
     },
     "saturation": {
-      "rgb_initial": 0.63,
-      "composition_target": 0.70,
-      "hue_selective": false
+      "rgb_initial": 0.75,
+      "composition_target": 0.85,
+      "hue_selective": true
     },
     "stars": {
       "screen_blend_strength": 1.00,
-      "prominence": "balanced"
+      "prominence": "prominent"
     },
-    "notes": "Focus on revealing internal structure (eyes, shells). Color is teal/green for OIII-dominant. Background should be darker than nebula body but not crushed.",
-    "learned_overrides": {}
+    "notes": "Focus on revealing internal structure (eyes, shells) AND outer halo. Color is teal/blue for OIII-dominant + red/pink for Ha. OUTER HALO is a key differentiator — apply shadow-lifting curves through inverted luminance mask to make it OBVIOUSLY visible. Push OIII saturation hard (blue/teal). Background should reveal faint outer structure, not be crushed to black. RGB-only + PixelMath L enhancement preferred over native LRGB (which crushes brightness).",
+    "learned_overrides": {
+      "avoid_native_lrgb": true,
+      "shadow_lift_mandatory": true,
+      "oiii_saturation_push": "aggressive"
+    }
   },
 
   "galaxy_spiral": {

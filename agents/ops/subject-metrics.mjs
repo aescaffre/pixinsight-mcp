@@ -133,30 +133,30 @@ export async function measureSubjectDetail(ctx, viewId) {
     return { subjectBrightness: 0, detailScore: 0, contrastRatio: 0, subjectCount: 0, error: 'Parse failed' };
   }
 
-  // Build assessment
+  // Build assessment — thresholds match finish handler hard gates
   const assessments = [];
-  if (data.subjectBrightness < 0.15) {
-    assessments.push('SUBJECTS TOO DIM (brightness=' + data.subjectBrightness.toFixed(3) + ', goal: >0.25). Stretch harder or boost subject luminance.');
-  } else if (data.subjectBrightness < 0.25) {
-    assessments.push('Subjects moderately bright (' + data.subjectBrightness.toFixed(3) + '). Could push brighter for more impact.');
+  if (data.subjectBrightness < 0.25) {
+    assessments.push('*** WILL FAIL GATE *** SUBJECTS TOO DIM (brightness=' + data.subjectBrightness.toFixed(3) + ', HARD GATE: 0.25, goal: >0.35). Stretch harder, apply shadow-lifting curves, boost through masks. For PNe: outer halo must be visible.');
+  } else if (data.subjectBrightness < 0.35) {
+    assessments.push('Subjects moderately bright (' + data.subjectBrightness.toFixed(3) + ', passes gate 0.25, goal: >0.35). Push harder — shadow-lift or masked boost.');
   } else {
-    assessments.push('Subject brightness good (' + data.subjectBrightness.toFixed(3) + ').');
+    assessments.push('Subject brightness GOOD (' + data.subjectBrightness.toFixed(3) + ').');
   }
 
-  if (data.contrastRatio < 2.0) {
-    assessments.push('LOW CONTRAST (ratio=' + data.contrastRatio.toFixed(1) + '×, goal: >3×). Subjects not separating from background.');
-  } else if (data.contrastRatio < 3.0) {
-    assessments.push('Moderate contrast (' + data.contrastRatio.toFixed(1) + '×). Could improve.');
+  if (data.contrastRatio < 3.0) {
+    assessments.push('*** WILL FAIL GATE *** LOW CONTRAST (ratio=' + data.contrastRatio.toFixed(1) + '×, HARD GATE: 3×, goal: >5×). Use masked curves/LHE to boost subjects selectively.');
+  } else if (data.contrastRatio < 5.0) {
+    assessments.push('Moderate contrast (' + data.contrastRatio.toFixed(1) + '×, passes gate 3×, goal: >5×). Could improve.');
   } else {
-    assessments.push('Good contrast (' + data.contrastRatio.toFixed(1) + '×).');
+    assessments.push('Contrast GOOD (' + data.contrastRatio.toFixed(1) + '×).');
   }
 
   if (data.detailScore < 0.001) {
-    assessments.push('VERY LOW DETAIL (score=' + data.detailScore.toFixed(6) + '). Subjects look like smooth blobs. Push LHE/HDRMT harder.');
+    assessments.push('*** WILL FAIL GATE *** VERY LOW DETAIL (score=' + data.detailScore.toFixed(6) + ', HARD GATE: 0.001, goal: >0.005). Subjects look like smooth blobs. Apply LHE (r=32-128) through luminance masks.');
   } else if (data.detailScore < 0.005) {
-    assessments.push('Moderate detail (' + data.detailScore.toFixed(6) + '). Room for improvement with fine-scale LHE.');
+    assessments.push('Moderate detail (' + data.detailScore.toFixed(6) + ', passes gate 0.001, goal: >0.005). Fine-scale LHE can help.');
   } else {
-    assessments.push('Good detail (' + data.detailScore.toFixed(6) + ').');
+    assessments.push('Detail GOOD (' + data.detailScore.toFixed(6) + ').');
   }
 
   return {

@@ -152,13 +152,13 @@ export async function checkStarQuality(ctx, viewId) {
     return { pass: false, error: 'Failed to parse PJSR output', medianFWHM: 999, colorDiversity: 0 };
   }
 
-  const fwhmPass = data.medianFWHM <= 6.0;
+  const fwhmPass = data.medianFWHM <= 8.0;
   const colorPass = data.colorDiversity > 0.05;
   const countPass = data.starsFound >= 50; // minimum star presence
   const pass = fwhmPass && colorPass && countPass;
 
   const details = [];
-  if (!fwhmPass) details.push(`Stars bloated: median FWHM=${data.medianFWHM.toFixed(2)}px (limit: 6.0px)`);
+  if (!fwhmPass) details.push(`Stars bloated: median FWHM=${data.medianFWHM.toFixed(2)}px (limit: 8.0px)`);
   if (!colorPass) details.push(`Stars colorless: diversity=${data.colorDiversity.toFixed(3)} (limit: 0.05)`);
   if (!countPass) details.push(`Too few stars: ${data.starsFound} found (minimum: 50) — stars may be missing or over-reduced`);
   if (pass) details.push(`Stars OK: FWHM=${data.medianFWHM.toFixed(2)}px, color=${data.colorDiversity.toFixed(3)}, count=${data.starsFound}`);
@@ -480,11 +480,11 @@ export async function checkCoreBurning(ctx, viewId) {
           var g = img.sample(x, y, 1);
           var b = img.sample(x, y, 2);
           lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-          // Also check individual channels — any channel > 0.98 is burnt
-          if (r > 0.98 || g > 0.98 || b > 0.98) burntCount++;
+          // Also check individual channels — any channel > 0.93 is burnt
+          if (r > 0.93 || g > 0.93 || b > 0.93) burntCount++;
         } else {
           lum = img.sample(x, y);
-          if (lum > 0.98) burntCount++;
+          if (lum > 0.93) burntCount++;
         }
         if (lum > peakVal) peakVal = lum;
         totalCount++;
@@ -502,9 +502,9 @@ export async function checkCoreBurning(ctx, viewId) {
     for (var y = icy; y < icy + innerSize; y++) {
       for (var x = icx; x < icx + innerSize; x++) {
         if (img.isColor) {
-          if (img.sample(x, y, 0) > 0.98 || img.sample(x, y, 1) > 0.98 || img.sample(x, y, 2) > 0.98) innerBurnt++;
+          if (img.sample(x, y, 0) > 0.93 || img.sample(x, y, 1) > 0.93 || img.sample(x, y, 2) > 0.93) innerBurnt++;
         } else {
-          if (img.sample(x, y) > 0.98) innerBurnt++;
+          if (img.sample(x, y) > 0.93) innerBurnt++;
         }
         innerTotal++;
       }
@@ -545,10 +545,10 @@ export async function checkCoreBurning(ctx, viewId) {
 
   const details = [];
   if (!widePass) {
-    details.push(`CORE BURNT (wide): ${(data.burntFraction * 100).toFixed(1)}% of 128×128 core > 0.98 (limit: 2%).`);
+    details.push(`CORE BURNT (wide): ${(data.burntFraction * 100).toFixed(1)}% of 128×128 core > 0.93 (limit: 2%).`);
   }
   if (!innerPass) {
-    details.push(`CORE BURNT (inner): ${((data.innerBurntFraction || 0) * 100).toFixed(1)}% of 32×32 inner core > 0.98 (limit: 10%). Compact core is clipped.`);
+    details.push(`CORE BURNT (inner): ${((data.innerBurntFraction || 0) * 100).toFixed(1)}% of 32×32 inner core > 0.93 (limit: 10%). Compact core is clipped.`);
   }
   if (pass) {
     details.push(`Core OK: wide=${(data.burntFraction * 100).toFixed(1)}%, inner=${((data.innerBurntFraction || 0) * 100).toFixed(1)}%, peak=${data.peakValue.toFixed(4)}`);
@@ -565,28 +565,39 @@ export async function checkCoreBurning(ctx, viewId) {
 }
 
 /**
- * Global burn scanner — tiles the entire image in 32×32 blocks,
- * reports how many blocks have significant clipping (>5% pixels > 0.98).
- * Catches burnt regions ANYWHERE — not just the brightest core.
+ * Global burn scanner — ZERO TOLERANCE design.
  *
- * PASS: < 1% of blocks are burnt
- * FAIL: >= 1% of blocks burnt (significant area is clipped)
+ * Tiles the image in large blocks (100×100 = 10,000 pixels).
+ * Large blocks ensure stars (PSF < 10px) can't false-positive — even a bright
+ * star is < 1% of a 100×100 block. Only EXTENDED burnt regions trigger this.
+ *
+ * A block is "burnt" if > 3% of its pixels (luminance) exceed 0.93.
+ * PASS: ZERO burnt blocks. Not 1%, not 0.1% — ZERO.
+ * FAIL: ANY burnt block found (even one).
+ *
+ * This catches burning regardless of subject size or position.
+ * Works for PNe (5% of image), galaxies (30%), multi-subject fields (M81+M82).
  *
  * @param {object} ctx - Bridge context
  * @param {string} viewId - View ID to scan
- * @returns {object} { pass, burntBlockCount, totalBlocks, burntFraction, burntLocations, details }
+ * @param {object} opts - { blockSize: 100, threshold: 0.93, blockBurntPct: 3 }
+ * @returns {object} { pass, burntBlockCount, totalBlocks, burntLocations, details }
  */
-export async function scanBurntRegions(ctx, viewId) {
+export async function scanBurntRegions(ctx, viewId, opts = {}) {
+  const blockSize = opts.blockSize ?? 100;
+  const threshold = opts.threshold ?? 0.93;
+  const blockBurntPct = opts.blockBurntPct ?? 3; // % of pixels in block above threshold to consider it burnt
+
   const r = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}');
     if (w.isNull) throw new Error('scanBurntRegions: view not found: ${viewId}');
     var img = w.mainView.image;
 
-    var blockSize = 32;
+    var blockSize = ${blockSize};
     var burntBlocks = [];
     var totalBlocks = 0;
-    var threshold = 0.98;
-    var blockBurntThreshold = 0.05; // block is "burnt" if >5% of its pixels exceed 0.98
+    var threshold = ${threshold};
+    var blockBurntThreshold = ${blockBurntPct / 100}; // fraction
 
     for (var by = 0; by < img.height - blockSize; by += blockSize) {
       for (var bx = 0; bx < img.width - blockSize; bx += blockSize) {
@@ -594,12 +605,14 @@ export async function scanBurntRegions(ctx, viewId) {
         var burntInBlock = 0;
         var pixelsInBlock = 0;
 
-        // Sample every 2nd pixel for speed
-        for (var y = by; y < by + blockSize; y += 2) {
-          for (var x = bx; x < bx + blockSize; x += 2) {
+        // Sample every 3rd pixel for speed (100x100 / 9 ≈ 1100 samples per block — plenty)
+        for (var y = by; y < by + blockSize; y += 3) {
+          for (var x = bx; x < bx + blockSize; x += 3) {
             pixelsInBlock++;
+            // Check luminance for color images (any single channel > threshold also counts)
             if (img.isColor) {
-              if (img.sample(x, y, 0) > threshold || img.sample(x, y, 1) > threshold || img.sample(x, y, 2) > threshold) {
+              var lum = 0.2126 * img.sample(x, y, 0) + 0.7152 * img.sample(x, y, 1) + 0.0722 * img.sample(x, y, 2);
+              if (lum > threshold || img.sample(x, y, 0) > threshold || img.sample(x, y, 1) > threshold || img.sample(x, y, 2) > threshold) {
                 burntInBlock++;
               }
             } else {
@@ -618,17 +631,15 @@ export async function scanBurntRegions(ctx, viewId) {
       }
     }
 
-    // Compute total burnt area as fraction of image
-    var burntAreaFraction = totalBlocks > 0 ? burntBlocks.length / totalBlocks : 0;
-
-    // Find worst regions (top 5 by fraction)
+    // Sort by severity
     burntBlocks.sort(function(a, b) { return b.fraction - a.fraction; });
 
     JSON.stringify({
       burntBlockCount: burntBlocks.length,
       totalBlocks: totalBlocks,
-      burntAreaFraction: burntAreaFraction,
-      worstBlocks: burntBlocks.slice(0, 5).map(function(b) {
+      blockSize: blockSize,
+      threshold: threshold,
+      worstBlocks: burntBlocks.slice(0, 10).map(function(b) {
         return { x: b.x, y: b.y, pctBurnt: Math.round(b.fraction * 100) };
       })
     });
@@ -649,24 +660,24 @@ export async function scanBurntRegions(ctx, viewId) {
     return { pass: false, error: 'Failed to parse output' };
   }
 
-  const pass = data.burntAreaFraction < 0.01; // < 1% of blocks burnt
+  // ZERO TOLERANCE: any burnt block = FAIL
+  const pass = data.burntBlockCount === 0;
 
   const details = [];
   if (!pass) {
-    details.push(`BURNT REGIONS DETECTED: ${data.burntBlockCount}/${data.totalBlocks} blocks (${(data.burntAreaFraction * 100).toFixed(1)}%) have >5% clipped pixels.`);
+    details.push(`BURNT REGIONS: ${data.burntBlockCount} block(s) of ${blockSize}×${blockSize}px have >${blockBurntPct}% pixels above ${threshold}. ZERO burnt blocks allowed.`);
     if (data.worstBlocks.length > 0) {
-      details.push(`Worst: ${data.worstBlocks.map(b => `[${b.x},${b.y}] ${b.pctBurnt}%`).join(', ')}`);
+      details.push(`Locations: ${data.worstBlocks.map(b => `[${b.x},${b.y}] ${b.pctBurnt}%`).join(', ')}`);
     }
-    details.push('Reduce stretch, increase headroom, or use tighter masks to protect bright regions.');
+    details.push('Apply min($T, 0.80) through core mask, or reduce stretch/LHE/curves strength.');
   } else {
-    details.push(`No significant burning: ${data.burntBlockCount}/${data.totalBlocks} blocks (${(data.burntAreaFraction * 100).toFixed(1)}%)`);
+    details.push(`Clean: 0/${data.totalBlocks} blocks burnt (${blockSize}×${blockSize}px, threshold ${threshold})`);
   }
 
   return {
     pass,
     burntBlockCount: data.burntBlockCount,
     totalBlocks: data.totalBlocks,
-    burntAreaFraction: data.burntAreaFraction,
     worstBlocks: data.worstBlocks,
     details: details.join(' ')
   };

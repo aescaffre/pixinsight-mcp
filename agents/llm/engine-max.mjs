@@ -247,8 +247,9 @@ export class MaxAgent {
   _parseFinishResult(text) {
     if (!text) return null;
 
-    // Look for finish tool output pattern: "Finished. Best: <view_id>"
-    const finishMatch = text.match(/Finished\.\s*Best:\s*(\w+)/);
+    // Look for finish tool output pattern: "Finished (quality gates PASSED). Best: <view_id>"
+    // Also matches simpler "Finished. Best: <view_id>" form
+    const finishMatch = text.match(/Finished\b[^.]*\.\s*Best:\s*(\w+)/);
     if (finishMatch) {
       const viewId = finishMatch[1];
       // Extract rationale if present
