@@ -19,7 +19,7 @@ import { createBridgeContext } from '../ops/bridge.mjs';
 import { ArtifactStore } from '../artifact-store.mjs';
 import { buildToolSet } from './tools.mjs';
 import { getStats, measureUniformity } from '../ops/index.mjs';
-import { createStateMachine } from './state-machine.mjs';
+import { createStateMachine, checkBranchCompleteness } from './state-machine.mjs';
 import { findRepairPolicy, checkRepairToolAccess, generateRepairGuidance } from './repair-policies.mjs';
 
 // Parse arguments
@@ -66,6 +66,28 @@ function syncBriefState() {
   brief._budget = stateMachine.getBudgetStatus();
   brief._provenance = viewProvenance;
   brief._stateMachine = stateMachine;
+}
+
+// Periodic swap cleanup — every 20 tool calls, clean stale swap files (>5min old)
+const SWAP_DIR = '/var/folders/zs/l60syh197h32ptdrp2yfvzs00000gn/C';
+function periodicSwapCleanup() {
+  if (traceSeq % 20 !== 0 || traceSeq === 0) return;
+  try {
+    const files = fs.readdirSync(SWAP_DIR).filter(f => f.startsWith('~PI~') && f.endsWith('.swp'));
+    const now = Date.now();
+    const threshold = now - 10 * 60 * 1000; // 10 minutes — conservative to avoid hitting active files
+    let freed = 0;
+    for (const file of files) {
+      const p = path.join(SWAP_DIR, file);
+      try {
+        const stat = fs.statSync(p);
+        if (stat.mtimeMs < threshold) { fs.unlinkSync(p); freed += stat.size; }
+      } catch {}
+    }
+    if (freed > 0) {
+      process.stderr.write(`[mcp] Swap cleanup: freed ${(freed / 1024 / 1024).toFixed(0)}MB stale swap\n`);
+    }
+  } catch {}
 }
 
 function writeTraceEntry(entry) {
@@ -125,6 +147,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // Sync state to brief
   syncBriefState();
 
+  // Swap cleanup DISABLED — deleting swap files while PI is running causes crashes.
+  // periodicSwapCleanup();
+
   // === STATE MACHINE: check tool access ===
   const access = stateMachine.checkToolAccess(name);
   if (!access.allowed) {
@@ -151,10 +176,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   // Track provenance for composition tools
-  const compositionTools = ['lrgb_combine', 'ha_inject_red', 'ha_inject_luminance', 'dynamic_narrowband_blend', 'star_screen_blend'];
+  const compositionTools = ['lrgb_combine', 'ha_inject_red', 'ha_inject_luminance', 'dynamic_narrowband_blend', 'star_screen_blend', 'star_protected_blend'];
   const viewId = args?.view_id || args?.rgb_id || args?.target_id || null;
   if (compositionTools.includes(name) && viewId) {
     viewProvenance.set(viewId, { tool: name, params: summarizeArgs(args), seq });
+  }
+
+  // Invalidate star integrity when a star-modifying tool touches a tracked view
+  const STAR_MODIFYING_TOOLS = new Set(['run_pixelmath', 'run_curves', 'stretch_stars', 'run_nxt', 'run_bxt']);
+  if (STAR_MODIFYING_TOOLS.has(name) && viewId && brief?._starIntegrity?.[viewId]) {
+    delete brief._starIntegrity[viewId];
+    process.stderr.write(`[mcp] Star integrity invalidated for ${viewId} (modified by ${name})\n`);
+  }
+
+  // Age star integrity records (increment turnsAgo for all tracked entries)
+  if (brief?._starIntegrity) {
+    for (const key of Object.keys(brief._starIntegrity)) {
+      brief._starIntegrity[key].turnsAgo = (brief._starIntegrity[key].turnsAgo || 0) + 1;
+    }
   }
 
   try {
@@ -177,19 +216,65 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // Record tool call in state machine (may trigger state transition)
     stateMachine.recordToolCall(name, args || {}, resultText);
 
+    // === POST-CALL: track star integrity results ===
+    if (name === 'check_star_layer_integrity' && brief) {
+      // The tool handler already stores in brief._starIntegrity, but we also
+      // reset turnsAgo to 0 since the check was just run this turn
+      const starViewId = args?.view_id;
+      if (starViewId && brief._starIntegrity?.[starViewId]) {
+        brief._starIntegrity[starViewId].turnsAgo = 0;
+      }
+    }
+
     // === REPAIR POLICY: detect gate failures that need structured repair ===
     let repairGuidance = '';
-    if (['check_saturation', 'scan_burnt_regions', 'check_star_quality'].includes(name)) {
+    if (['check_saturation', 'scan_burnt_regions', 'check_star_quality', 'check_tonal_presence'].includes(name)) {
       const isFail = resultText.includes('FAIL') || resultText.includes('REJECTED');
       if (isFail && stateMachine.state !== 'repair') {
         const prov = viewProvenance.get(viewId || args?.view_id);
         const category = brief?.target?.classification || 'unknown';
         const policy = findRepairPolicy(name, { resultText }, prov, category);
         if (policy && !policy.advisory) {
-          // Enter repair state
-          stateMachine.enterRepair(policy);
-          repairGuidance = '\n\n' + generateRepairGuidance(policy, prov);
+          // Enter repair state (only from compose)
+          if (stateMachine.state === 'compose') {
+            stateMachine.enterRepair(policy);
+            repairGuidance = '\n\n' + generateRepairGuidance(policy, prov);
+          }
         }
+      }
+    }
+
+    // === BRANCH COMPLETENESS: blocking check on compose transition ===
+    // Detect transition into compose (previous state was generate_candidates,
+    // current state is compose — recordToolCall above may have triggered this).
+    let branchWarnings = '';
+    const justEnteredCompose = stateMachine.state === 'compose' && traceEntry.args && (
+      name === 'lrgb_combine' || name === 'star_screen_blend' || name === 'star_protected_blend'
+    );
+    if (justEnteredCompose && store) {
+      try {
+        const variants = store.listVariants(agentName);
+        const bcResult = checkBranchCompleteness(variants, brief);
+        if (!bcResult.complete && bcResult.warnings.length > 0) {
+          const budget = stateMachine.getBudgetStatus();
+          const budgetAllowsBlock = budget.status !== 'converge' && budget.status !== 'critical';
+          const overridden = stateMachine._branchCompletenessOverride;
+
+          if (budgetAllowsBlock && !overridden) {
+            // BLOCKING: force back to generate_candidates
+            stateMachine.transitionTo('generate_candidates');
+            branchWarnings = '\n[BRANCH COMPLETENESS — BLOCKED] Compose rejected: incomplete branches. ' +
+              'You MUST go back and generate more variants before composing.\n' +
+              bcResult.warnings.map(w => '  - ' + w).join('\n') +
+              '\nReturn to generate_candidates and address the gaps above, then retry composition.';
+          } else {
+            // Advisory only (budget pressure or explicit override)
+            const reason = overridden ? 'override active' : `budget ${budget.status}`;
+            branchWarnings = `\n[BRANCH COMPLETENESS — advisory, ${reason}] ` + bcResult.warnings.join(' | ');
+          }
+        }
+      } catch (_e) {
+        // Non-blocking on error
       }
     }
 
@@ -197,7 +282,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const budget = stateMachine.getBudgetStatus();
     const budgetSuffix = `\n[Budget: ${budget.turnsRemaining}/${budget.maxTurns} turns — ${budget.status} | State: ${stateMachine.state}` +
       (budget.guidance.length > 0 ? ` | ${budget.guidance.join('; ')}` : '') + ']' +
-      repairGuidance;
+      repairGuidance + branchWarnings;
 
     // Normalize to MCP content format
     if (Array.isArray(result)) {

@@ -102,7 +102,8 @@ You must behave like a disciplined director:
 - SPCC for galaxy color when WCS available
 - copy_astrometric_solution after BXT if WCS stripped
 - Masks for LHE and HDRMT always
-- star_screen_blend for star reintegration
+- star_protected_blend for star reintegration (replaces star_screen_blend — auto core protection)
+- check_star_layer_integrity BEFORE any star blend (precondition)
 - lrgb_combine for L+RGB merge
 
 ${isGalaxy ? `## GALAXY PROCESSING RULES
@@ -147,10 +148,9 @@ Only EXTENDED burnt regions trigger this gate.
 - **WHY two levels?** v13 showed that a bright core (max 0.93) WITH visible detail is far better than a dim core (max 0.78) that's been clamped into a flat gray blob. Aggressive clamping destroys the very detail we're trying to preserve. Trust your EYES over the numbers.
 - Use \`continuous_clamp\` only when VISUAL inspection confirms detail loss — NOT as a preventive measure.
 - Seti stretch headroom=0.10 for L channel. For planetary nebulae: L stretch 0.25 max.
-- **Apply TWO continuous clamps — one BEFORE star blend AND one AFTER:**
-  1. Pre-star: \`continuous_clamp\` (min_clamp=0.80, max_clamp=0.95) after all LHE/curves/L-enhancement
-  2. Post-star: \`continuous_clamp\` (min_clamp=0.83, max_clamp=0.92) — tighter to catch screen blend push-back
-  Run \`scan_burnt_regions\` AFTER EACH clamp to verify zero burnt blocks before proceeding.
+- **Pre-star clamp** (if needed): If \`scan_burnt_regions\` detects blocks above 0.95 BEFORE star blend, apply \`continuous_clamp\` (min_clamp=0.80, max_clamp=0.95). Verify with burn scan after.
+- **Post-star clamp is SECONDARY cleanup only**: \`star_protected_blend\` auto-attenuates in bright cores. If burn scan still fails AFTER protected blend, the correct fix is to restore pre-star checkpoint and re-blend with lower strength or tighter core protection — NOT to apply continuous_clamp on the result. Clamp is only acceptable as a final safety net if the re-blend approach has already been tried.
+- **If star blend causes burns**: restore pre-star checkpoint → reduce blend strength or lower core_threshold_high → re-blend. Do NOT enter a clamp→blend→burn→clamp cycle.
 
 ### 4. NO OVER-DENOISING — this is critical
 NXT denoise too high softens real detail and creates plastic appearance.
@@ -183,6 +183,15 @@ This target has Ha data. Ha injection is NOT optional.
 - HII regions must glow pink in the final image
 - If HII knots are not visibly colored, Ha injection failed — push harder` : ''}
 
+### ${hasHa ? '6' : '5'}. TONAL PRESENCE — SUBJECT MUST BE IMPACTFUL
+Use \`check_tonal_presence\` on composition candidates BEFORE star blend.
+- **Subdued** (separation < 3×): restore pre-star checkpoint, apply ONE subject-masked midtone lift, re-blend
+- **Balanced** (3-8×): good — subject is tonally impactful
+- **Aggressive** (>8×): check for burns in bright areas
+- Deterministic ROI-based measurement, not visual impression
+- Low ROI confidence → advisory only (few subject pixels detected)
+- This catches images that are technically safe but emotionally flat — a dim galaxy that passes brightness gate but doesn't STAND OUT from the background
+
 ### WORKFLOW: Burn-scan EVERY branch, EVERY step
 **CRITICAL: scan_burnt_regions is not just for compositions — run it on EVERY view after EVERY histogram-modifying operation:**
 - After stretch (seti_stretch, stretch_stars)
@@ -199,10 +208,12 @@ A burnt branch will contaminate every composition that uses it.
 **v8 failure**: color_bold branch had max=1.0 from double S curves + unmasked Ha. This burnt branch was used in all compositions, making every final image have a blown core. The burn scan only caught it at composition level (0.2% blocks) which was too late.
 
 Additional gates:
-1. After star reintegration: \`check_star_quality\`
-2. Compare candidates: \`check_sharpness\`
-3. **After star blend: use \`continuous_clamp\` (min_clamp=0.83, max_clamp=0.92)** — smoothly re-clamps bright areas pushed back by screen blend, without dimming background stars. This is the absolute last pixel-modifying step.
-4. Only call \`finish\` when all gates would pass
+1. BEFORE star blend: \`check_star_layer_integrity\` (PRECONDITION — blend refuses without it)
+2. BEFORE star blend: \`check_tonal_presence\` (fix subdued subjects BEFORE blending stars)
+3. After star reintegration: \`check_star_quality\`
+4. After star blend: \`scan_burnt_regions\` — if burn detected, restore pre-star checkpoint and re-blend. Do NOT use continuous_clamp as primary fix.
+5. Compare candidates: \`check_sharpness\`
+6. Only call \`finish\` when all gates would pass
 
 # ======================================================================
 # PHASE 0 — INTAKE AND MEMORY
@@ -407,13 +418,17 @@ The \`check_star_quality\` gate requires >= 50 detected stars.
 
 Required candidates: stars_bright, stars_target, stars_reduced, stars_overreduced
 
-Tools: stretch_stars, run_curves, run_pixelmath, save_variant
+Tools: stretch_stars, run_curves, run_pixelmath, check_star_layer_integrity, save_variant
 - Start with NO reduction and STRONG color saturation: S channel [[0,0],[0.30,0.55],[0.60,0.85],[1,1]] (apply twice)
 - Brighten stars if needed: \`max($T * 1.3, $T)\` or gentle curves lift on the star layer
 - Do NOT reduce stars unless they are genuinely bloated (FWHM > 6px). Default: NO reduction (factor 1.0).
 - Never go below factor 0.90. Stars that are barely visible = FAILURE.
 - The "overdone" candidate here should be OVER-REDUCED (too faint) to mark the boundary.
-- Screen blend strength: **0.90-1.00** — do NOT go below 0.85. Previous runs used 0.55-0.65 which killed stars.
+- **BEFORE blending**: call \`check_star_layer_integrity\` on the star winner
+- Star max must be < 0.98 — if clipped, apply soft rolloff on star layer FIRST:
+  \`iif($T > 0.65, 0.65 + ($T - 0.65) * 0.46, $T)\` (compresses 0.65-1.0 → 0.65-0.81)
+- \`star_protected_blend\` auto-attenuates in bright cores — replaces star_screen_blend
+- Blend strength: **0.90-1.00** — do NOT go below 0.85. Previous runs used 0.55-0.65 which killed stars.
 
 # ======================================================================
 # PHASE 3 — BRANCH CRITIC PASS
@@ -457,7 +472,7 @@ If critic says refinement needed, do exactly ONE narrow round:
 
 Combine branch winners into final compositions.
 
-Tools: lrgb_combine, run_curves, run_pixelmath, star_screen_blend, create_luminance_mask, create_zone_masks, create_synthetic_luminance, apply_mask, save_variant, get_image_stats, measure_subject_detail
+Tools: lrgb_combine, run_curves, run_pixelmath, star_protected_blend, check_star_layer_integrity, check_tonal_presence, create_luminance_mask, create_zone_masks, create_synthetic_luminance, apply_mask, save_variant, get_image_stats, measure_subject_detail
 
 Required: at least 3 composition variants:
 - COMP_balanced — safe combination of all branch winners
@@ -510,12 +525,13 @@ After initial composition, BEFORE stars:
    - Push halo until the outer shell is OBVIOUSLY visible to a casual viewer
    - Do NOT use zone masks for brightness clamping — use continuous_clamp instead
 4. Remove all zone masks, verify with \`scan_burnt_regions\` (gate: 0.93 threshold)
-5. Blend stars
-6. **POST-STAR CONTINUOUS CLAMP (MANDATORY — absolute last processing step):**
-   - Screen blend pushes clamped values back above limits. You MUST clamp AFTER stars.
-   - Use \`continuous_clamp\` (min_clamp=0.83, max_clamp=0.92) — slightly tighter to catch screen blend push-back
-   - This smoothly re-clamps only the bright areas that screen blend pushed back up, without dimming background stars
-   - This is the ABSOLUTE LAST step before save_variant/finish — nothing else modifies pixels after this
+5. \`check_star_layer_integrity\` on star winner (PRECONDITION for blend)
+6. \`star_protected_blend\` — auto-attenuates in bright cores, preventing star-blend burns
+7. \`scan_burnt_regions\` — if burn detected, restore pre-star checkpoint and re-blend with lower strength (do NOT clamp)
+8. **POST-STAR continuous_clamp** (SECONDARY safety only, NOT primary fix):
+   - Only use if burn scan passes but a few blocks are borderline (>0.80 warning level)
+   - Use \`continuous_clamp\` (min_clamp=0.83, max_clamp=0.92) — slightly tighter to catch residual push-back
+   - If burn scan FAILS after protected blend, the fix is re-blend with lower strength, not clamp
 
 **Why this works:** Global HDRMT compresses dynamic range everywhere (no mask boundary artifacts). Continuous clamp uses a single heavily-blurred luminance mask — perfectly smooth gradient from core to background, zero boundary artifacts. Zone masks are used ONLY for LHE targeting where boundary artifacts are acceptable at the spatial scale of LHE processing.
 
@@ -532,7 +548,13 @@ After initial composition, BEFORE stars:
 If the halo is invisible (coverage < 3%), the shadow-lift was too weak or got crushed — push harder.
 ` : ''}
 
-${hasL ? `**CRITICAL — L/RGB BRIGHTNESS MATCHING BEFORE LRGB:**
+${hasL ? `**MANDATORY: LRGB COMBINE IS NOT OPTIONAL.**
+When L data is available, you MUST use lrgb_combine in every composition. The L channel represents
+the majority of integration time and contains all the faint structure (IFN, halos, dust lanes).
+Skipping it wastes the user's most valuable data. RGB-only compositions are NOT acceptable when L exists.
+If the L/RGB median mismatch is large, fix it with brightness curves on RGB BEFORE combining — do NOT skip LRGB.
+
+**L/RGB BRIGHTNESS MATCHING BEFORE LRGB:**
 Before lrgb_combine, check RGB and L medians with get_image_stats.
 If RGB median < 50% of L median, LRGB will produce a very dark result (L pulls lightness up
 but dim RGB chrominance dominates appearance). Fix by applying brightness curves to RGB FIRST:
@@ -552,12 +574,20 @@ ${hasL ? '1. Match RGB brightness to L (curves if needed), then lrgb_combine (FI
 2. Post-LRGB brightness recovery if needed (CIE L* curves)
 3. Apply IFN shadow-lift if applicable (through inverted mask for faint structure)
 4. Apply saturation
-5. star_screen_blend with branch D winner
-6. **POST-STAR CONTINUOUS CLAMP** (MANDATORY): Screen blend pushes clamped pixels back above limits.
-   Use \`continuous_clamp\` (min_clamp=0.83, max_clamp=0.92) — smoothly re-clamps bright areas without dimming background stars.
-   This is the ABSOLUTE LAST pixel-modifying step before save_variant/finish.
-7. measure_subject_detail — verify brightness > 0.25, contrast > 3×
-8. save_variant
+5. \`check_tonal_presence\` — if subdued (separation <3×), apply ONE subject-masked midtone lift BEFORE stars
+   - ROI-based deterministic measurement, not visual impression
+   - Low ROI confidence = advisory only. High/medium confidence = hard fail if subdued.
+   - Fix: create luminance mask → run_curves through mask → re-check tonal presence
+6. \`check_star_layer_integrity\` on star winner (PRECONDITION — blend will REFUSE without it)
+   - FAIL (max ≥ 0.98): apply soft rolloff to star layer first, then re-check
+   - Integrity record is INVALIDATED if you modify the star layer after checking
+7. \`star_protected_blend\` (auto core attenuation — reduces star contribution smoothly in bright areas)
+8. \`scan_burnt_regions\` — verify no burns after blend
+   - If burn detected: restore pre-star checkpoint → re-blend with lower strength. Do NOT use continuous_clamp as primary fix.
+   - continuous_clamp is ONLY acceptable as secondary cleanup after re-blend has been tried
+9. \`check_tonal_presence\` — if subdued after star blend, restore pre-star checkpoint and repair upstream
+10. measure_subject_detail — verify brightness > 0.25, contrast > 3×
+11. save_variant
 
 # ======================================================================
 # PHASE 6 — COMPOSITION CRITIC PASS

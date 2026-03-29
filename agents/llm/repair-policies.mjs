@@ -35,6 +35,8 @@ const SATURATION_REPAIR_TOOLS = new Set([
   ...BASELINE_TOOLS,
   'lrgb_combine',
   'star_screen_blend',
+  'star_protected_blend',
+  'check_star_layer_integrity',
   'continuous_clamp',
   'multi_scale_enhance',
   'run_curves',
@@ -51,6 +53,8 @@ const BURN_REPAIR_TOOLS = new Set([
   'run_pixelmath',
   'lrgb_combine',
   'star_screen_blend',
+  'star_protected_blend',
+  'check_star_layer_integrity',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -252,7 +256,9 @@ const POLICIES = [
     blocking: true,
 
     matches(gateName, _gateResult, provenance, _category) {
-      const COMP_TOOLS = new Set(['lrgb_combine', 'star_screen_blend']);
+      const COMP_TOOLS = new Set(['lrgb_combine']);
+      // Note: star_screen_blend/star_protected_blend burns are now handled by
+      // burn_after_star_blend (policy 6), which takes priority due to ordering.
       return (
         gateName === 'scan_burnt_regions' &&
         provenance?.tool != null &&
@@ -345,7 +351,132 @@ const POLICIES = [
     maxRepairTurns: 6,
   },
 
-  // ---- 6. ringing_edge_on_advisory ----
+  // ---- 6. burn_after_star_blend ----
+  {
+    id: 'burn_after_star_blend',
+    description: 'Burnt regions detected after star reintegration (screen blend pushed core above limits)',
+    failureGate: 'scan_burnt_regions',
+    blocking: true,
+
+    matches(gateName, _gateResult, provenance, _category) {
+      const STAR_TOOLS = new Set(['star_protected_blend', 'star_screen_blend']);
+      return (
+        gateName === 'scan_burnt_regions' &&
+        provenance?.tool != null &&
+        STAR_TOOLS.has(provenance.tool)
+      );
+    },
+
+    requiredActions: [
+      { tool: 'restore_from_clone', params: { hint: 'pre_star_backup' } },
+      {
+        tool: 'star_protected_blend',
+        paramAdjustment: {
+          strength: 'decrease_by_0.15',
+          note: 'Re-blend with lower strength or tighter core protection (lower core_threshold_high by 0.10).',
+        },
+      },
+    ],
+
+    allowedTools: new Set([
+      // NOTE: continuous_clamp deliberately EXCLUDED — it is forbidden as the
+      // primary fix for star-blend burns. The agent MUST restore + re-blend first.
+      // After exiting repair back to compose, continuous_clamp is available there
+      // as a secondary safety net.
+      ...BASELINE_TOOLS,
+      'star_protected_blend',
+      'star_screen_blend',
+      'check_star_layer_integrity',
+      'check_tonal_presence',
+      'run_curves',
+      'run_pixelmath',
+      'create_luminance_mask',
+      'apply_mask',
+      'remove_mask',
+      'close_mask',
+    ]),
+
+    forbiddenTools: new Set([
+      'continuous_clamp',  // HARD FORBIDDEN — must fix reintegration upstream, not clamp downstream
+    ]),
+
+    forbiddenPatterns: [],
+
+    buildRetryLadder(provenance) {
+      const current = provenance?.params?.strength;
+      if (typeof current === 'number') {
+        return [
+          Math.max(0.30, +(current - 0.15).toFixed(2)),
+          Math.max(0.30, +(current - 0.30).toFixed(2)),
+          Math.max(0.30, +(current - 0.40).toFixed(2)),
+        ];
+      }
+      return [0.70, 0.55, 0.45];
+    },
+
+    maxRepairTurns: 10,
+  },
+
+  // ---- 7. tonal_presence_subdued ----
+  {
+    id: 'tonal_presence_subdued',
+    description: 'Subject is tonally subdued — technically safe but not impactful',
+    failureGate: 'check_tonal_presence',
+    blocking: true,
+
+    matches(gateName, gateResult, _provenance, _category) {
+      const isSubdued =
+        gateResult?.resultText?.includes('subdued') ||
+        gateResult?.tonal_verdict === 'subdued';
+      return gateName === 'check_tonal_presence' && isSubdued;
+    },
+
+    requiredActions: [
+      { tool: 'restore_from_clone', params: { hint: 'pre_star_backup' } },
+      {
+        tool: 'run_curves',
+        paramAdjustment: {
+          note: 'Apply ONE subject-masked midtone lift. Create luminance mask first, then apply brightness curves through it.',
+        },
+      },
+      {
+        tool: 'star_protected_blend',
+        paramAdjustment: { note: 'Re-blend stars after midtone lift.' },
+      },
+    ],
+
+    allowedTools: new Set([
+      ...BASELINE_TOOLS,
+      'run_curves',
+      'run_pixelmath',
+      'star_protected_blend',
+      'star_screen_blend',
+      'check_star_layer_integrity',
+      'check_tonal_presence',
+      'create_luminance_mask',
+      'apply_mask',
+      'remove_mask',
+      'close_mask',
+    ]),
+
+    forbiddenTools: new Set(),
+
+    forbiddenPatterns: [],
+
+    /** Guidance note: the agent MUST create a luminance mask and apply curves
+     *  through it. A global brightness boost (unmasked run_pixelmath or run_curves
+     *  without mask) will wash out the background and flatten structure.
+     *  This is enforced via guidance text, not arg-pattern matching. */
+
+    buildRetryLadder(_provenance) {
+      // No single parameter to ladder; the agent decides the curves shape
+      return null;
+    },
+
+    maxRepairTurns: 8,
+  },
+
+  // ---- 8. ringing_edge_on_advisory ----
   {
     id: 'ringing_edge_on_advisory',
     description:

@@ -11,7 +11,7 @@ import {
   runGC, runABE, runPerChannelABE, runSCNR,
   setiStretch,
   createLumMask, applyMask, removeMask, closeMask,
-  checkStarQuality, checkRinging, checkSharpness, checkCoreBurning, scanBurntRegions, checkSaturation,
+  checkStarQuality, checkRinging, checkSharpness, checkCoreBurning, scanBurntRegions, checkSaturation, checkTonalPresence, checkStarLayerIntegrity,
   measureSubjectDetail,
   multiScaleEnhance,
   extractPseudoOIII, continuumSubtractHa, dynamicNarrowbandBlend, createSyntheticLuminance, createZoneMasks, continuousClamp,
@@ -483,15 +483,41 @@ const TOOL_CATALOG = {
       const iterations = input.iterations ?? 5;
 
       // Seti star stretch method (proven in scripted pipeline):
-      // 1. Clip background pedestal (subtract median, rescale)
-      // 2. MTF iterations: progressively lift faint stars while constraining bright ones
+      // 1. Check linearity — refuse if already non-linear
+      // 2. Clip background pedestal (subtract median, rescale)
+      // 3. MTF iterations: progressively lift faint stars while constraining bright ones
       const r = await ctx.pjsr(`
         var w = ImageWindow.windowById('${input.view_id}');
         if (w.isNull) throw new Error('View not found: ${input.view_id}');
         var v = w.mainView;
 
-        // Step 1: Clip background pedestal
+        // Linearity guard: if max is very high but median is near zero,
+        // data is likely already stretched (non-linear). Stars on black background
+        // have median ~0 even when stretched, so check the 99th percentile of
+        // non-zero pixels instead.
+        var maxVal = v.image.maximum();
         var med = v.image.median();
+        // Sample non-zero pixels to estimate stretch state
+        var nonzeroAbove05 = 0;
+        var nonzeroTotal = 0;
+        var step = 16;
+        for (var y = 0; y < v.image.height; y += step) {
+          for (var x = 0; x < v.image.width; x += step) {
+            var val = v.image.isColor ? Math.max(v.image.sample(x,y,0), v.image.sample(x,y,1), v.image.sample(x,y,2)) : v.image.sample(x,y);
+            if (val > 0.005) {
+              nonzeroTotal++;
+              if (val > 0.5) nonzeroAbove05++;
+            }
+          }
+        }
+        var highFraction = nonzeroTotal > 0 ? nonzeroAbove05 / nonzeroTotal : 0;
+
+        // If >30% of star pixels are already above 0.5, data is non-linear
+        if (highFraction > 0.30) {
+          JSON.stringify({ alreadyStretched: true, highFraction: highFraction, maxVal: maxVal, med: med });
+        } else {
+
+        // Step 1: Clip background pedestal
         if (med > 0.00001) {
           var P = new PixelMath;
           P.expression = 'max(0, ($T - ' + med + ') / (1 - ' + med + '))';
@@ -522,8 +548,16 @@ const TOOL_CATALOG = {
         var finalMed = v.image.median();
         var finalMax = v.image.maximum();
         JSON.stringify({ bgClip: med, midtone: m, iterations: ${iterations}, finalMedian: finalMed, finalMax: finalMax });
+
+        } // end else (linearity guard)
       `);
       const result = JSON.parse(r.outputs?.consoleOutput || '{}');
+
+      // Handle already-stretched guard
+      if (result.alreadyStretched) {
+        return { type: 'text', text: `REFUSED: Star layer appears already non-linear (${(result.highFraction * 100).toFixed(0)}% of star pixels > 0.5, max=${result.maxVal?.toFixed(4)}). stretch_stars is designed for LINEAR input only. The star layer from prep is already stretched — skip this tool and proceed directly to saturation curves and rolloff.` };
+      }
+
       return { type: 'text', text: `Stars stretched (Seti method): bgClip=${result.bgClip?.toFixed(6)}, midtone=${midtone}, ${iterations} iterations. Final: median=${result.finalMedian?.toFixed(4)}, max=${result.finalMax?.toFixed(4)}` };
     }
   },
@@ -1003,11 +1037,90 @@ const TOOL_CATALOG = {
   },
 
   // --- Stars ---
+  star_protected_blend: {
+    category: 'stars',
+    definition: {
+      name: 'star_protected_blend',
+      description: 'Core-safe star reintegration via screen blend with luminance-based spatial attenuation. Smoothly reduces star contribution from 100% in dark sky to min_strength_fraction in bright cores, preventing star-blend-induced core burns. PRECONDITION: check_star_layer_integrity must have been called on the star layer first (will refuse otherwise).',
+      input_schema: {
+        type: 'object',
+        properties: {
+          target_id: { type: 'string', description: 'Starless image view ID' },
+          stars_id: { type: 'string', description: 'Stars-only image view ID' },
+          strength: { type: 'number', description: 'Star blend strength (0.5-1.2, default 0.85)' },
+          core_threshold_low: { type: 'number', description: 'Luminance below which stars blend at full strength (default 0.60)' },
+          core_threshold_high: { type: 'number', description: 'Luminance above which stars blend at min_strength_fraction (default 0.85)' },
+          min_strength_fraction: { type: 'number', description: 'Minimum star strength fraction in bright cores (default 0.15)' }
+        },
+        required: ['target_id', 'stars_id']
+      }
+    },
+    handler: async (ctx, _store, brief, input) => {
+      const starsId = input.stars_id;
+
+      // Check precondition: star integrity must have been checked
+      const integrityRecord = brief?._starIntegrity?.[starsId];
+      if (!integrityRecord) {
+        return {
+          type: 'text',
+          text: `REFUSED: No star layer integrity check found for "${starsId}". ` +
+            `Call check_star_layer_integrity on the star layer FIRST, then retry star_protected_blend.`
+        };
+      }
+      if (integrityRecord.verdict === 'FAIL') {
+        return {
+          type: 'text',
+          text: `REFUSED: Star layer "${starsId}" FAILED integrity check (max=${integrityRecord.max_value?.toFixed(4)}). ` +
+            `Fix the star layer first: apply soft rolloff (e.g. min($T, 0.95) or smooth compression above 0.65), ` +
+            `then re-run check_star_layer_integrity before blending.`
+        };
+      }
+      if (integrityRecord.turnsAgo > 15) {
+        // Warn but don't refuse — stale check
+      }
+
+      const str = input.strength ?? 0.85;
+      const low = input.core_threshold_low ?? 0.60;
+      const high = input.core_threshold_high ?? 0.85;
+      const minFrac = input.min_strength_fraction ?? 0.15;
+
+      // Build PixelMath expression with luminance-based spatial attenuation
+      // protection = iif(lum < low, 1.0, iif(lum > high, minFrac, 1.0 - (1-minFrac)*(lum-low)/(high-low)))
+      // result = ~(~$T * ~(stars * strength * protection))
+      const protExpr =
+        `iif(lum < ${low}, 1.0, iif(lum > ${high}, ${minFrac}, ` +
+        `1.0 - ${(1 - minFrac).toFixed(4)} * (lum - ${low}) / ${(high - low).toFixed(4)}))`;
+
+      await ctx.pjsr(`
+        var P = new PixelMath;
+        var lumExpr = '0.2126*${input.target_id}[0]+0.7152*${input.target_id}[1]+0.0722*${input.target_id}[2]';
+        P.expression = 'lum=' + lumExpr + '; prot=${protExpr}; ~(~$T * ~(${starsId} * ${str} * prot))';
+        P.useSingleExpression = true;
+        P.use64BitWorkingImage = true;
+        P.truncate = true; P.truncateLower = 0; P.truncateUpper = 1;
+        P.createNewImage = false;
+        P.symbols = 'lum, prot';
+        P.executeOn(ImageWindow.windowById('${input.target_id}').mainView);
+      `);
+
+      const stats = await getStats(ctx, input.target_id);
+      const staleNote = integrityRecord.turnsAgo > 15
+        ? ' (NOTE: star integrity check is stale — consider re-checking)'
+        : '';
+      return {
+        type: 'text',
+        text: `Stars blended (protected, strength=${str}, core_low=${low}, core_high=${high}, min_frac=${minFrac}). ` +
+          `${statsLine(stats)}${staleNote}`
+      };
+    }
+  },
+
+  // Backward compatibility alias
   star_screen_blend: {
     category: 'stars',
     definition: {
       name: 'star_screen_blend',
-      description: 'Add stars back via screen blend: ~(~target * ~(stars * strength)). Screen blend avoids SXT residual rim artifacts that additive shows.',
+      description: '[DEPRECATED — use star_protected_blend instead] Redirects to star_protected_blend with default core protection. Call check_star_layer_integrity on the star layer first.',
       input_schema: {
         type: 'object',
         properties: {
@@ -1018,18 +1131,9 @@ const TOOL_CATALOG = {
         required: ['target_id', 'stars_id']
       }
     },
-    handler: async (ctx, _store, _brief, input) => {
-      const str = input.strength ?? 0.85;
-      await ctx.pjsr(`
-        var P = new PixelMath;
-        P.expression = "~(~${input.target_id} * ~(${input.stars_id} * ${str}))";
-        P.useSingleExpression = true;
-        P.use64BitWorkingImage = true;
-        P.truncate = true; P.truncateLower = 0; P.truncateUpper = 1;
-        P.createNewImage = false;
-        P.executeOn(ImageWindow.windowById('${input.target_id}').mainView);
-      `);
-      return { type: 'text', text: `Stars blended (screen, strength=${str})` };
+    handler: async (ctx, store, brief, input, agentName) => {
+      // Redirect to star_protected_blend
+      return TOOL_CATALOG.star_protected_blend.handler(ctx, store, brief, input, agentName);
     }
   },
 
@@ -1707,6 +1811,29 @@ const TOOL_CATALOG = {
         warnings.push(`Saturation check error: ${e.message} — inspect manually`);
       }
 
+      // Gate 8: Tonal presence — subject must be impactful, not merely safe
+      try {
+        const category = brief?.target?.classification || 'unknown';
+        const tonalResult = await checkTonalPresence(ctx, input.view_id, category);
+        if (tonalResult.tonal_verdict === 'subdued') {
+          if (tonalResult.roi_confidence === 'low') {
+            warnings.push(`TONAL PRESENCE advisory: subject appears subdued (separation=${tonalResult.separation.toFixed(2)}×) but ROI confidence is low — manual inspection recommended.`);
+          } else {
+            const msg = `TONAL PRESENCE SUBDUED: subject/background separation=${tonalResult.separation.toFixed(2)}× (need >3×). ` +
+              `Subject is too dim to be impactful. Restore pre-star checkpoint, apply subject-masked midtone lift, re-blend stars.`;
+            if (isEmergency) {
+              warnings.push(`[RELAXED] ${msg}`);
+            } else {
+              failures.push(msg);
+            }
+          }
+        } else if (tonalResult.tonal_verdict === 'aggressive') {
+          warnings.push(`Tonal presence aggressive (separation=${tonalResult.separation.toFixed(2)}×). Verify no burns in bright subject areas.`);
+        }
+      } catch (e) {
+        // Non-blocking
+      }
+
       if (failures.length > 0) {
         return {
           type: 'text',
@@ -1733,7 +1860,7 @@ const TOOL_CATALOG = {
       const warnText = warnings.length > 0 ? `\nWarnings:\n${warnings.map(w => '  - ' + w).join('\n')}` : '';
       return {
         type: 'text',
-        text: `Finished (quality gates PASSED). Best: ${input.view_id} (median=${finalStats.median.toFixed(6)}, max=${(finalStats.max ?? 0).toFixed(4)})${warnText}\nRationale: ${input.rationale}`
+        text: `Finished (quality gates PASSED). Best: ${input.view_id} (median=${finalStats.median.toFixed(6)}, max=${(finalStats.max ?? 0).toFixed(4)})${warnText}\nRationale: ${input.rationale}\n<<FINISH_VIEW_ID=${input.view_id}>>`
       };
     }
   },
@@ -2225,6 +2352,100 @@ const TOOL_CATALOG = {
       } catch (e) {
         return { type: 'text', text: `Saturation check error: ${e.message}` };
       }
+    }
+  },
+
+  check_tonal_presence: {
+    category: 'quality_gate',
+    definition: {
+      name: 'check_tonal_presence',
+      description: 'Deterministic tonal critic: measures whether the subject is tonally impactful relative to background, or merely technically safe but subdued. Returns verdict: subdued (<3× separation), balanced (3-8×), aggressive (>8×). Use BEFORE star blend on composition candidates. Subdued = HARD FAIL if ROI confidence is high/medium.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'View ID to check (ideally starless composition)' },
+          category: { type: 'string', description: 'Target classification (e.g. galaxy_spiral, planetary_nebula)' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, brief, input) => {
+      const category = input.category || brief?.target?.classification || 'unknown';
+      const result = await checkTonalPresence(ctx, input.view_id, category);
+      const status = result.pass ? (result.tonal_verdict === 'subdued' ? 'ADVISORY' : 'PASS') : 'FAIL';
+
+      let guidance = '';
+      if (result.tonal_verdict === 'subdued' && result.roi_confidence !== 'low') {
+        guidance = '\n\nACTION REQUIRED: Subject is too dim relative to background.\n' +
+          '  1. Restore pre-star checkpoint\n' +
+          '  2. Apply ONE subject-masked midtone lift (run_curves through luminance mask)\n' +
+          '  3. Re-blend stars after lifting\n' +
+          '  Do NOT apply blind global brightness boost.';
+      } else if (result.tonal_verdict === 'aggressive') {
+        guidance = '\n\nNOTE: Very high separation — check for burns in subject bright areas with scan_burnt_regions.';
+      }
+
+      return {
+        type: 'text',
+        text: `[TONAL PRESENCE: ${status} — ${result.tonal_verdict.toUpperCase()}] ${result.details}\n` +
+          `  Separation: ${result.separation?.toFixed(2)}× (subdued: <3, balanced: 3-8, aggressive: >8)\n` +
+          `  Subject median: ${result.subject_median?.toFixed(4)}, Background median: ${result.background_median?.toFixed(4)}\n` +
+          `  Core brightness: ${result.core_brightness?.toFixed(4)}, Faint visibility: ${result.faint_structure_visibility?.toFixed(3)}\n` +
+          `  ROI confidence: ${result.roi_confidence}, mode: ${result.roi_mode}, subject pixels: ${result.subjectPixelCount}` +
+          (result.category_metrics?.core_to_disk != null ? `\n  Core-to-disk ratio: ${result.category_metrics.core_to_disk.toFixed(2)}` : '') +
+          guidance
+      };
+    }
+  },
+
+  check_star_layer_integrity: {
+    category: 'quality_gate',
+    definition: {
+      name: 'check_star_layer_integrity',
+      description: 'Pre-blend star layer validation: checks for clipping, color loss, and quality issues in the star layer. PRECONDITION for star_protected_blend — must be called before blending stars. FAIL: max >= 0.98 or any pixel > 0.995. WARN: >1% near-clipped or low color diversity.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'Star layer view ID to validate' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, brief, input) => {
+      const result = await checkStarLayerIntegrity(ctx, input.view_id);
+
+      // Store result in brief for star_protected_blend precondition check
+      if (brief) {
+        if (!brief._starIntegrity) brief._starIntegrity = {};
+        brief._starIntegrity[input.view_id] = {
+          verdict: result.verdict,
+          pass: result.pass,
+          max_value: result.max_value,
+          seq: brief._budget?.turnsUsed || 0,
+          turnsAgo: 0,
+        };
+      }
+
+      let guidance = '';
+      if (result.verdict === 'FAIL') {
+        guidance = '\n\nFIX REQUIRED before star blend:\n' +
+          '  Apply soft rolloff to star layer: run_pixelmath with expression:\n' +
+          '    "iif($T > 0.65, 0.65 + ($T - 0.65) * 0.46, $T)" (compresses 0.65-1.0 → 0.65-0.81)\n' +
+          '  Or simpler: "min($T, 0.95)" then re-check.\n' +
+          '  Then call check_star_layer_integrity again to verify.';
+      }
+
+      return {
+        type: 'text',
+        text: `[STAR INTEGRITY: ${result.verdict}] ${result.details}\n` +
+          `  Max value: ${result.max_value?.toFixed(4) || 'N/A'} (limit: <0.98)\n` +
+          `  Clipped >0.98: ${((result.clipped_fraction_98 || 0) * 100).toFixed(2)}%\n` +
+          `  Clipped >0.995: ${((result.clipped_fraction_995 || 0) * 100).toFixed(2)}%\n` +
+          `  Color diversity: ${result.color_diversity?.toFixed(4) || 'N/A'} (min: 0.05)\n` +
+          `  Bright star chroma: ${result.bright_star_chroma?.toFixed(4) || 'N/A'}\n` +
+          `  Non-zero pixels: ${result.nonzero_pixel_count || 0}` +
+          guidance
+      };
     }
   },
 

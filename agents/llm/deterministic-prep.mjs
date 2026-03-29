@@ -725,33 +725,14 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
   }
 
   // ========================================================================
-  // STEP 7: Stretch stars
+  // STEP 7: Star layer — deliver LINEAR to agent
   // ========================================================================
+  // DO NOT stretch stars here. The agent's stretch_stars tool is designed for
+  // linear input and handles pedestal clipping + MTF iterations properly.
+  // Previous mtf(0.01,$T) was wildly aggressive and caused double-stretch
+  // bloat when the agent stretched again (FWHM 13.5px on M81).
   if (result.views.stars) {
-    log('\n[PREP] Step 7: Stretching star layer...');
-    // stretch_stars clips background and applies MTF
-    await ctx.pjsr(`
-      var starsId='${result.views.stars}';
-      var w=ImageWindow.windowById(starsId);
-      if(!w.isNull){
-        var img=w.mainView.image;
-        var med=img.median();
-        if(med<0.01){
-          // Clip background pedestal
-          var PM=new PixelMath;
-          PM.expression='max($T-0.0001,0)';
-          PM.useSingleExpression=true;PM.createNewImage=false;
-          PM.executeOn(w.mainView);
-          // MTF stretch
-          var PM2=new PixelMath;
-          PM2.expression='mtf(0.01,$T)';
-          PM2.useSingleExpression=true;PM2.createNewImage=false;
-          PM2.executeOn(w.mainView);
-        }
-      }
-      'stars stretched';
-    `);
-    log('  Stars stretched');
+    log('\n[PREP] Step 7: Star layer kept LINEAR (agent will stretch via stretch_stars tool)');
   }
 
   // ========================================================================

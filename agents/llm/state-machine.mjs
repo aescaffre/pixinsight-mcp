@@ -39,8 +39,13 @@ const STATE_TOOLS = {
   assess: new Set([
     'recall_memory', 'list_open_images', 'get_image_stats',
     'measure_subject_detail', 'measure_uniformity', 'check_saturation',
-    'check_star_quality', 'save_and_show_preview', 'rename_view',
-    'get_image_dimensions', 'check_constraints',
+    'check_star_quality', 'check_ringing', 'check_sharpness',
+    'check_core_burning', 'scan_burnt_regions', 'check_constraints',
+    'check_tonal_presence',
+    'compute_scores', 'submit_scores',
+    'save_and_show_preview', 'save_variant', 'rename_view',
+    'get_image_dimensions',
+    'clone_image', 'close_image', 'purge_undo',
   ]),
 
   generate_candidates: new Set([
@@ -63,6 +68,7 @@ const STATE_TOOLS = {
     'check_saturation', 'check_star_quality', 'check_ringing',
     'check_sharpness', 'check_core_burning', 'scan_burnt_regions',
     'check_constraints', 'compute_scores',
+    'check_tonal_presence', 'check_star_layer_integrity',
     // Artifacts
     'continuous_clamp',
     // Variants
@@ -70,11 +76,11 @@ const STATE_TOOLS = {
     'save_and_show_preview', 'submit_scores',
     'list_open_images',
     // Star handling (for star branch)
-    'star_screen_blend',
+    'star_screen_blend', 'star_protected_blend',
   ]),
 
   compose: new Set([
-    'lrgb_combine', 'star_screen_blend',
+    'lrgb_combine', 'star_screen_blend', 'star_protected_blend',
     'run_curves', 'run_pixelmath',
     'multi_scale_enhance', 'continuous_clamp',
     'clone_image', 'restore_from_clone', 'close_image',
@@ -83,6 +89,7 @@ const STATE_TOOLS = {
     'get_image_stats', 'measure_subject_detail', 'measure_uniformity',
     'check_saturation', 'check_star_quality', 'check_ringing',
     'check_sharpness', 'scan_burnt_regions', 'check_constraints',
+    'check_tonal_presence', 'check_star_layer_integrity',
     'compute_scores', 'submit_scores',
     'create_luminance_mask', 'apply_mask', 'remove_mask', 'close_mask',
     'list_open_images', 'rename_view', 'purge_undo',
@@ -97,6 +104,7 @@ const STATE_TOOLS = {
     'get_image_stats', 'measure_subject_detail', 'measure_uniformity',
     'check_saturation', 'check_star_quality', 'check_ringing',
     'scan_burnt_regions', 'check_constraints', 'check_sharpness',
+    'check_tonal_presence', 'check_star_layer_integrity',
     'compute_scores',
     'list_open_images', 'close_image',
   ]),
@@ -133,6 +141,15 @@ class StateMachine {
     };
     this.repairPolicy = null;   // set when entering repair state
     this.repairAttempts = 0;
+    this._branchCompletenessOverride = false;  // when true, incomplete branches are advisory only
+  }
+
+  /**
+   * Override branch completeness enforcement (e.g. under budget pressure).
+   * Once called, incomplete branches produce warnings instead of blocking.
+   */
+  overrideBranchCompleteness() {
+    this._branchCompletenessOverride = true;
   }
 
   // -----------------------------------------------------------------------
@@ -232,7 +249,7 @@ class StateMachine {
 
     if (this.state === 'generate_candidates') {
       // Composition tool signals generation is done.
-      if (toolName === 'lrgb_combine' || toolName === 'star_screen_blend') {
+      if (toolName === 'lrgb_combine' || toolName === 'star_screen_blend' || toolName === 'star_protected_blend') {
         this.transitionTo('compose');
         return;
       }
@@ -378,6 +395,58 @@ class StateMachine {
       guidance,
     };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Branch completeness check
+// ---------------------------------------------------------------------------
+
+/**
+ * Check if enough variant branches have been explored before composition.
+ * Blocks compose transition when incomplete — the caller must force the
+ * state machine back to generate_candidates unless budget pressure or an
+ * explicit override allows proceeding.
+ *
+ * @param {Array} variants - List of saved variants (from store.listVariants)
+ * @param {object} brief - Processing brief (for hasL check)
+ * @returns {{ complete: boolean, warnings: string[] }}
+ */
+export function checkBranchCompleteness(variants, brief) {
+  const warnings = [];
+  if (!variants || variants.length === 0) {
+    return { complete: false, warnings: ['No variants saved — branches may not have been explored.'] };
+  }
+
+  const variantTexts = variants.map(v => {
+    const text = ((v.notes || '') + ' ' + (v.variantId || '') + ' ' + (v.viewId || '')).toLowerCase();
+    return text;
+  });
+
+  // Star branch: >= 2 variants with "star" in notes/viewId
+  const starCount = variantTexts.filter(t => t.includes('star')).length;
+  if (starCount < 2) {
+    warnings.push(`Star branch shallow: only ${starCount} star variant(s) saved (need >= 2). Explore more star processing options.`);
+  }
+
+  // Color branch: >= 2 variants with "color" or "saturation"
+  const colorCount = variantTexts.filter(t => t.includes('color') || t.includes('saturation')).length;
+  if (colorCount < 2) {
+    warnings.push(`Color branch shallow: only ${colorCount} color variant(s) saved (need >= 2). Explore more saturation/color options.`);
+  }
+
+  // L detail branch (if hasL): >= 2 variants with "detail", "lhe", or "l_detail"
+  const hasL = !!(brief?.dataDescription?.channels?.L || brief?.files?.L);
+  if (hasL) {
+    const detailCount = variantTexts.filter(t =>
+      t.includes('detail') || t.includes('lhe') || t.includes('l_detail')
+    ).length;
+    if (detailCount < 2) {
+      warnings.push(`L detail branch shallow: only ${detailCount} detail variant(s) saved (need >= 2). Explore more LHE/HDRMT options.`);
+    }
+  }
+
+  const complete = warnings.length === 0;
+  return { complete, warnings };
 }
 
 // ---------------------------------------------------------------------------

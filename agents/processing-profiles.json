@@ -70,18 +70,18 @@
       "Ha_injection": { "use": "try", "reason": "Useful for HII regions if Ha data available", "strength": 0.25 }
     },
     "saturation": {
-      "rgb_initial": 0.63,
-      "composition_target": 0.65,
+      "rgb_initial": 0.68,
+      "composition_target": 0.75,
       "hue_selective": true,
       "blue_boost": 1.30,
       "pink_boost": 1.25,
-      "max_p90": 0.65
+      "max_p90": 0.75
     },
     "stars": {
       "screen_blend_strength": 1.00,
       "prominence": "subdued"
     },
-    "notes": "Dark background (0.08-0.10). IFN may be present — preserve with gentle shadow handling. Dust lanes and spiral arms are primary detail targets. Core easily clips — use headroom.",
+    "notes": "Dark background (0.08-0.10). IFN may be present — preserve with gentle shadow handling. Dust lanes and spiral arms are primary detail targets. Core easily clips — use headroom. Push saturation — galaxies should have warm, vivid colors.",
     "learned_overrides": {}
   },
 
@@ -108,14 +108,14 @@
       "SXT": { "use": true, "safe": true },
       "LHE": { "use": true, "start_amount": 0.20, "start_radius": 64, "mask_blur": 5, "mask_clipLow": 0.12, "mask_gamma": 2.0 },
       "HDRMT": { "use": true, "inverted": true, "layers": 5, "iterations": 1, "median_transform": true, "reason": "Try on L channel — use medianTransform=true to reduce ringing risk. Ringing detector may false-positive on edge-on natural profiles." },
-      "LRGB": { "use": true, "lightness": 0.45, "saturation": 0.65, "reason": "Start moderate — iterate down if saturation gate warns, iterate up if color too muted." },
+      "LRGB": { "use": true, "lightness": 0.45, "saturation": 0.75, "reason": "Start moderate — iterate down if saturation gate warns, iterate up if color too muted." },
       "Ha_injection": { "use": "try", "reason": "Only if Ha data shows real signal" }
     },
     "saturation": {
-      "rgb_initial": 0.58,
-      "composition_target": 0.65,
+      "rgb_initial": 0.65,
+      "composition_target": 0.75,
       "hue_selective": false,
-      "max_p90": 0.70
+      "max_p90": 0.80
     },
     "stars": {
       "screen_blend_strength": 0.95,

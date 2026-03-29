@@ -36,26 +36,42 @@ const home = os.homedir();
 // ============================================================================
 // P2a: PixInsight swap file management
 // ============================================================================
-function cleanPISwapFiles() {
-  // DISABLED — deleting swap files while PI is running crashes it.
-  // Swap files are managed by PixInsight itself. If disk is full,
-  // close images in PI manually or restart PI before running the pipeline.
+function cleanPISwapFiles(staleMinutes = 5) {
+  // Smart cleanup: only delete swap files not modified in the last N minutes.
+  // Active files are continuously written by PI — safe to keep.
+  const SWAP_DIR = '/var/folders/zs/l60syh197h32ptdrp2yfvzs00000gn/C';
+  const now = Date.now();
+  const threshold = now - staleMinutes * 60 * 1000;
+  let totalBytes = 0, deletedBytes = 0, deletedCount = 0, keptCount = 0;
+
   try {
-    const findResult = execSync(
-      "find /var/folders -name '~PI~*.swp' -type f 2>/dev/null || true",
-      { encoding: 'utf-8', timeout: 10000 }
-    ).trim();
-    const files = findResult ? findResult.split('\n').filter(Boolean) : [];
-    let totalBytes = 0;
-    for (const f of files) {
-      try { totalBytes += fs.statSync(f).size; } catch {}
+    const files = fs.readdirSync(SWAP_DIR).filter(f => f.startsWith('~PI~') && f.endsWith('.swp'));
+    for (const file of files) {
+      const fullPath = path.join(SWAP_DIR, file);
+      try {
+        const stat = fs.statSync(fullPath);
+        totalBytes += stat.size;
+        if (stat.mtimeMs < threshold) {
+          fs.unlinkSync(fullPath);
+          deletedBytes += stat.size;
+          deletedCount++;
+        } else {
+          keptCount++;
+        }
+      } catch {}
     }
-    const totalGB = totalBytes / (1024 ** 3);
-    if (files.length > 0) console.log(`  PI swap: ${files.length} file(s), ${totalGB.toFixed(2)} GB (not cleaning — PI may be using them)`);
-    else console.log('  PI swap: no swap files found');
-    return { cleaned: false, totalBytes, fileCount: files.length };
+    const freedGB = (deletedBytes / (1024 ** 3)).toFixed(2);
+    const keptGB = ((totalBytes - deletedBytes) / (1024 ** 3)).toFixed(2);
+    if (deletedCount > 0) {
+      console.log(`  PI swap: cleaned ${deletedCount} stale files (${freedGB} GB freed), kept ${keptCount} active (${keptGB} GB)`);
+    } else if (keptCount > 0) {
+      console.log(`  PI swap: ${keptCount} active files (${keptGB} GB), 0 stale`);
+    } else {
+      console.log('  PI swap: no swap files found');
+    }
+    return { cleaned: deletedCount > 0, deletedBytes, totalBytes, fileCount: files.length };
   } catch (err) {
-    return { cleaned: false, totalBytes: 0, fileCount: 0 };
+    return { cleaned: false, deletedBytes: 0, totalBytes: 0, fileCount: 0 };
   }
 }
 
@@ -88,9 +104,8 @@ function checkDiskSpace() {
   const minFree = Math.min(rootFreeGB ?? Infinity, varFreeGB ?? Infinity);
 
   if (minFree < 8) {
-    console.log('  WARNING: Low disk space (<8 GB) — auto-cleaning STALE PI swap files...');
-    // Only safe at startup before PI has loaded working images
-    cleanPISwapFiles();
+    console.log('  WARNING: Low disk space (<8 GB). Clean swap files MANUALLY before running.');
+    // cleanPISwapFiles(); // DISABLED — crashes PI if it has images open
 
     // Re-check after cleaning
     const rootAfter = getFreeGB('/');
@@ -138,9 +153,9 @@ async function main() {
   console.log('  Config:', configPath);
   console.log('='.repeat(60));
 
-  // Pre-flight: disk space check and PI swap cleanup
+  // Pre-flight: disk space check only — swap cleanup DISABLED (crashes PI)
   checkDiskSpace();
-  cleanPISwapFiles();
+  // cleanPISwapFiles(); // DISABLED — too risky while PI is running
 
   // Bridge
   const ctx = createBridgeContext({ log: console.log });
@@ -294,10 +309,11 @@ ${extractWinningParams(brief.target.classification)}
 
     // Try multiple patterns on the agent's last output
     const patterns = [
+      /<<FINISH_VIEW_ID=(\w+)>>/,                  // Structured marker (most reliable)
       /Finished\b[^.]*\.\s*Best:\s*(\w+)/,        // Exact tool output
       /\bBest:\s*[`'"]?(\w+)[`'"]?/i,              // "Best: VIEW_ID"
       /\bwinner[:\s]+[`'"]?(\w+)[`'"]?/i,          // "winner: VIEW_ID"
-      /\bfinal(?:ized?)?\s+(?:image|result|view|output)\s+(?:is\s+)?[`'"]*(\w+)/i,
+      /\bfinal(?:ized?)?\s+(?:image|result|view|output)\s+(?:is\s+)?[`'"]*([A-Z]\w*_\w+|variant_\w+|\w+_\d+)/i,
       /\bview[_\s]?id[:\s]+[`'"]*(\w+)/i,          // "view_id: X"
       /\b(COMP_\w+)\b/,                            // COMP_ prefixed names
       /\b(FINAL_\w+)\b/,                           // FINAL_ prefixed names
@@ -311,6 +327,33 @@ ${extractWinningParams(brief.target.classification)}
         viewIdSource = `transcript-regex(${pat.source.slice(0, 30)})`;
         break;
       }
+    }
+  }
+
+  // Fallback: read trace file for the finish tool call's view_id argument
+  if (!finishViewId) {
+    try {
+      const tracePath = path.join(store.baseDir, 'trace.jsonl');
+      if (fs.existsSync(tracePath)) {
+        const traceLines = fs.readFileSync(tracePath, 'utf-8').trim().split('\n');
+        // Search from the end — the last finish call is the one that matters
+        for (let i = traceLines.length - 1; i >= 0; i--) {
+          try {
+            const entry = JSON.parse(traceLines[i]);
+            if (entry.tool === 'finish' && entry.args?.view_id) {
+              // Only use if the finish was not rejected (resultSummary should contain "PASSED")
+              const wasRejected = entry.resultSummary && entry.resultSummary.includes('REJECTED');
+              if (!wasRejected) {
+                finishViewId = entry.args.view_id;
+                viewIdSource = 'trace.jsonl';
+                break;
+              }
+            }
+          } catch {} // skip malformed lines
+        }
+      }
+    } catch (e) {
+      console.log(`  [DEBUG] Trace fallback error: ${e.message}`);
     }
   }
 

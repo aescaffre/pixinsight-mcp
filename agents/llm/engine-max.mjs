@@ -257,6 +257,20 @@ export class MaxAgent {
     // Debug: log first 800 chars of text being parsed so we can see the format
     this._log(`[_parseFinishResult] Parsing text (${text.length} chars). First 800: ${text.slice(0, 800).replace(/\n/g, '\\n')}`);
 
+    // Strategy 0: Structured marker — <<FINISH_VIEW_ID=xxx>> injected by finish tool handler.
+    // This is the most reliable method: even if the LLM paraphrases the rest of the output,
+    // this exact tag may survive in the tool result text or the assistant's summary.
+    const markerMatch = text.match(/<<FINISH_VIEW_ID=(\w+)>>/);
+    if (markerMatch) {
+      this._log(`[_parseFinishResult] Strategy 0 matched (structured marker): view_id=${markerMatch[1]}`);
+      const rationaleMatch = text.match(/Rationale:\s*(.+?)(?:\n|$)/);
+      return {
+        type: 'finish',
+        view_id: markerMatch[1],
+        rationale: rationaleMatch?.[1] || text.slice(0, 500),
+      };
+    }
+
     // Strategy 1: Exact tool output — "Finished (quality gates PASSED). Best: <view_id>"
     const finishMatch = text.match(/Finished\b[^.]*\.\s*Best:\s*(\w+)/);
     if (finishMatch) {
@@ -307,8 +321,10 @@ export class MaxAgent {
     }
 
     // Strategy 5: Look for "final image/result is VIEW_ID" or "finalized VIEW_ID"
-    const finalMatch = text.match(/\bfinal(?:ized?)?\s+(?:image|result|view|output)\s+(?:is\s+)?[`'"]*(\w+)[`'"]?/i) ||
-                       text.match(/\bfinalized?\s+[`'"]?(\w+)[`'"]?/i);
+    // Only match identifiers that look like PixInsight view IDs (contain underscore,
+    // start with uppercase, or use known prefixes like variant_, COMP_, FINAL_).
+    // This avoids matching common English words like "safely", "successfully", etc.
+    const finalMatch = text.match(/\bfinal(?:ized?)?\s+(?:image|result|view|output)\s+(?:is\s+)?[`'"]*([A-Z]\w*_\w+|variant_\w+|\w+_\d+)[`'"]?/i);
     if (finalMatch) {
       this._log(`[_parseFinishResult] Strategy 5 matched (finalized pattern): view_id=${finalMatch[1]}`);
       return {

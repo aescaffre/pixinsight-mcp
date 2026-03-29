@@ -9,7 +9,7 @@ export { setiStretch, computeGHSCoefficients, buildGHSExpr, ghsCode } from './st
 export { runGC, runABE, runPerChannelABE, runSCNR } from './gradient.mjs';
 export { cloneImage, restoreFromClone, closeImage, purgeUndoHistory } from './image-mgmt.mjs';
 export { saveCheckpoint, loadCheckpoint } from './checkpoint.mjs';
-export { checkStarQuality, checkRinging, checkSharpness, checkCoreBurning, scanBurntRegions, checkSaturation } from './quality-gates.mjs';
+export { checkStarQuality, checkRinging, checkSharpness, checkCoreBurning, scanBurntRegions, checkSaturation, checkTonalPresence, checkStarLayerIntegrity } from './quality-gates.mjs';
 export { measureSubjectDetail } from './subject-metrics.mjs';
 export { multiScaleEnhance } from './compound-enhance.mjs';
 export { extractPseudoOIII, continuumSubtractHa, dynamicNarrowbandBlend, createSyntheticLuminance, createZoneMasks, continuousClamp } from './narrowband-enhance.mjs';

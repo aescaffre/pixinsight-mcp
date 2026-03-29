@@ -782,3 +782,425 @@ export async function checkSaturation(ctx, viewId) {
     details: `Saturation: median=${data.medianS.toFixed(3)}, P90=${data.p90S.toFixed(3)}, P99=${data.p99S.toFixed(3)}, max=${data.maxS.toFixed(3)} (${data.subjectPixelCount} subject pixels)`
   };
 }
+
+/**
+ * Check tonal presence: determines if the subject is tonally impactful
+ * relative to the background, or merely technically safe but subdued.
+ *
+ * Uses ROI-based subject/background separation with per-channel median,
+ * MAD-based thresholding, and category-specific metrics.
+ *
+ * @param {object} ctx - Bridge context
+ * @param {string} viewId - View ID to check
+ * @param {string} category - Target classification (e.g. 'galaxy_spiral')
+ * @returns {object} { pass, tonal_verdict, separation, ... }
+ */
+export async function checkTonalPresence(ctx, viewId, category) {
+  const r = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}');
+    if (w.isNull) throw new Error('checkTonalPresence: view not found: ${viewId}');
+    var img = w.mainView.image;
+    var isColor = img.isColor;
+
+    // Background: per-channel median -> luminance
+    var bgR, bgG, bgB, bgLum;
+    if (isColor) {
+      img.selectedChannel = 0; bgR = img.median();
+      img.selectedChannel = 1; bgG = img.median();
+      img.selectedChannel = 2; bgB = img.median();
+      img.resetChannelSelection();
+      bgLum = 0.2126 * bgR + 0.7152 * bgG + 0.0722 * bgB;
+    } else {
+      bgLum = img.median();
+    }
+
+    // MAD from sampling
+    var sampleStep = 32;
+    var diffs = [];
+    for (var y = 0; y < img.height; y += sampleStep) {
+      for (var x = 0; x < img.width; x += sampleStep) {
+        var lum;
+        if (isColor) {
+          lum = 0.2126 * img.sample(x, y, 0) + 0.7152 * img.sample(x, y, 1) + 0.0722 * img.sample(x, y, 2);
+        } else {
+          lum = img.sample(x, y);
+        }
+        diffs.push(Math.abs(lum - bgLum));
+      }
+    }
+    diffs.sort(function(a, b) { return a - b; });
+    var bgMAD = diffs[Math.floor(diffs.length / 2)];
+    var subjectThreshold = bgLum + 5 * bgMAD;
+
+    // Separate subject/background pixels by sampling every 8th pixel
+    // with spatial compactness filter to reject isolated star-like pixels
+    var step = 8;
+    var subjectPixels = [];
+    var bgPixels = [];
+    var sumWX = 0, sumWY = 0, sumW = 0;
+    var starlikeRejected = 0;
+    var probeD = 3;
+
+    function getLumAt(px, py) {
+      if (isColor) {
+        return 0.2126 * img.sample(px, py, 0) + 0.7152 * img.sample(px, py, 1) + 0.0722 * img.sample(px, py, 2);
+      }
+      return img.sample(px, py);
+    }
+
+    for (var y = 0; y < img.height; y += step) {
+      for (var x = 0; x < img.width; x += step) {
+        var lum;
+        if (isColor) {
+          lum = 0.2126 * img.sample(x, y, 0) + 0.7152 * img.sample(x, y, 1) + 0.0722 * img.sample(x, y, 2);
+        } else {
+          lum = img.sample(x, y);
+        }
+        if (lum > subjectThreshold) {
+          // Spatial compactness check: probe 4 cardinal neighbors at distance probeD.
+          // Extended structure (nebula/galaxy) will have neighbors also above threshold.
+          // Isolated bright pixels (star residuals) will not.
+          var brightNeighbors = 0;
+          if (x - probeD >= 0 && getLumAt(x - probeD, y) > subjectThreshold) brightNeighbors++;
+          if (x + probeD < img.width && getLumAt(x + probeD, y) > subjectThreshold) brightNeighbors++;
+          if (y - probeD >= 0 && getLumAt(x, y - probeD) > subjectThreshold) brightNeighbors++;
+          if (y + probeD < img.height && getLumAt(x, y + probeD) > subjectThreshold) brightNeighbors++;
+
+          if (brightNeighbors >= 2) {
+            // Extended structure — count as subject
+            subjectPixels.push(lum);
+            sumWX += x * lum;
+            sumWY += y * lum;
+            sumW += lum;
+          } else {
+            // Isolated / star-like — reject from subject, count as background
+            starlikeRejected++;
+            bgPixels.push(lum);
+          }
+        } else {
+          bgPixels.push(lum);
+        }
+      }
+    }
+
+    // Subject centroid
+    var centroidX = sumW > 0 ? sumWX / sumW : img.width / 2;
+    var centroidY = sumW > 0 ? sumWY / sumW : img.height / 2;
+
+    // Multi-subject detection: check if there are two bright clusters > 25% image width apart
+    var roiMode = 'single';
+    if (subjectPixels.length > 50) {
+      // Find second centroid by excluding pixels near first centroid
+      var excludeRadius = img.width * 0.15;
+      var sumWX2 = 0, sumWY2 = 0, sumW2 = 0;
+      for (var y = 0; y < img.height; y += step) {
+        for (var x = 0; x < img.width; x += step) {
+          var lum;
+          if (isColor) {
+            lum = 0.2126 * img.sample(x, y, 0) + 0.7152 * img.sample(x, y, 1) + 0.0722 * img.sample(x, y, 2);
+          } else {
+            lum = img.sample(x, y);
+          }
+          if (lum > subjectThreshold) {
+            var dx = x - centroidX;
+            var dy = y - centroidY;
+            if (Math.sqrt(dx * dx + dy * dy) > excludeRadius) {
+              sumWX2 += x * lum;
+              sumWY2 += y * lum;
+              sumW2 += lum;
+            }
+          }
+        }
+      }
+      if (sumW2 > sumW * 0.15) {
+        var c2x = sumWX2 / sumW2;
+        var c2y = sumWY2 / sumW2;
+        var clusterDist = Math.sqrt((c2x - centroidX) * (c2x - centroidX) + (c2y - centroidY) * (c2y - centroidY));
+        if (clusterDist > img.width * 0.25) {
+          roiMode = 'compound_roi';
+        }
+      }
+    }
+
+    // Sort subject and background pixels for percentiles
+    subjectPixels.sort(function(a, b) { return a - b; });
+    bgPixels.sort(function(a, b) { return a - b; });
+
+    var sn = subjectPixels.length;
+    var bn = bgPixels.length;
+
+    var bgMedian = bn > 0 ? bgPixels[Math.floor(bn * 0.5)] : bgLum;
+    var bgP90 = bn > 0 ? bgPixels[Math.floor(bn * 0.9)] : bgLum;
+    var subjMedian = sn > 0 ? subjectPixels[Math.floor(sn * 0.5)] : 0;
+    var subjP75 = sn > 0 ? subjectPixels[Math.floor(sn * 0.75)] : 0;
+    var subjP90 = sn > 0 ? subjectPixels[Math.floor(sn * 0.9)] : 0;
+    var subjP10 = sn > 0 ? subjectPixels[Math.floor(sn * 0.1)] : 0;
+
+    // Core brightness: mean of brightest 5% of subject pixels
+    var top5start = Math.max(0, Math.floor(sn * 0.95));
+    var coreBrightSum = 0;
+    var coreBrightCount = 0;
+    for (var i = top5start; i < sn; i++) {
+      coreBrightSum += subjectPixels[i];
+      coreBrightCount++;
+    }
+    var coreBrightness = coreBrightCount > 0 ? coreBrightSum / coreBrightCount : 0;
+
+    // Faint structure visibility
+    var faintStructVis = (subjP10 - bgP90) / Math.max(bgP90, 0.001);
+
+    // Separation
+    var separation = subjMedian / Math.max(bgMedian, 0.001);
+
+    // Category-specific: core_to_disk for galaxies
+    var coreToDisk = subjMedian > 0.001 ? coreBrightness / subjMedian : 0;
+
+    // ROI confidence based on subject pixel count
+    var totalSampled = Math.floor((img.width / step) * (img.height / step));
+    var subjectFraction = sn / Math.max(totalSampled, 1);
+    var roiConfidence = subjectFraction > 0.03 ? 'high' : subjectFraction > 0.01 ? 'medium' : 'low';
+
+    JSON.stringify({
+      background_median: bgMedian,
+      background_p90: bgP90,
+      subject_median: subjMedian,
+      subject_p75: subjP75,
+      subject_p90: subjP90,
+      core_brightness: coreBrightness,
+      faint_structure_visibility: faintStructVis,
+      separation: separation,
+      roi_confidence: roiConfidence,
+      roi_mode: roiMode,
+      subjectPixelCount: sn,
+      starlike_rejected: starlikeRejected,
+      core_to_disk: coreToDisk,
+      centroid: [Math.round(centroidX), Math.round(centroidY)]
+    });
+  `);
+
+  if (r.status === 'error') {
+    throw new Error('Tonal presence check failed: ' + (r.error?.message || 'PJSR error'));
+  }
+
+  let data;
+  try {
+    data = JSON.parse(r.outputs?.consoleOutput || '{}');
+  } catch {
+    return { pass: false, tonal_verdict: 'unknown', error: 'Failed to parse PJSR output' };
+  }
+
+  // Verdict: subdued if separation < 3, balanced if 3-8, aggressive if >8
+  let tonal_verdict;
+  if (data.separation < 3) tonal_verdict = 'subdued';
+  else if (data.separation <= 8) tonal_verdict = 'balanced';
+  else tonal_verdict = 'aggressive';
+
+  // Pass: verdict !== 'subdued' OR roi_confidence === 'low'
+  const pass = tonal_verdict !== 'subdued' || data.roi_confidence === 'low';
+
+  const isGalaxy = (category || '').startsWith('galaxy');
+  const category_metrics = {};
+  if (isGalaxy) {
+    category_metrics.core_to_disk = data.core_to_disk;
+  }
+
+  const details = [];
+  if (tonal_verdict === 'subdued') {
+    details.push(`SUBDUED: subject/background separation=${data.separation.toFixed(2)}× (need >3×). Subject median=${data.subject_median.toFixed(4)}, background median=${data.background_median.toFixed(4)}.`);
+    if (data.roi_confidence === 'low') {
+      details.push('ROI confidence LOW — few subject pixels detected. Verdict is advisory only.');
+    }
+  } else if (tonal_verdict === 'aggressive') {
+    details.push(`AGGRESSIVE: separation=${data.separation.toFixed(2)}× (>8×). Check for burns in bright areas.`);
+  } else {
+    details.push(`BALANCED: separation=${data.separation.toFixed(2)}× (3-8× range). Subject is tonally impactful.`);
+  }
+  details.push(`Core brightness=${data.core_brightness.toFixed(4)}, faint visibility=${data.faint_structure_visibility.toFixed(3)}`);
+
+  return {
+    pass,
+    tonal_verdict,
+    background_median: data.background_median,
+    background_p90: data.background_p90,
+    subject_median: data.subject_median,
+    subject_p75: data.subject_p75,
+    subject_p90: data.subject_p90,
+    separation: data.separation,
+    core_brightness: data.core_brightness,
+    faint_structure_visibility: data.faint_structure_visibility,
+    roi_confidence: data.roi_confidence,
+    roi_mode: data.roi_mode,
+    subjectPixelCount: data.subjectPixelCount,
+    starlike_rejected: data.starlike_rejected,
+    category_metrics,
+    details: details.join(' '),
+  };
+}
+
+/**
+ * Check star layer integrity before blending.
+ * Operates on the STAR view (mostly black with bright star pixels).
+ * Detects clipping, color loss, and other issues that would contaminate
+ * the composition during screen blend.
+ *
+ * @param {object} ctx - Bridge context
+ * @param {string} viewId - Star layer view ID
+ * @returns {object} { pass, verdict, max_value, clipped_fraction_98, ... }
+ */
+export async function checkStarLayerIntegrity(ctx, viewId) {
+  const r = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}');
+    if (w.isNull) throw new Error('checkStarLayerIntegrity: view not found: ${viewId}');
+    var img = w.mainView.image;
+    var isColor = img.isColor;
+
+    // Per-channel max
+    var maxVal = 0;
+    if (isColor) {
+      for (var c = 0; c < 3; c++) {
+        img.selectedChannel = c;
+        var chMax = img.maximum();
+        if (chMax > maxVal) maxVal = chMax;
+      }
+      img.resetChannelSelection();
+    } else {
+      maxVal = img.maximum();
+    }
+
+    // Sample every 4th pixel, find non-zero pixels (> 0.005)
+    var step = 4;
+    var nonzeroCount = 0;
+    var clipped98 = 0;
+    var clipped995 = 0;
+    var hsvSatValues = [];
+    var brightPixels = []; // top brightness pixels for chroma check
+
+    for (var y = 0; y < img.height; y += step) {
+      for (var x = 0; x < img.width; x += step) {
+        var val;
+        if (isColor) {
+          var rv = img.sample(x, y, 0);
+          var gv = img.sample(x, y, 1);
+          var bv = img.sample(x, y, 2);
+          val = Math.max(rv, gv, bv);
+        } else {
+          val = img.sample(x, y);
+        }
+
+        if (val > 0.005) {
+          nonzeroCount++;
+
+          // Clipping checks
+          if (isColor) {
+            var rv = img.sample(x, y, 0);
+            var gv = img.sample(x, y, 1);
+            var bv = img.sample(x, y, 2);
+            if (rv > 0.98 || gv > 0.98 || bv > 0.98) clipped98++;
+            if (rv > 0.995 || gv > 0.995 || bv > 0.995) clipped995++;
+
+            // HSV saturation for color diversity
+            var maxC = Math.max(rv, gv, bv);
+            var minC = Math.min(rv, gv, bv);
+            var hsvS = maxC > 0.001 ? (maxC - minC) / maxC : 0;
+            hsvSatValues.push(hsvS);
+
+            // Track bright pixels for chroma check
+            var brightness = rv + gv + bv;
+            if (brightPixels.length < 20 || brightness > brightPixels[brightPixels.length - 1].b) {
+              brightPixels.push({ b: brightness, r: rv, g: gv, bv: bv });
+              brightPixels.sort(function(a, b) { return b.b - a.b; });
+              if (brightPixels.length > 20) brightPixels.length = 20;
+            }
+          } else {
+            if (val > 0.98) clipped98++;
+            if (val > 0.995) clipped995++;
+          }
+        }
+      }
+    }
+
+    var clippedFrac98 = nonzeroCount > 0 ? clipped98 / nonzeroCount : 0;
+    var clippedFrac995 = nonzeroCount > 0 ? clipped995 / nonzeroCount : 0;
+
+    // Color diversity: spread of HSV saturation values
+    var colorDiv = 0;
+    if (hsvSatValues.length > 10) {
+      hsvSatValues.sort(function(a, b) { return a - b; });
+      // IQR-based spread
+      var q25 = hsvSatValues[Math.floor(hsvSatValues.length * 0.25)];
+      var q75 = hsvSatValues[Math.floor(hsvSatValues.length * 0.75)];
+      colorDiv = q75 - q25;
+    }
+
+    // Bright star chroma: top 20 brightest -> median of (max-min)/max per pixel
+    var chromaValues = [];
+    for (var i = 0; i < brightPixels.length; i++) {
+      var p = brightPixels[i];
+      var pMax = Math.max(p.r, p.g, p.bv);
+      var pMin = Math.min(p.r, p.g, p.bv);
+      chromaValues.push(pMax > 0.001 ? (pMax - pMin) / pMax : 0);
+    }
+    chromaValues.sort(function(a, b) { return a - b; });
+    var brightStarChroma = chromaValues.length > 0 ? chromaValues[Math.floor(chromaValues.length / 2)] : 0;
+
+    JSON.stringify({
+      max_value: maxVal,
+      clipped_fraction_98: clippedFrac98,
+      clipped_fraction_995: clippedFrac995,
+      color_diversity: colorDiv,
+      bright_star_chroma: brightStarChroma,
+      nonzero_pixel_count: nonzeroCount
+    });
+  `);
+
+  if (r.status === 'error') {
+    return {
+      pass: false,
+      verdict: 'FAIL',
+      error: r.error?.message || 'PJSR error',
+      details: 'Star layer integrity check failed to execute'
+    };
+  }
+
+  let data;
+  try {
+    data = JSON.parse(r.outputs?.consoleOutput || '{}');
+  } catch {
+    return { pass: false, verdict: 'FAIL', error: 'Failed to parse PJSR output' };
+  }
+
+  // Verdict logic
+  let verdict;
+  const details = [];
+
+  if (data.max_value >= 0.98 || data.clipped_fraction_995 > 0) {
+    verdict = 'FAIL';
+    details.push(`CLIPPED STARS: max=${data.max_value.toFixed(4)} (limit: <0.98), ${(data.clipped_fraction_995 * 100).toFixed(2)}% at >0.995.`);
+    details.push('Apply soft rolloff on star layer BEFORE blending: min($T, 0.95) or smooth compression above 0.65.');
+  } else if (data.clipped_fraction_98 > 0.01 || data.color_diversity < 0.05) {
+    verdict = 'WARN';
+    if (data.clipped_fraction_98 > 0.01) {
+      details.push(`Near-clipping: ${(data.clipped_fraction_98 * 100).toFixed(2)}% of star pixels >0.98.`);
+    }
+    if (data.color_diversity < 0.05) {
+      details.push(`Low color diversity: ${data.color_diversity.toFixed(4)} — stars may appear monochrome.`);
+    }
+  } else {
+    verdict = 'PASS';
+    details.push(`Stars clean: max=${data.max_value.toFixed(4)}, color diversity=${data.color_diversity.toFixed(4)}, chroma=${data.bright_star_chroma.toFixed(4)}.`);
+  }
+
+  const pass = verdict === 'PASS';
+
+  return {
+    pass,
+    verdict,
+    max_value: data.max_value,
+    clipped_fraction_98: data.clipped_fraction_98,
+    clipped_fraction_995: data.clipped_fraction_995,
+    color_diversity: data.color_diversity,
+    bright_star_chroma: data.bright_star_chroma,
+    nonzero_pixel_count: data.nonzero_pixel_count,
+    details: details.join(' '),
+  };
+}
