@@ -142,10 +142,10 @@ The burn scan uses **50×50px blocks** — catches smaller over-bright patches w
 Only EXTENDED burnt regions trigger this gate.
 
 - Use \`scan_burnt_regions\` after EVERY stretch, HDRMT, LHE, curves, Ha injection, and L enhancement
-- **Gate: ZERO burnt blocks. Even ONE 50×50 block with >3% pixels above 0.93 = FAIL.**
-- This is absolute. You cannot finish with any burnt extended region anywhere in the image.
-- Previous v3-v11 ALL had burnt cores because the old gate allowed 1% of blocks — for small subjects that meant 100% of the core could burn and still pass. Now it cannot.
-- If burning detected: use \`continuous_clamp\` (min_clamp=0.80, max_clamp=0.95) for smooth brightness limiting, or reduce processing strength.
+- **HARD GATE at 0.95**: ZERO 50×50 blocks with >3% pixels above 0.95. Actual pixel clipping = FAIL.
+- **SOFT WARNING at 0.80**: Blocks above 0.80 trigger a warning but NOT a failure. The agent should VISUALLY check the core: if internal structure (knots, filaments, color zonation) is visible, bright is OK. If the core is a featureless flat blob, apply \`continuous_clamp\`.
+- **WHY two levels?** v13 showed that a bright core (max 0.93) WITH visible detail is far better than a dim core (max 0.78) that's been clamped into a flat gray blob. Aggressive clamping destroys the very detail we're trying to preserve. Trust your EYES over the numbers.
+- Use \`continuous_clamp\` only when VISUAL inspection confirms detail loss — NOT as a preventive measure.
 - Seti stretch headroom=0.10 for L channel. For planetary nebulae: L stretch 0.25 max.
 - **Apply TWO continuous clamps — one BEFORE star blend AND one AFTER:**
   1. Pre-star: \`continuous_clamp\` (min_clamp=0.80, max_clamp=0.95) after all LHE/curves/L-enhancement
@@ -160,9 +160,22 @@ NXT denoise too high softens real detail and creates plastic appearance.
 - **Plastic smoothness is WORSE than slight noise** — err on the side of less denoising
 - Previous run (v5) over-denoised and killed all detail. Do not repeat.
 
-### 4. SATURATION — VIVID NOT WASHED
-Push saturation curves. Undersaturated images are a failure.
-- Use \`check_sharpness\` to compare candidates (higher = better)
+### 4. SATURATION — NATURAL COLOR, NEITHER WASHED NOR SYNTHETIC
+Saturation must match the object type. Broadband galaxies: warm, muted, subtle gradients.
+Emission objects: vivid is natural. Over-saturation looks synthetic and is a HARD FAIL.
+- Use \`check_saturation\` after EVERY saturation boost, curves, Ha injection, hue_boost
+- **CRITICAL: check_saturation IMMEDIATELY after lrgb_combine** — LRGB often amplifies saturation dramatically
+- Check on the STARLESS composite BEFORE star blend — this is where you fix it
+- Compare P90 against processing profile \`max_p90\` limit
+- **HARD GATE**: P90 > max_p90 + 0.10 = FAIL. Image looks synthetic.
+- **WARNING**: P90 > max_p90 = dial back. Natural appearance is the goal.
+- Dust lanes are ABSORPTION features — they should be dark/muted, not vivid red/orange
+- **FIX SATURATION UPSTREAM, NEVER DOWNSTREAM:**
+  If \`check_saturation\` fails after \`lrgb_combine\`, DO NOT desaturate the combined result.
+  Post-hoc desaturation is destructive — it kills color gradients that existed in the original channels.
+  Instead: restore from backup, reduce the LRGB \`saturation\` parameter (e.g. 0.80 → 0.60 → 0.40),
+  and re-combine. Iterate on blend parameters until the gate passes.
+  This applies to ANY composition step — when a quality gate fails, adjust the upstream parameters, not the downstream result.
 ${hasHa ? `
 ### 5. Ha INJECTION (MANDATORY for HaLRGB/HaRGB)
 This target has Ha data. Ha injection is NOT optional.
@@ -287,8 +300,12 @@ This is 5× faster than individual LHE calls. Use it for ALL detail enhancement 
 Required candidates: L_detail_weak, L_detail_target, L_detail_edge, L_detail_overdone
 At least one must be clearly too aggressive (synthetic, crunchy, halos).
 
-Tools: multi_scale_enhance (PRIMARY), clone_image, restore_from_clone, measure_subject_detail, save_variant
+Tools: multi_scale_enhance (PRIMARY — use this, NOT individual run_lhe calls), clone_image, restore_from_clone, measure_subject_detail, save_variant
 - multi_scale_enhance: vary mask_clip_low (0.04→0.06→0.10) and amounts (0.20→0.35→0.50)
+- **ALWAYS use multi_scale_enhance, NEVER call run_lhe individually** — the compound tool is 5x faster and includes metrics
+- **At least ONE candidate MUST include HDRMT** (do_hdrmt=true). Compare detail improvement with vs without HDRMT.
+  Even if memory says "HDRMT causes ringing" for this target — TRY IT and measure. The ringing check can false-positive
+  on edge-on galaxies (natural radial profile looks like oscillations). Let the NUMBERS decide, not memory alone.
 - For each candidate: check detail improvement %. If < 5%, params are wrong.
 - You MUST revert at least once — if you never revert, you didn't push hard enough.
 - **finish will REJECT if subjectBrightness < 0.25, contrastRatio < 3×, or detailScore < 0.001**

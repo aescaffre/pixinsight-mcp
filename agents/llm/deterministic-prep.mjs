@@ -169,6 +169,15 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
   const outputDir = opts.outputDir || '/tmp/prep';
   fs.mkdirSync(outputDir, { recursive: true });
 
+  // Extract stretch parameters from processing profile (via brief)
+  const brief = opts.brief;
+  const profileStretch = brief?.processingProfile?.stretch || {};
+  const rgbTarget = profileStretch.target_median || 0.10;
+  const headroom = profileStretch.headroom || 0.05;
+  const lTarget = Math.min(0.30, rgbTarget * 3);  // L always brighter than RGB for LRGB
+  const haTarget = rgbTarget * 1.5;
+  log(`[PREP] Stretch targets from profile: RGB=${rgbTarget}, L=${lTarget.toFixed(2)}, Ha=${haTarget.toFixed(2)}, headroom=${headroom}`);
+
   // ========================================================================
   // DISK SPACE CHECK — refuse to start if < 20 GB free
   // ========================================================================
@@ -178,8 +187,8 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     const cols = lines[1].split(/\s+/);
     const availKB = parseInt(cols[3], 10);
     const availGB = availKB / 1024 / 1024;
-    if (availGB < 15) {
-      throw new Error(`Not enough disk space: ${availGB.toFixed(1)} GB free (minimum: 15 GB). Clean up ~/.pixinsight-mcp/runs/ or prep-cache.`);
+    if (availGB < 5) {
+      throw new Error(`Not enough disk space: ${availGB.toFixed(1)} GB free (minimum: 5 GB). Clean up ~/.pixinsight-mcp/runs/ or prep-cache.`);
     }
     log(`[PREP] Disk space: ${availGB.toFixed(1)} GB free`);
   } catch (e) {
@@ -504,9 +513,9 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     log(`  Stars extracted: ${starView.id}`);
   }
 
-  // Seti stretch RGB (darker background for cleaner result — L provides detail via LRGB)
-  log('  Seti stretch RGB (target=0.10, headroom=0.05)...');
-  await setiStretch(ctx, targetName, { targetMedian: 0.10, hdrAmount: 0.25, hdrKnee: 0.35, hdrHeadroom: 0.05 });
+  // Seti stretch RGB (target from processing profile)
+  log(`  Seti stretch RGB (target=${rgbTarget}, headroom=${headroom})...`);
+  await setiStretch(ctx, targetName, { targetMedian: rgbTarget, hdrAmount: 0.25, hdrKnee: 0.35, hdrHeadroom: headroom });
 
   // NXT post-stretch
   log('  NXT post-stretch (0.25)...');
@@ -587,8 +596,8 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     }
 
     // Seti stretch L (brighter to extract faint detail, with headroom for HDRMT)
-    log('  Seti stretch L (target=0.30, headroom=0.10)...');
-    await setiStretch(ctx, 'FILTER_L', { targetMedian: 0.30, hdrAmount: 0.25, hdrKnee: 0.35, hdrHeadroom: 0.10 });
+    log(`  Seti stretch L (target=${lTarget.toFixed(2)}, headroom=${Math.max(headroom, 0.05).toFixed(2)})...`);
+    await setiStretch(ctx, 'FILTER_L', { targetMedian: lTarget, hdrAmount: 0.25, hdrKnee: 0.35, hdrHeadroom: Math.max(headroom, 0.05) });
 
     result.views.l = 'FILTER_L';
     result.stats.l = await getStats(ctx, 'FILTER_L');
@@ -706,8 +715,8 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
         await ctx.pjsr(`var w=ImageWindow.windowById('${haStars.id}');if(!w.isNull)w.forceClose();`);
       }
 
-      log('  Seti stretch Ha (target=0.15)...');
-      await setiStretch(ctx, 'FILTER_Ha', { targetMedian: 0.15, hdrAmount: 0.25, hdrKnee: 0.35 });
+      log(`  Seti stretch Ha (target=${haTarget.toFixed(2)}, headroom=${headroom})...`);
+      await setiStretch(ctx, 'FILTER_Ha', { targetMedian: haTarget, hdrAmount: 0.25, hdrKnee: 0.35, hdrHeadroom: headroom });
     }
 
     result.views.ha = 'FILTER_Ha';

@@ -37,41 +37,25 @@ const home = os.homedir();
 // P2a: PixInsight swap file management
 // ============================================================================
 function cleanPISwapFiles() {
+  // DISABLED — deleting swap files while PI is running crashes it.
+  // Swap files are managed by PixInsight itself. If disk is full,
+  // close images in PI manually or restart PI before running the pipeline.
   try {
-    // Find all PI swap files and compute total size
     const findResult = execSync(
       "find /var/folders -name '~PI~*.swp' -type f 2>/dev/null || true",
       { encoding: 'utf-8', timeout: 10000 }
     ).trim();
-
-    if (!findResult) {
-      console.log('  PI swap: no swap files found');
-      return { cleaned: false, totalBytes: 0, fileCount: 0 };
-    }
-
-    const files = findResult.split('\n').filter(Boolean);
+    const files = findResult ? findResult.split('\n').filter(Boolean) : [];
     let totalBytes = 0;
     for (const f of files) {
-      try {
-        const stat = fs.statSync(f);
-        totalBytes += stat.size;
-      } catch { /* file may have disappeared */ }
+      try { totalBytes += fs.statSync(f).size; } catch {}
     }
-
     const totalGB = totalBytes / (1024 ** 3);
-    console.log(`  PI swap: ${files.length} file(s), ${totalGB.toFixed(2)} GB total`);
-
-    if (totalGB > 20) {
-      console.log(`  PI swap: exceeds 20 GB threshold — cleaning...`);
-      execSync("find /var/folders -name '~PI~*.swp' -type f -delete 2>/dev/null || true", { timeout: 30000 });
-      console.log(`  PI swap: deleted ${files.length} file(s) (${totalGB.toFixed(2)} GB freed)`);
-      return { cleaned: true, totalBytes, fileCount: files.length };
-    }
-
+    if (files.length > 0) console.log(`  PI swap: ${files.length} file(s), ${totalGB.toFixed(2)} GB (not cleaning — PI may be using them)`);
+    else console.log('  PI swap: no swap files found');
     return { cleaned: false, totalBytes, fileCount: files.length };
   } catch (err) {
-    console.log(`  PI swap: cleanup check failed (${err.message}) — continuing`);
-    return { cleaned: false, totalBytes: 0, fileCount: 0, error: err.message };
+    return { cleaned: false, totalBytes: 0, fileCount: 0 };
   }
 }
 
@@ -103,8 +87,9 @@ function checkDiskSpace() {
 
   const minFree = Math.min(rootFreeGB ?? Infinity, varFreeGB ?? Infinity);
 
-  if (minFree < 15) {
-    console.log('  WARNING: Low disk space (<15 GB) — auto-cleaning PI swap files...');
+  if (minFree < 8) {
+    console.log('  WARNING: Low disk space (<8 GB) — auto-cleaning STALE PI swap files...');
+    // Only safe at startup before PI has loaded working images
     cleanPISwapFiles();
 
     // Re-check after cleaning
@@ -199,6 +184,7 @@ async function main() {
     outputDir: path.join(store.baseDir, 'prep'),
     runDir: store.baseDir,
     log: console.log,
+    brief: brief,
   });
 
   // Generate diagnostic views for the agent to start with
@@ -246,7 +232,7 @@ ${viewsList}
 ${prepResult.views.l ? `### Current L stats:
 - Median: ${prepResult.stats.l?.median?.toFixed(6) || 'N/A'}
 - Max: ${(prepResult.stats.l?.max || 0).toFixed(4)}
-- L is STARLESS, stretched to target=0.25 with headroom=0.10
+- L is STARLESS, stretched from processing profile targets
 ` : ''}
 
 ${prepResult.views.ha ? `### Ha available: \`${prepResult.views.ha}\` (stretched, starless)` : ''}
@@ -280,8 +266,8 @@ ${extractWinningParams(brief.target.classification)}
 
   console.log(`\n--- GIGA Agent completed in ${Math.round(elapsed / 1000)}s ---`);
 
-  // Post-run: clean PI swap files to free disk space
-  cleanPISwapFiles();
+  // Do NOT clean swap files here — PI still has images open and needs its swap files.
+  // Cleaning while PI is running causes crashes. Only clean on startup (before PI connects).
 
   if (result.crashError) {
     console.error(`CRASH: ${result.crashError.message}`);
@@ -436,10 +422,54 @@ ${extractWinningParams(brief.target.classification)}
     console.log(`  Profile learning skipped: ${e.message}`);
   }
 
+  // Token usage summary
+  // claude CLI reports: input_tokens (non-cached) + cache_read + cache_creation + output_tokens
+  // Real input cost = input_tokens + cache_read + cache_creation
+  const usage = result.usage || {};
+  const inputTokens = usage.input_tokens || 0;
+  const outputTokens = usage.output_tokens || 0;
+  const cacheRead = usage.cache_read_input_tokens || 0;
+  const cacheCreation = usage.cache_creation_input_tokens || 0;
+  const totalInput = inputTokens + cacheRead + cacheCreation;
+  const totalTokens = totalInput + outputTokens;
+
+  // Generate execution trace diagram
+  let traceStats = '';
+  try {
+    const tracePath = path.join(store.baseDir, 'trace.jsonl');
+    if (fs.existsSync(tracePath)) {
+      const { analyzeTrace } = await import('./trace-analyzer.mjs');
+      const { generateMermaidDiagram, generateTraceSummary } = await import('./trace-mermaid.mjs');
+
+      const analysis = analyzeTrace(tracePath);
+      const mermaid = generateMermaidDiagram(analysis);
+      const summary = generateTraceSummary(analysis);
+
+      fs.writeFileSync(path.join(store.baseDir, 'trace-analysis.json'), JSON.stringify(analysis, null, 2));
+      fs.writeFileSync(path.join(store.baseDir, 'trace-diagram.mmd'), mermaid);
+      fs.writeFileSync(path.join(store.baseDir, 'trace-summary.md'), summary);
+
+      const deadEnds = Object.values(analysis.branches).filter(b => b.outcome === 'dead-end').length;
+      const gateFails = analysis.qualityGates.filter(g => !g.pass).length;
+      traceStats = `  Trace: ${analysis.totalCalls} tool calls, ${Object.keys(analysis.branches).length} branches (${deadEnds} dead-ends), ${analysis.qualityGates.length} quality checks (${gateFails} failures)`;
+      console.log(`\n--- Execution Trace ---`);
+      console.log(traceStats);
+      console.log(`  Diagram: ${path.join(store.baseDir, 'trace-diagram.mmd')}`);
+      console.log(`  Summary: ${path.join(store.baseDir, 'trace-summary.md')}`);
+    }
+  } catch (e) {
+    console.log(`  Trace generation skipped: ${e.message}`);
+  }
+
   console.log(`\n${'='.repeat(60)}`);
   console.log(`  GIGA Processing complete!`);
   console.log(`  Final: ${pngPath}`);
   console.log(`  Run: ${store.baseDir}`);
+  console.log(`  Duration: ${Math.round(elapsed / 1000)}s (${result.turnCount || 0} turns)`);
+  console.log(`  Tokens: ${totalTokens.toLocaleString()} total`);
+  console.log(`    Input: ${totalInput.toLocaleString()} (${inputTokens.toLocaleString()} fresh + ${cacheRead.toLocaleString()} cache-read + ${cacheCreation.toLocaleString()} cache-write)`);
+  console.log(`    Output: ${outputTokens.toLocaleString()}`);
+  if (traceStats) console.log(traceStats);
   console.log(`${'='.repeat(60)}`);
 }
 

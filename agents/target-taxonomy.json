@@ -34,12 +34,12 @@
         "structuralZones": "core_halo",
         "colorZonation": "monochromatic",
         "starRelationship": "stars_are_context",
-        "faintStructureGoal": "ifn",
+        "faintStructureGoal": "outer_halo",
         "subjectScale": "large",
         "dynamicRange": "high",
-        "hasIFN": true, "hasDustLanes": true, "hasBrightCore": true, "hasHIIRegions": false
+        "hasIFN": false, "hasDustLanes": true, "hasBrightCore": true, "hasHIIRegions": false
       },
-      "processingNotes": "Dust lane is THE feature. No spiral arm color variation. Core vs halo masking. Brighten with spatial mask + gamma."
+      "processingNotes": "Dust lane is THE feature — maximize contrast across the lane. No spiral arm color variation. Core vs halo masking. Brighten galaxy body with spatial mask + gamma. Focus on dust lane detail and galaxy halo extent, NOT IFN."
     },
     "galaxy_elliptical": {
       "label": "Elliptical Galaxy",

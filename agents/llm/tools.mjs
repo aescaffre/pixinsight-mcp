@@ -11,7 +11,7 @@ import {
   runGC, runABE, runPerChannelABE, runSCNR,
   setiStretch,
   createLumMask, applyMask, removeMask, closeMask,
-  checkStarQuality, checkRinging, checkSharpness, checkCoreBurning, scanBurntRegions,
+  checkStarQuality, checkRinging, checkSharpness, checkCoreBurning, scanBurntRegions, checkSaturation,
   measureSubjectDetail,
   multiScaleEnhance,
   extractPseudoOIII, continuumSubtractHa, dynamicNarrowbandBlend, createSyntheticLuminance, createZoneMasks, continuousClamp,
@@ -28,8 +28,8 @@ function statsLine(stats, label = 'Stats') {
   const med = stats.median?.toFixed(6) ?? '?';
   const max = (stats.max ?? 0).toFixed(4);
   let warn = '';
-  if (stats.max > 0.93) warn = ' ⚠️ BURN WARNING: max=' + max + ' exceeds 0.93 — apply continuous_clamp (min_clamp=0.80, max_clamp=0.95) for smooth brightness clamping with zero boundary artifacts.';
-  else if (stats.max > 0.88) warn = ' ⚡ max=' + max + ' approaching burn threshold (0.93). Consider continuous_clamp to smoothly limit brightness (core clamped harder, faint regions barely affected).';
+  if (stats.max > 0.95) warn = ' ⚠️ CLIPPING: max=' + max + ' — actual pixel clipping. Reduce stretch/curves or apply continuous_clamp.';
+  else if (stats.max > 0.80) warn = ' ⚡ BRIGHT: max=' + max + ' — core may look bright. Check visually: if internal structure is visible, this is OK. If featureless, apply continuous_clamp.';
   return `${label}: median=${med}, max=${max}${warn}`;
 }
 
@@ -774,29 +774,23 @@ const TOOL_CATALOG = {
     category: 'detail',
     definition: {
       name: 'run_lhe',
-      description: 'Run LocalHistogramEqualization for local contrast enhancement. ALWAYS use with a luminance mask to protect background. Multi-scale approach: large radius (64-128) for overall structure, then smaller (32-48) for fine detail.',
+      description: 'DEPRECATED — use multi_scale_enhance instead. Direct LHE is disabled for normal processing.',
       input_schema: {
         type: 'object',
         properties: {
           view_id: { type: 'string', description: 'View ID to process' },
           radius: { type: 'integer', description: 'Kernel radius in pixels (24-128)' },
-          amount: { type: 'number', description: 'Effect strength (0.10-0.50, recommend 0.15-0.30)' },
+          amount: { type: 'number', description: 'Effect strength (0.10-0.50)' },
           slope_limit: { type: 'number', description: 'Contrast slope limiter (1.1-2.5, default 1.5)' }
         },
         required: ['view_id', 'radius', 'amount']
       }
     },
-    handler: async (ctx, _store, _brief, input) => {
-      await ctx.pjsr(`
-        var P = new LocalHistogramEqualization;
-        P.radius = ${input.radius};
-        P.slopeLimit = ${input.slope_limit ?? 1.5};
-        P.amount = ${input.amount};
-        P.circularKernel = true;
-        P.executeOn(ImageWindow.windowById('${input.view_id}').mainView);
-      `);
-      const stats = await getStats(ctx, input.view_id);
-      return { type: 'text', text: `LHE complete (r=${input.radius}, a=${input.amount}). ${statsLine(stats)}` };
+    handler: async (_ctx, _store, _brief, _input) => {
+      return {
+        type: 'text',
+        text: `TOOL POLICY VIOLATION: Direct run_lhe is disabled. Use multi_scale_enhance instead — it does 3-scale LHE + optional HDRMT + before/after metrics in ONE call. It is 5x faster and includes automatic masking. Call multi_scale_enhance with your desired amounts (lhe_fine_amount, lhe_mid_amount, lhe_large_amount) and mask settings.`
+      };
     }
   },
 
@@ -1563,10 +1557,18 @@ const TOOL_CATALOG = {
     handler: async (ctx, _store, brief, input) => {
       const stats = await getStats(ctx, input.view_id);
 
+      // === BUDGET-AWARE GATE RELAXATION ===
+      // In emergency budget, relax non-safety gates to allow finish
+      const budget = brief?._budget || {};
+      const isEmergency = (budget.turnsRemaining ?? 999) <= 10;
+
       // === QUALITY GATE ENFORCEMENT ===
       // Run automated quality checks — agent cannot bypass these
       const failures = [];
       const warnings = [];
+      if (isEmergency) {
+        warnings.push(`EMERGENCY BUDGET: ${budget.turnsRemaining} turns remaining. Non-safety gates relaxed to allow finish.`);
+      }
 
       // Gate 1: Star quality (FWHM + color) — non-blocking (native PSF can exceed 6px)
       try {
@@ -1579,10 +1581,12 @@ const TOOL_CATALOG = {
         // This handles the case where finish is called on a starless view
       }
 
-      // Gate 2: Ringing detection (non-blocking — galaxy clusters have intrinsic oscillations)
+      // Gate 2: Ringing detection — category-aware (non-blocking for galaxies with natural radial profiles)
       try {
         const ringingResult = await checkRinging(ctx, input.view_id);
-        if (!ringingResult.pass) {
+        const category = brief?.target?.classification || 'unknown';
+        const morphologyConflict = ['galaxy_edge_on', 'galaxy_spiral', 'galaxy_cluster'].includes(category);
+        if (!ringingResult.pass && !morphologyConflict) {
           warnings.push(`RINGING WARNING: ${ringingResult.details}`);
         }
       } catch (e) {
@@ -1590,11 +1594,18 @@ const TOOL_CATALOG = {
         warnings.push(`RINGING CHECK ERROR: ${e.message} — inspect manually`);
       }
 
-      // Gate 3: Global burn scan (replaces core-only check — catches wide burnt regions too)
+      // Gate 3: Burn scan — HARD FAIL only at 0.95 (actual clipping), WARNING at 0.80 (perceptually bright)
+      // v13 showed that aggressive clamping (0.70-0.80 hard gate) destroys core detail.
+      // Better to warn and let the agent decide than force detail-destroying clamps.
       try {
-        const burnResult = await scanBurntRegions(ctx, input.view_id);
+        const burnResult = await scanBurntRegions(ctx, input.view_id); // threshold 0.95
         if (!burnResult.pass) {
           failures.push(`BURN SCAN FAILED: ${burnResult.details}`);
+        }
+        // Soft warning at 0.80 — agent should consider continuous_clamp but isn't forced
+        const softBurn = await scanBurntRegions(ctx, input.view_id, { threshold: 0.80 });
+        if (!softBurn.pass) {
+          warnings.push(`BRIGHT REGIONS: ${softBurn.burntBlockCount} block(s) above 0.80. Core may look bright — consider continuous_clamp if detail is lost, but do NOT clamp if internal structure is still visible.`);
         }
       } catch (e) {
         // Non-blocking if check fails
@@ -1670,6 +1681,30 @@ const TOOL_CATALOG = {
         }
       } catch (e) {
         // Non-blocking
+      }
+
+      // Gate 7: Saturation naturalness — compare against per-category limit
+      try {
+        const satResult = await checkSaturation(ctx, input.view_id);
+        if (satResult.subjectPixelCount > 100) {
+          const maxP90 = brief?.processingProfile?.saturation?.max_p90 ?? 0.65;
+          if (satResult.p90S > maxP90 + 0.10) {
+            const prov = brief?._provenance?.get(input.view_id);
+            const repairHint = prov?.tool === 'lrgb_combine'
+              ? ` REPAIR: restore_from_clone → lrgb_combine with saturation=${Math.max(0.20, (prov.params?.saturation ?? 0.80) - 0.20).toFixed(2)}. Do NOT desaturate the combined result.`
+              : ' Reduce saturation at the source (curves, LRGB params, Ha injection).';
+            const msg = `OVER-SATURATED: P90=${satResult.p90S.toFixed(3)} (limit: ${(maxP90 + 0.10).toFixed(2)}, profile max_p90=${maxP90.toFixed(2)}).${repairHint}`;
+            if (isEmergency) {
+              warnings.push(`[RELAXED] ${msg}`);
+            } else {
+              failures.push(msg);
+            }
+          } else if (satResult.p90S > maxP90) {
+            warnings.push(`Saturation high: P90=${satResult.p90S.toFixed(3)} (profile limit: ${maxP90.toFixed(2)}). Consider reducing saturation slightly for more natural appearance.`);
+          }
+        }
+      } catch (e) {
+        warnings.push(`Saturation check error: ${e.message} — inspect manually`);
       }
 
       if (failures.length > 0) {
@@ -2035,15 +2070,36 @@ const TOOL_CATALOG = {
         required: ['view_id']
       }
     },
-    handler: async (ctx, _store, _brief, input) => {
+    handler: async (ctx, _store, brief, input) => {
       const result = await checkRinging(ctx, input.view_id);
-      const status = result.pass ? 'PASS' : 'FAIL';
+      const category = brief?.target?.classification || 'unknown';
+
+      // Category-aware interpretation: edge-on galaxies have natural radial oscillations
+      const morphologyConflict = ['galaxy_edge_on', 'galaxy_spiral'].includes(category);
+      const blocking = !morphologyConflict; // only blocking for non-galaxy targets
+
+      let status, interpretation;
+      if (result.pass) {
+        status = 'PASS';
+        interpretation = '';
+      } else if (morphologyConflict) {
+        status = 'ADVISORY';
+        interpretation = `\n  NOTE: ${category} targets have natural radial brightness oscillations (disk + dust lane). ` +
+          `High oscillation count likely reflects STRUCTURE, not processing artifacts. ` +
+          `This is NOT blocking for ${category}. Focus on edge overshoot and halo artifacts instead.`;
+      } else {
+        status = 'FAIL';
+        interpretation = `\n  This indicates likely HDRMT or sharpening artifacts. Revert and reduce enhancement.`;
+      }
+
       return {
         type: 'text',
-        text: `[RINGING GATE: ${status}] ${result.details}\n` +
+        text: `[RINGING GATE: ${status}${morphologyConflict ? ' — morphology conflict' : ''}] ${result.details}\n` +
           `  Oscillations: ${result.oscillations} (limit: 1)\n` +
           `  Max amplitude: ${result.maxAmplitude?.toFixed(4) || 'N/A'}\n` +
-          `  Brightest region center: [${result.center || 'N/A'}]`
+          `  Brightest region center: [${result.center || 'N/A'}]` +
+          `  Blocking: ${blocking}` +
+          interpretation
       };
     }
   },
@@ -2124,6 +2180,51 @@ const TOOL_CATALOG = {
         text: `[BURN SCAN: ${status}] ${result.details}\n` +
           `  Burnt blocks: ${result.burntBlockCount || 0}/${result.totalBlocks || 0} (${((result.burntAreaFraction || 0) * 100).toFixed(1)}%, limit: 1%)`
       };
+    }
+  },
+
+  check_saturation: {
+    category: 'quality_gate',
+    definition: {
+      name: 'check_saturation',
+      description: 'Automated quality gate: measures HSV saturation in subject pixels (above background). Returns median, P90, P99 saturation. Use AFTER every saturation boost, curves, Ha injection, hue_boost — ideally on starless composite BEFORE star blend. Compare P90 against processing profile max_p90 limit. Over-saturation makes images look synthetic.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'View ID to measure saturation on' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, brief, input) => {
+      try {
+        const result = await checkSaturation(ctx, input.view_id);
+        const maxP90 = brief?.processingProfile?.saturation?.max_p90 ?? 0.65;
+        let text = result.details;
+
+        // Add repair policy if saturation exceeds limit
+        if (result.p90S > maxP90) {
+          const provenance = brief?._provenance?.get(input.view_id);
+          if (provenance && provenance.tool === 'lrgb_combine') {
+            const origSat = provenance.params?.saturation ?? 0.80;
+            const suggestedSat1 = Math.max(0.20, origSat - 0.20);
+            const suggestedSat2 = Math.max(0.20, origSat - 0.30);
+            text += `\n\n** REPAIR POLICY — UPSTREAM FIX REQUIRED **` +
+              `\nSuspected source: lrgb_combine (saturation=${origSat})` +
+              `\nP90=${result.p90S.toFixed(3)} exceeds limit ${maxP90.toFixed(2)}. LRGB combine amplified saturation.` +
+              `\nREQUIRED ACTION: restore_from_clone → lrgb_combine with lower saturation param.` +
+              `\n  Try: saturation=${suggestedSat1.toFixed(2)}, then saturation=${suggestedSat2.toFixed(2)}` +
+              `\nPROHIBITED: Do NOT apply S-curve desaturation or downstream color correction.` +
+              `\nPost-hoc desaturation destroys channel color gradients. Adjust the blend param instead.`;
+          } else if (result.p90S > maxP90 + 0.10) {
+            text += `\n\nWARNING: P90=${result.p90S.toFixed(3)} exceeds hard limit ${(maxP90 + 0.10).toFixed(2)}. Reduce saturation at the source — curves, LRGB params, or Ha injection strength.`;
+          }
+        }
+
+        return { type: 'text', text };
+      } catch (e) {
+        return { type: 'text', text: `Saturation check error: ${e.message}` };
+      }
     }
   },
 

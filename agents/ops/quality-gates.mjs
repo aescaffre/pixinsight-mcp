@@ -585,7 +585,7 @@ export async function checkCoreBurning(ctx, viewId) {
  */
 export async function scanBurntRegions(ctx, viewId, opts = {}) {
   const blockSize = opts.blockSize ?? 50;
-  const threshold = opts.threshold ?? 0.93;
+  const threshold = opts.threshold ?? 0.95;
   const blockBurntPct = opts.blockBurntPct ?? 3; // % of pixels in block above threshold to consider it burnt
 
   const r = await ctx.pjsr(`
@@ -680,5 +680,105 @@ export async function scanBurntRegions(ctx, viewId, opts = {}) {
     totalBlocks: data.totalBlocks,
     worstBlocks: data.worstBlocks,
     details: details.join(' ')
+  };
+}
+
+/**
+ * Check saturation naturalness in subject pixels.
+ * Computes HSV saturation for pixels above background (subject only).
+ * Returns percentile statistics for comparison against per-category limits.
+ *
+ * @param {object} ctx - Bridge context
+ * @param {string} viewId - View ID to check (should be the final composite, ideally before star blend)
+ * @returns {object} { medianS, p90S, p99S, maxS, subjectPixelCount, details }
+ */
+export async function checkSaturation(ctx, viewId) {
+  const r = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}');
+    if (w.isNull) throw new Error('checkSaturation: view not found: ${viewId}');
+    var img = w.mainView.image;
+    if (!img.isColor) {
+      JSON.stringify({ mono: true, medianS: 0, p90S: 0, p99S: 0, maxS: 0, subjectPixelCount: 0 });
+    } else {
+      // Find background level (PJSR: must set selectedChannel before median())
+      img.selectedChannel = 0; var bgR = img.median();
+      img.selectedChannel = 1; var bgG = img.median();
+      img.selectedChannel = 2; var bgB = img.median();
+      img.resetChannelSelection();
+      // Approximate MAD via sampling
+      var sampleStep = 32;
+      var diffs = [];
+      for (var y = 0; y < img.height; y += sampleStep) {
+        for (var x = 0; x < img.width; x += sampleStep) {
+          var lum = 0.2126 * img.sample(x, y, 0) + 0.7152 * img.sample(x, y, 1) + 0.0722 * img.sample(x, y, 2);
+          diffs.push(Math.abs(lum - (0.2126 * bgR + 0.7152 * bgG + 0.0722 * bgB)));
+        }
+      }
+      diffs.sort(function(a, b) { return a - b; });
+      var bgMAD = diffs[Math.floor(diffs.length / 2)];
+      var bgLum = 0.2126 * bgR + 0.7152 * bgG + 0.0722 * bgB;
+      var subjectThreshold = bgLum + 5 * bgMAD;
+
+      // Sample subject pixels and compute HSV saturation
+      var satValues = [];
+      var step = 8; // sample every 8th pixel for speed
+      for (var y = 0; y < img.height; y += step) {
+        for (var x = 0; x < img.width; x += step) {
+          var r = img.sample(x, y, 0);
+          var g = img.sample(x, y, 1);
+          var b = img.sample(x, y, 2);
+          var lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+          if (lum > subjectThreshold) {
+            var maxC = Math.max(r, g, b);
+            var minC = Math.min(r, g, b);
+            var sat = maxC > 0.001 ? (maxC - minC) / maxC : 0;
+            satValues.push(sat);
+          }
+        }
+      }
+
+      // Sort for percentiles
+      satValues.sort(function(a, b) { return a - b; });
+      var n = satValues.length;
+      var medianS = n > 0 ? satValues[Math.floor(n * 0.5)] : 0;
+      var p90S = n > 0 ? satValues[Math.floor(n * 0.9)] : 0;
+      var p99S = n > 0 ? satValues[Math.floor(n * 0.99)] : 0;
+      var maxS = n > 0 ? satValues[n - 1] : 0;
+
+      JSON.stringify({
+        mono: false,
+        medianS: medianS,
+        p90S: p90S,
+        p99S: p99S,
+        maxS: maxS,
+        subjectPixelCount: n,
+        bgLum: bgLum,
+        subjectThreshold: subjectThreshold
+      });
+    }
+  `);
+
+  if (r.status === 'error') {
+    throw new Error('Saturation check failed to execute: ' + (r.error?.message || 'PJSR error'));
+  }
+
+  let data;
+  try {
+    data = JSON.parse(r.outputs?.consoleOutput || '{}');
+  } catch {
+    return { medianS: 0, p90S: 0, p99S: 0, maxS: 0, subjectPixelCount: 0, error: 'Failed to parse PJSR output' };
+  }
+
+  if (data.mono) {
+    return { medianS: 0, p90S: 0, p99S: 0, maxS: 0, subjectPixelCount: 0, details: 'Mono image — saturation check skipped' };
+  }
+
+  return {
+    medianS: data.medianS,
+    p90S: data.p90S,
+    p99S: data.p99S,
+    maxS: data.maxS,
+    subjectPixelCount: data.subjectPixelCount,
+    details: `Saturation: median=${data.medianS.toFixed(3)}, P90=${data.p90S.toFixed(3)}, P99=${data.p99S.toFixed(3)}, max=${data.maxS.toFixed(3)} (${data.subjectPixelCount} subject pixels)`
   };
 }

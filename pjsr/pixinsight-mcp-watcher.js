@@ -658,14 +658,27 @@ function runWatcher() {
 
    console.show();
 
+   // Graceful shutdown: check for sentinel file
+   var SHUTDOWN_FILE = BRIDGE_DIR + "/shutdown";
+
+   function shouldShutdown() {
+      if (console.abortRequested) return true;
+      if (File.exists(SHUTDOWN_FILE)) {
+         try { File.remove(SHUTDOWN_FILE); } catch(e) {}
+         return true;
+      }
+      return false;
+   }
+
    // Main loop — processEvents() keeps PixInsight UI responsive
+   // Use short sleeps (20ms) with frequent processEvents() for UI responsiveness
    for (;;) {
-      // Let PixInsight process UI events (prevents freeze)
+      // Yield to PixInsight UI
       processEvents();
 
-      // Check if abort was requested (Ctrl+F11 or console abort button)
-      if (console.abortRequested) {
-         console.warningln("[MCP Watcher] Abort requested. Stopping.");
+      // Check abort or shutdown signal
+      if (shouldShutdown()) {
+         console.warningln("[MCP Watcher] Shutdown requested. Stopping.");
          break;
       }
 
@@ -673,16 +686,18 @@ function runWatcher() {
       if (processed) {
          commandCount++;
          // Yield heavily after command execution so UI can catch up
-         for (var y = 0; y < 5; ++y) {
+         for (var y = 0; y < 20; ++y) {
             processEvents();
-            msleep(100);
+            msleep(20);
+            if (shouldShutdown()) break;
          }
       } else {
-         // No commands — sleep in longer bursts, yield often
-         for (var i = 0; i < 10; ++i) {
-            msleep(100);
+         // No commands — yield frequently with short sleeps for UI responsiveness
+         // Total idle cycle: ~500ms (25 x 20ms) before re-checking commands
+         for (var i = 0; i < 25; ++i) {
+            msleep(20);
             processEvents();
-            if (console.abortRequested) break;
+            if (shouldShutdown()) break;
          }
       }
    }
