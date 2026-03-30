@@ -80,6 +80,7 @@ const STATE_TOOLS = {
   ]),
 
   compose: new Set([
+    'finish',
     'lrgb_combine', 'star_screen_blend', 'star_protected_blend', 'restore_star_color',
     'run_curves', 'run_pixelmath',
     'multi_scale_enhance', 'continuous_clamp',

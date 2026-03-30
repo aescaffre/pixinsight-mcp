@@ -550,12 +550,7 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     log('  GC on L...');
     await runGC(ctx, 'FILTER_L');
 
-    // Background neutralization on L
-    log('  Background neutralization on L...');
-    await ctx.pjsr(`
-      var P=new BackgroundNeutralization;
-      P.executeOn(ImageWindow.windowById('FILTER_L').mainView);
-    `).catch(() => log('  BN on L skipped'));
+    // Background neutralization skipped for mono L — only meaningful on color images
 
     // BXT correct
     log('  BXT correct on L...');
@@ -676,11 +671,7 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
       log('  GC on Ha...');
       await runGC(ctx, 'FILTER_Ha');
 
-      log('  Background neutralization on Ha...');
-      await ctx.pjsr(`
-        var P=new BackgroundNeutralization;
-        P.executeOn(ImageWindow.windowById('FILTER_Ha').mainView);
-      `).catch(() => log('  BN on Ha skipped'));
+      // Background neutralization skipped for mono Ha — only meaningful on color images
 
       log('  BXT correct on Ha...');
       await pjsrOrDie(`
