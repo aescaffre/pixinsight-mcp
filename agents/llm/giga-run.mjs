@@ -289,7 +289,10 @@ ${extractWinningParams(brief.target.classification)}
     process.exit(77);
   }
 
-  // Save final image
+  // ================================================================
+  // EXPORT: Artifact-based (not view-name-based)
+  // Source of truth: final-selection.json written by the finish tool
+  // ================================================================
   const targetName = config.files?.targetName || 'Target';
   const outputDir = config.files?.outputDir || path.join(home, 'Desktop');
   fs.mkdirSync(outputDir, { recursive: true });
@@ -297,149 +300,96 @@ ${extractWinningParams(brief.target.classification)}
   const xisfPath = path.join(outputDir, `${targetName}_giga.xisf`);
   const pngPath = path.join(outputDir, `${targetName}_giga.png`);
 
-  // Robust export: use the view_id from the agent's finish call, fall back to parsing last output
-  let finishViewId = result.finishResult?.view_id || null;
-  let viewIdSource = finishViewId ? 'finishResult' : null;
+  // PRIMARY PATH: read final-selection.json (written by finish tool)
+  let finalSelection = store.readFinalSelection();
+  let exportSource = finalSelection ? 'final-selection.json' : null;
 
-  // If finishResult didn't yield a view_id, try to parse the agent's last output text
-  if (!finishViewId) {
-    const lastText = result.transcript?.[result.transcript.length - 1]?.content || '';
-    console.log(`  [DEBUG] finishResult: ${JSON.stringify(result.finishResult)}`);
-    console.log(`  [DEBUG] Last transcript text (first 500): ${lastText.slice(0, 500)}`);
-
-    // Try multiple patterns on the agent's last output
-    const patterns = [
-      /<<FINISH_VIEW_ID=(\w+)>>/,                  // Structured marker (most reliable)
-      /Finished\b[^.]*\.\s*Best:\s*(\w+)/,        // Exact tool output
-      /\bBest:\s*[`'"]?(\w+)[`'"]?/i,              // "Best: VIEW_ID"
-      /\bwinner[:\s]+[`'"]?(\w+)[`'"]?/i,          // "winner: VIEW_ID"
-      /\bfinal(?:ized?)?\s+(?:image|result|view|output)\s+(?:is\s+)?[`'"]*([A-Z]\w*_\w+|variant_\w+|\w+_\d+)/i,
-      /\bview[_\s]?id[:\s]+[`'"]*(\w+)/i,          // "view_id: X"
-      /\b(COMP_\w+)\b/,                            // COMP_ prefixed names
-      /\b(FINAL_\w+)\b/,                           // FINAL_ prefixed names
-      /\b([A-Za-z]\w*_FINAL)\b/,                   // _FINAL suffixed names
-    ];
-
-    for (const pat of patterns) {
-      const m = lastText.match(pat);
-      if (m) {
-        finishViewId = m[1];
-        viewIdSource = `transcript-regex(${pat.source.slice(0, 30)})`;
-        break;
-      }
-    }
-  }
-
-  // Fallback: read trace file for the finish tool call's view_id argument
-  if (!finishViewId) {
+  // RECOVERY: if no final-selection.json, reconstruct from trace
+  if (!finalSelection) {
+    console.log('  No final-selection.json — attempting trace recovery...');
     try {
       const tracePath = path.join(store.baseDir, 'trace.jsonl');
       if (fs.existsSync(tracePath)) {
         const traceLines = fs.readFileSync(tracePath, 'utf-8').trim().split('\n');
-        // Search from the end — the last finish call is the one that matters
+        // Find last successful finish call
         for (let i = traceLines.length - 1; i >= 0; i--) {
           try {
             const entry = JSON.parse(traceLines[i]);
-            if (entry.tool === 'finish' && entry.args?.view_id) {
-              // Only use if the finish was not rejected (resultSummary should contain "PASSED")
-              const wasRejected = entry.resultSummary && entry.resultSummary.includes('REJECTED');
-              if (!wasRejected) {
-                finishViewId = entry.args.view_id;
-                viewIdSource = 'trace.jsonl';
-                break;
+            if (entry.tool === 'finish' && !entry.error && entry.resultSummary?.includes('PASSED')) {
+              // New contract: finish has variant_id
+              if (entry.args?.variant_id) {
+                const variantMeta = store.getVariantById('giga_orchestrator', entry.args.variant_id);
+                if (variantMeta) {
+                  finalSelection = store.writeFinalSelection({
+                    variant_id: entry.args.variant_id,
+                    variant_path: variantMeta.xisfPath,
+                    agent: 'giga_orchestrator',
+                    notes: variantMeta.params?.notes || '',
+                    finish_seq: entry.seq,
+                    recovered: true,
+                  });
+                  exportSource = 'trace-recovery (variant_id)';
+                  break;
+                }
+              }
+              // LEGACY: old finish only had view_id — use last save_variant before this finish
+              if (entry.args?.view_id) {
+                const variants = store.listVariants('giga_orchestrator');
+                if (variants.length > 0) {
+                  const lastVariant = variants[variants.length - 1];
+                  finalSelection = store.writeFinalSelection({
+                    variant_id: lastVariant.variantId,
+                    variant_path: lastVariant.xisfPath,
+                    agent: 'giga_orchestrator',
+                    notes: lastVariant.params?.notes || '',
+                    finish_seq: entry.seq,
+                    recovered: true,
+                    legacy_view_id: entry.args.view_id,
+                  });
+                  exportSource = 'trace-recovery (legacy view_id → last variant)';
+                  break;
+                }
               }
             }
           } catch {} // skip malformed lines
         }
       }
     } catch (e) {
-      console.log(`  [DEBUG] Trace fallback error: ${e.message}`);
+      console.log(`  Trace recovery error: ${e.message}`);
     }
   }
 
-  if (finishViewId) {
-    console.log(`  Agent finished with view: ${finishViewId} (source: ${viewIdSource})`);
-  } else {
-    console.log(`  No view_id from agent finish or transcript — will use heuristic`);
-  }
-
+  // Export from the artifact
   try {
-    // Save to /tmp first (reliable), then copy to output dir
-    const tmpXisf = `/tmp/${targetName}_export.xisf`;
-    const tmpPng = `/tmp/${targetName}_export.png`;
+    if (finalSelection && fs.existsSync(finalSelection.variant_path)) {
+      console.log(`  Export source: ${exportSource}`);
+      console.log(`  Final artifact: ${finalSelection.variant_id} → ${finalSelection.variant_path}`);
 
-    // Sanitize agent view_id for safe PJSR injection (strip non-alphanumeric/underscore)
-    const safeAgentViewId = finishViewId ? finishViewId.replace(/[^a-zA-Z0-9_]/g, '') : '';
+      // Open the saved XISF in PI, export as XISF + PNG
+      const r = await ctx.pjsr(`
+        var w = ImageWindow.open('${finalSelection.variant_path.replace(/'/g, "\\'")}');
+        if (w.length === 0) throw new Error('Failed to open variant XISF');
+        var win = w[0];
+        win.show();
 
-    const saveResult = await ctx.pjsr(`
-      var best = null;
-      var bestId = '';
-      var bestMedian = 0;
+        var xp = '${xisfPath.replace(/'/g, "\\'")}';
+        if (File.exists(xp)) File.remove(xp);
+        win.saveAs(xp, false, false, false, false);
 
-      // First: try the exact view the agent's finish tool specified
-      var agentId = '${safeAgentViewId}';
-      if (agentId) {
-        var w = ImageWindow.windowById(agentId);
-        if (!w.isNull && w.mainView.image.numberOfChannels === 3 && w.mainView.image.median() > 0.01) {
-          best = w;
-          bestId = agentId;
-          bestMedian = w.mainView.image.median();
-        }
-      }
+        var pp = '${pngPath.replace(/'/g, "\\'")}';
+        if (File.exists(pp)) File.remove(pp);
+        win.saveAs(pp, false, false, false, false);
 
-      // Fallback: heuristic name scoring if agent view not found
-      if (!best) {
-        var candidates = [];
-        var ws = ImageWindow.windows;
-        for (var i = 0; i < ws.length; i++) {
-          var img = ws[i].mainView.image;
-          if (img.numberOfChannels === 3 && img.median() > 0.01) {
-            var id = ws[i].mainView.id;
-            var score = 0;
-            // Prefer processed views over baselines
-            if (id.indexOf('FINAL') >= 0 || id.indexOf('final') >= 0) score += 200;
-            if (id.indexOf('COMP') >= 0 || id.indexOf('comp') >= 0) score += 100;
-            if (id.indexOf('work') >= 0 || id.indexOf('detail') >= 0) score += 50;
-            // Penalize baselines and backups
-            if (id.indexOf('baseline') >= 0 || id.indexOf('backup') >= 0) score -= 100;
-            if (id === '${targetName}') score += 10; // original target name = mild preference
-            candidates.push({ id: id, score: score, median: img.median(), w: ws[i] });
-          }
-        }
-        candidates.sort(function(a, b) {
-          if (a.score !== b.score) return b.score - a.score;
-          return 0; // Don't sort by median — processed views may be darker
-        });
-
-        if (candidates.length === 0) throw new Error('No color image found for export');
-        best = candidates[0].w;
-        bestId = candidates[0].id;
-        bestMedian = candidates[0].median;
-      }
-
-      // Stars: do NOT blend here — the agent already blends stars during composition,
-      // and the finish handler also auto-blends. Adding stars a third time washes out
-      // nebula detail and makes the core look flat/monotone.
-      var starView = null; // kept for reporting only
-
-      // Save to /tmp (reliable path, no network drives)
-      best.saveAs('${tmpXisf}', false, false, false, false);
-      best.mainView.id = bestId;
-      best.saveAs('${tmpPng}', false, false, false, false);
-      best.mainView.id = bestId;
-      'Exported ' + bestId + ' (med=' + bestMedian.toFixed(4) + ', agent_requested=' + agentId + ', stars=' + (starView ? 'blended' : 'already present or not found') + ')';
-    `);
-    console.log(`  ${saveResult.outputs?.consoleOutput || 'done'}`);
-
-    // Copy from /tmp to output dir
-    const fsCopy = await import('fs');
-    if (fsCopy.default.existsSync(tmpXisf)) {
-      fsCopy.default.copyFileSync(tmpXisf, xisfPath);
+        'Exported ' + win.mainView.id + ' median=' + win.mainView.image.median().toFixed(4) + ' max=' + win.mainView.image.maximum().toFixed(4);
+      `);
+      console.log(`  ${r.outputs?.consoleOutput || 'done'}`);
       console.log(`  Saved: ${xisfPath}`);
-    }
-    if (fsCopy.default.existsSync(tmpPng)) {
-      fsCopy.default.copyFileSync(tmpPng, pngPath);
       console.log(`  Saved: ${pngPath}`);
+    } else if (finalSelection) {
+      console.error(`  Export error: variant XISF not found at ${finalSelection.variant_path}`);
+    } else {
+      console.error(`  Export error: no final selection found (no final-selection.json, trace recovery failed)`);
+      console.error(`  Manual recovery: inspect variants in ${store.agentDir('giga_orchestrator')}`);
     }
   } catch (e) {
     console.error(`  Save error: ${e.message}`);

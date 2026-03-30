@@ -249,6 +249,46 @@ export class ArtifactStore {
   }
 
   /**
+   * Look up a variant by its short ID (e.g. "variant_21").
+   * @param {string} agentName
+   * @param {string} variantId - e.g. "variant_21"
+   * @returns {object|null} metadata or null
+   */
+  getVariantById(agentName, variantId) {
+    const dir = path.join(this.agentDir(agentName), variantId);
+    const metaPath = path.join(dir, 'metadata.json');
+    if (!fs.existsSync(metaPath)) return null;
+    return JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+  }
+
+  /**
+   * Write the final selection record for export.
+   * @param {object} selection - { variant_id, variant_path, notes, finish_seq }
+   */
+  writeFinalSelection(selection) {
+    const record = {
+      ...selection,
+      created_at: new Date().toISOString(),
+      run_id: this.runId,
+    };
+    fs.writeFileSync(
+      path.join(this.baseDir, 'final-selection.json'),
+      JSON.stringify(record, null, 2)
+    );
+    return record;
+  }
+
+  /**
+   * Read the final selection record.
+   * @returns {object|null}
+   */
+  readFinalSelection() {
+    const p = path.join(this.baseDir, 'final-selection.json');
+    if (!fs.existsSync(p)) return null;
+    return JSON.parse(fs.readFileSync(p, 'utf-8'));
+  }
+
+  /**
    * Record completion of a pipeline stage for resume support.
    */
   recordStageCompletion(stageIndex, agentName, winnerId, artifactId, extras = {}) {

@@ -1288,7 +1288,7 @@ const TOOL_CATALOG = {
     category: 'artifacts',
     definition: {
       name: 'save_variant',
-      description: 'Save the current image as a named variant. Use this to checkpoint good results so you can compare later.',
+      description: 'Save the current image as a durable variant on disk. Returns a variant_id (e.g. "variant_21") that you MUST use when calling finish. The variant is the source of truth for export — not the live PixInsight view.',
       input_schema: {
         type: 'object',
         properties: {
@@ -1306,7 +1306,9 @@ const TOOL_CATALOG = {
         ...input.params,
         notes: input.notes
       }, { ...stats, uniformity: uni.score });
-      return { type: 'text', text: `Variant saved: ${result.artifactId}\nStats: median=${stats.median.toFixed(6)}, uniformity=${uni.score.toFixed(6)}` };
+      // Extract the short variant_id (e.g. "variant_21") from the full artifactId
+      const variantId = result.artifactId.split('/').pop();
+      return { type: 'text', text: `Variant saved: variant_id="${variantId}" (${result.artifactId})\nUse this variant_id when calling finish.\nStats: median=${stats.median.toFixed(6)}, uniformity=${uni.score.toFixed(6)}` };
     }
   },
 
@@ -1793,19 +1795,55 @@ const TOOL_CATALOG = {
     category: 'control',
     definition: {
       name: 'finish',
-      description: 'Signal that you are done processing. Automatically runs quality gates (star quality, ringing) — if any FAIL, finish is REJECTED and you must fix the issues before calling finish again.',
+      description: 'Signal that you are done processing. You MUST provide a variant_id from a previous save_variant call — this is the durable artifact that will be exported. The variant must exist on disk. Quality gates run automatically on the view_id — if any FAIL, finish is REJECTED. Save your final image as a variant BEFORE calling finish.',
       input_schema: {
         type: 'object',
         properties: {
-          view_id: { type: 'string', description: 'View ID of your best result' },
+          variant_id: { type: 'string', description: 'REQUIRED: variant_id from save_variant (e.g. "variant_21"). This is the artifact that will be exported.' },
+          view_id: { type: 'string', description: 'View ID for quality gate checks (must still be open in PixInsight). If omitted, uses the view from the variant metadata.' },
           rationale: { type: 'string', description: 'Explain why this is your best result and what trade-offs you made' },
           params_summary: { type: 'object', description: 'Key parameters used in the winning approach' }
         },
-        required: ['view_id', 'rationale']
+        required: ['variant_id', 'rationale']
       }
     },
-    handler: async (ctx, _store, brief, input) => {
-      const stats = await getStats(ctx, input.view_id);
+    handler: async (ctx, store, brief, input, agentName) => {
+      // === VARIANT VALIDATION ===
+      // The variant_id is the source of truth for export.
+      const variantId = input.variant_id;
+      let variantMeta = null;
+
+      if (variantId && store) {
+        variantMeta = store.getVariantById(agentName, variantId);
+        if (!variantMeta) {
+          return {
+            type: 'text',
+            text: `FINISH REJECTED: variant_id="${variantId}" not found on disk. ` +
+              `Call save_variant first to save your final image, then use the returned variant_id.`
+          };
+        }
+        // Verify the XISF file actually exists
+        if (!fs.existsSync(variantMeta.xisfPath)) {
+          return {
+            type: 'text',
+            text: `FINISH REJECTED: variant_id="${variantId}" metadata exists but XISF file is missing at ${variantMeta.xisfPath}. ` +
+              `Re-save the variant with save_variant.`
+          };
+        }
+      }
+
+      // Resolve view_id for quality gate checks
+      // Prefer explicit view_id, fall back to the variant's source view
+      const viewId = input.view_id || variantMeta?.viewId;
+      if (!viewId) {
+        return {
+          type: 'text',
+          text: `FINISH REJECTED: no view_id provided and variant has no source viewId. ` +
+            `Provide view_id for quality gate checks.`
+        };
+      }
+
+      const stats = await getStats(ctx, viewId);
 
       // === BUDGET-AWARE GATE RELAXATION ===
       // In emergency budget, relax non-safety gates to allow finish
@@ -1822,7 +1860,7 @@ const TOOL_CATALOG = {
 
       // Gate 1: Star quality (FWHM + color) — non-blocking (native PSF can exceed 6px)
       try {
-        const starResult = await checkStarQuality(ctx, input.view_id);
+        const starResult = await checkStarQuality(ctx, viewId);
         if (!starResult.pass) {
           warnings.push(`STAR QUALITY WARNING: ${starResult.details}`);
         }
@@ -1833,7 +1871,7 @@ const TOOL_CATALOG = {
 
       // Gate 2: Ringing detection — category-aware (non-blocking for galaxies with natural radial profiles)
       try {
-        const ringingResult = await checkRinging(ctx, input.view_id);
+        const ringingResult = await checkRinging(ctx, viewId);
         const category = brief?.target?.classification || 'unknown';
         const morphologyConflict = ['galaxy_edge_on', 'galaxy_spiral', 'galaxy_cluster'].includes(category);
         if (!ringingResult.pass && !morphologyConflict) {
@@ -1848,12 +1886,12 @@ const TOOL_CATALOG = {
       // v13 showed that aggressive clamping (0.70-0.80 hard gate) destroys core detail.
       // Better to warn and let the agent decide than force detail-destroying clamps.
       try {
-        const burnResult = await scanBurntRegions(ctx, input.view_id); // threshold 0.95
+        const burnResult = await scanBurntRegions(ctx, viewId); // threshold 0.95
         if (!burnResult.pass) {
           failures.push(`BURN SCAN FAILED: ${burnResult.details}`);
         }
         // Soft warning at 0.80 — agent should consider continuous_clamp but isn't forced
-        const softBurn = await scanBurntRegions(ctx, input.view_id, { threshold: 0.80 });
+        const softBurn = await scanBurntRegions(ctx, viewId, { threshold: 0.80 });
         if (!softBurn.pass) {
           warnings.push(`BRIGHT REGIONS: ${softBurn.burntBlockCount} block(s) above 0.80. Core may look bright — consider continuous_clamp if detail is lost, but do NOT clamp if internal structure is still visible.`);
         }
@@ -1863,7 +1901,7 @@ const TOOL_CATALOG = {
 
       // Gate 4: Subject detail — HARD GATE for brightness and contrast
       try {
-        const detailResult = await measureSubjectDetail(ctx, input.view_id);
+        const detailResult = await measureSubjectDetail(ctx, viewId);
         if (detailResult.subjectBrightness < 0.25) {
           failures.push(`SUBJECT TOO DIM: brightness=${detailResult.subjectBrightness.toFixed(3)} (minimum: 0.25). Subjects must be clearly visible and impactful. Stretch harder, apply shadow-lifting curves, boost through masks. For PNe: outer halo must be visible.`);
         } else if (detailResult.subjectBrightness < 0.30) {
@@ -1907,7 +1945,7 @@ const TOOL_CATALOG = {
       // In dark images (median < 0.10), any channel peaking above 0.92 looks visually burnt
       try {
         const chPeaks = await ctx.pjsr(`
-          var w = ImageWindow.windowById('${input.view_id}');
+          var w = ImageWindow.windowById('${viewId}');
           var img = w.mainView.image;
           if (img.isColor) {
             img.selectedChannel = 0; var rMax = img.maximum(); var rMed = img.median();
@@ -1935,11 +1973,11 @@ const TOOL_CATALOG = {
 
       // Gate 7: Saturation naturalness — compare against per-category limit
       try {
-        const satResult = await checkSaturation(ctx, input.view_id);
+        const satResult = await checkSaturation(ctx, viewId);
         if (satResult.subjectPixelCount > 100) {
           const maxP90 = brief?.processingProfile?.saturation?.max_p90 ?? 0.65;
           if (satResult.p90S > maxP90 + 0.10) {
-            const prov = brief?._provenance?.get(input.view_id);
+            const prov = brief?._provenance?.get(viewId);
             const repairHint = prov?.tool === 'lrgb_combine'
               ? ` REPAIR: restore_from_clone → lrgb_combine with saturation=${Math.max(0.20, (prov.params?.saturation ?? 0.80) - 0.20).toFixed(2)}. Do NOT desaturate the combined result.`
               : ' Reduce saturation at the source (curves, LRGB params, Ha injection).';
@@ -1960,7 +1998,7 @@ const TOOL_CATALOG = {
       // Gate 8: Tonal presence — subject must be impactful, not merely safe
       try {
         const category = brief?.target?.classification || 'unknown';
-        const tonalResult = await checkTonalPresence(ctx, input.view_id, category);
+        const tonalResult = await checkTonalPresence(ctx, viewId, category);
         if (tonalResult.tonal_verdict === 'subdued') {
           if (tonalResult.roi_confidence === 'low') {
             warnings.push(`TONAL PRESENCE advisory: subject appears subdued (separation=${tonalResult.separation.toFixed(2)}×) but ROI confidence is low — manual inspection recommended.`);
@@ -1990,11 +2028,9 @@ const TOOL_CATALOG = {
         };
       }
 
-      // Do NOT auto-blend stars here — the agent blends stars during composition
-      // (star_screen_blend in Phase 5). Double-blending washes out nebula core detail.
-      // Only warn if the image appears to have no stars at all.
+      // Do NOT auto-blend stars here — the agent blends stars during composition.
       try {
-        const starCheck = await checkStarQuality(ctx, input.view_id);
+        const starCheck = await checkStarQuality(ctx, viewId);
         if (starCheck.starsFound < 20) {
           warnings.push(`Very few stars detected (${starCheck.starsFound}). If the image is starless, the agent may have forgotten to blend stars during composition.`);
         }
@@ -2002,11 +2038,28 @@ const TOOL_CATALOG = {
         // Non-fatal
       }
 
-      const finalStats = await getStats(ctx, input.view_id);
+      // === WRITE FINAL SELECTION RECORD ===
+      // This is the source of truth for export — artifact-based, not view-name-based.
+      if (variantMeta && store) {
+        const seq = brief?._budget?.turnsUsed || 0;
+        store.writeFinalSelection({
+          variant_id: variantId,
+          variant_path: variantMeta.xisfPath,
+          agent: agentName,
+          notes: variantMeta.params?.notes || input.rationale?.slice(0, 200) || '',
+          finish_seq: seq,
+          view_id: viewId, // for reference only — NOT used for export
+        });
+        process.stderr.write(`[finish] Committed final selection: ${variantId} → ${variantMeta.xisfPath}\n`);
+      }
+
+      const finalStats = await getStats(ctx, viewId);
       const warnText = warnings.length > 0 ? `\nWarnings:\n${warnings.map(w => '  - ' + w).join('\n')}` : '';
       return {
         type: 'text',
-        text: `Finished (quality gates PASSED). Best: ${input.view_id} (median=${finalStats.median.toFixed(6)}, max=${(finalStats.max ?? 0).toFixed(4)})${warnText}\nRationale: ${input.rationale}\n<<FINISH_VIEW_ID=${input.view_id}>>`
+        text: `Finished (quality gates PASSED). Final artifact: ${variantId} (${variantMeta?.xisfPath || 'N/A'})\n` +
+          `Stats: median=${finalStats.median.toFixed(6)}, max=${(finalStats.max ?? 0).toFixed(4)}${warnText}\n` +
+          `Rationale: ${input.rationale}`
       };
     }
   },
