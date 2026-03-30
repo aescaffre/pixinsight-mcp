@@ -68,7 +68,7 @@ const STATE_TOOLS = {
     'check_saturation', 'check_star_quality', 'check_ringing',
     'check_sharpness', 'check_core_burning', 'scan_burnt_regions',
     'check_constraints', 'compute_scores',
-    'check_tonal_presence', 'check_star_layer_integrity',
+    'check_tonal_presence', 'check_star_layer_integrity', 'check_bright_chroma',
     // Artifacts
     'continuous_clamp',
     // Variants
@@ -76,11 +76,11 @@ const STATE_TOOLS = {
     'save_and_show_preview', 'submit_scores',
     'list_open_images',
     // Star handling (for star branch)
-    'star_screen_blend', 'star_protected_blend',
+    'star_screen_blend', 'star_protected_blend', 'restore_star_color',
   ]),
 
   compose: new Set([
-    'lrgb_combine', 'star_screen_blend', 'star_protected_blend',
+    'lrgb_combine', 'star_screen_blend', 'star_protected_blend', 'restore_star_color',
     'run_curves', 'run_pixelmath',
     'multi_scale_enhance', 'continuous_clamp',
     'clone_image', 'restore_from_clone', 'close_image',
@@ -89,7 +89,7 @@ const STATE_TOOLS = {
     'get_image_stats', 'measure_subject_detail', 'measure_uniformity',
     'check_saturation', 'check_star_quality', 'check_ringing',
     'check_sharpness', 'scan_burnt_regions', 'check_constraints',
-    'check_tonal_presence', 'check_star_layer_integrity',
+    'check_tonal_presence', 'check_star_layer_integrity', 'check_bright_chroma',
     'compute_scores', 'submit_scores',
     'create_luminance_mask', 'apply_mask', 'remove_mask', 'close_mask',
     'list_open_images', 'rename_view', 'purge_undo',
@@ -104,7 +104,7 @@ const STATE_TOOLS = {
     'get_image_stats', 'measure_subject_detail', 'measure_uniformity',
     'check_saturation', 'check_star_quality', 'check_ringing',
     'scan_burnt_regions', 'check_constraints', 'check_sharpness',
-    'check_tonal_presence', 'check_star_layer_integrity',
+    'check_tonal_presence', 'check_star_layer_integrity', 'check_bright_chroma',
     'compute_scores',
     'list_open_images', 'close_image',
   ]),

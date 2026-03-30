@@ -11,7 +11,7 @@ import {
   runGC, runABE, runPerChannelABE, runSCNR,
   setiStretch,
   createLumMask, applyMask, removeMask, closeMask,
-  checkStarQuality, checkRinging, checkSharpness, checkCoreBurning, scanBurntRegions, checkSaturation, checkTonalPresence, checkStarLayerIntegrity,
+  checkStarQuality, checkRinging, checkSharpness, checkCoreBurning, scanBurntRegions, checkSaturation, checkTonalPresence, checkStarLayerIntegrity, checkBrightChroma,
   measureSubjectDetail,
   multiScaleEnhance,
   extractPseudoOIII, continuumSubtractHa, dynamicNarrowbandBlend, createSyntheticLuminance, createZoneMasks, continuousClamp,
@@ -1041,22 +1041,24 @@ const TOOL_CATALOG = {
     category: 'stars',
     definition: {
       name: 'star_protected_blend',
-      description: 'Core-safe star reintegration via screen blend with luminance-based spatial attenuation. Smoothly reduces star contribution from 100% in dark sky to min_strength_fraction in bright cores, preventing star-blend-induced core burns. PRECONDITION: check_star_layer_integrity must have been called on the star layer first (will refuse otherwise).',
+      description: 'HYBRID color-preserving star reintegration. In dark areas: normal RGB screen blend (gorgeous stars). In bright areas: luminance-only injection that preserves the target color ratios (prevents core washout). Smooth transition between modes. PRECONDITION: check_star_layer_integrity must have been called first.',
       input_schema: {
         type: 'object',
         properties: {
           target_id: { type: 'string', description: 'Starless image view ID' },
           stars_id: { type: 'string', description: 'Stars-only image view ID' },
-          strength: { type: 'number', description: 'Star blend strength (0.5-1.2, default 0.85)' },
-          core_threshold_low: { type: 'number', description: 'Luminance below which stars blend at full strength (default 0.60)' },
-          core_threshold_high: { type: 'number', description: 'Luminance above which stars blend at min_strength_fraction (default 0.85)' },
-          min_strength_fraction: { type: 'number', description: 'Minimum star strength fraction in bright cores (default 0.15)' }
+          strength: { type: 'number', description: 'Star blend strength (0.5-1.2, default 0.95)' },
+          core_threshold_low: { type: 'number', description: 'Luminance below which pure screen blend applies (default 0.60)' },
+          core_threshold_high: { type: 'number', description: 'Luminance above which pure color-preserving mode applies (default 0.82)' },
+          min_strength_fraction: { type: 'number', description: 'Minimum star strength fraction in brightest cores (default 0.10)' },
+          pre_star_id: { type: 'string', description: 'Optional: pre-star view ID for post-blend color restoration. If provided, bright-area color ratios are restored from this reference after blending.' }
         },
         required: ['target_id', 'stars_id']
       }
     },
     handler: async (ctx, _store, brief, input) => {
       const starsId = input.stars_id;
+      const targetId = input.target_id;
 
       // Check precondition: star integrity must have been checked
       const integrityRecord = brief?._starIntegrity?.[starsId];
@@ -1075,42 +1077,186 @@ const TOOL_CATALOG = {
             `then re-run check_star_layer_integrity before blending.`
         };
       }
+      if (integrityRecord.unstretched) {
+        return {
+          type: 'text',
+          text: `REFUSED: Star layer "${starsId}" appears UNSTRETCHED (median=${integrityRecord.median?.toFixed(6)}, ` +
+            `nonzero=${integrityRecord.nonzero_pixel_count}). Stars will be invisible after blend. ` +
+            `Call stretch_stars on the star layer FIRST, then re-run check_star_layer_integrity.`
+        };
+      }
       if (integrityRecord.turnsAgo > 15) {
         // Warn but don't refuse — stale check
       }
 
-      const str = input.strength ?? 0.85;
+      const str = input.strength ?? 0.95;
       const low = input.core_threshold_low ?? 0.60;
-      const high = input.core_threshold_high ?? 0.85;
-      const minFrac = input.min_strength_fraction ?? 0.15;
+      const high = input.core_threshold_high ?? 0.82;
+      const minFrac = input.min_strength_fraction ?? 0.10;
 
-      // Build PixelMath expression with luminance-based spatial attenuation
-      // protection = iif(lum < low, 1.0, iif(lum > high, minFrac, 1.0 - (1-minFrac)*(lum-low)/(high-low)))
-      // result = ~(~$T * ~(stars * strength * protection))
-      const protExpr =
-        `iif(lum < ${low}, 1.0, iif(lum > ${high}, ${minFrac}, ` +
-        `1.0 - ${(1 - minFrac).toFixed(4)} * (lum - ${low}) / ${(high - low).toFixed(4)}))`;
+      // Get pre-blend stats for logging
+      const preStat = await getStats(ctx, targetId);
+
+      // ================================================================
+      // HYBRID BLEND: screen in dark areas, color-preserving in bright
+      // ================================================================
+      // Per-channel PixelMath with symbols for intermediate values.
+      // L = target luminance (average of 3 channels)
+      // SL = star luminance
+      // prot = protection ramp (1.0 in dark, minFrac in bright core)
+      // k = strength * prot
+      // rgb = normal screen blend result
+      // Lrgb = luminance-only screen (preserves color ratios)
+      // cp = color-preserving: target color scaled by Lrgb/L
+      // w = blend weight (0 in dark = pure screen, 1 in bright = pure color-preserving)
+      // final = rgb*(1-w) + cp*w
+
+      const coreStart = low;    // where color-preserving mode begins
+      const coreEnd = high;     // where it's fully active
+      const invRange = (1 - minFrac).toFixed(6);
+      const range = (coreEnd - coreStart).toFixed(6);
+
+      // Build per-channel expressions (R=0, G=1, B=2)
+      const channelExprs = [0, 1, 2].map(c => {
+        // All expressions share the same symbols but produce channel-specific output
+        return [
+          // L = target luminance (simple average for robustness)
+          `L = (${targetId}[0] + ${targetId}[1] + ${targetId}[2]) / 3`,
+          // SL = star luminance
+          `SL = (${starsId}[0] + ${starsId}[1] + ${starsId}[2]) / 3`,
+          // protection ramp
+          `prot = iif(L < ${coreStart}, 1.0, iif(L > ${coreEnd}, ${minFrac}, 1.0 - ${invRange} * (L - ${coreStart}) / ${range}))`,
+          // effective star strength
+          `k = ${str} * prot`,
+          // normal RGB screen blend for this channel
+          `rgb = 1 - (1 - $T) * (1 - ${starsId}[${c}] * k)`,
+          // luminance-only screen (same brightness but preserves color ratios)
+          `Lrgb = 1 - (1 - L) * (1 - SL * k)`,
+          // color-preserving: scale original channel by lum ratio
+          `cp = min(${targetId}[${c}] * Lrgb / max(L, 0.001), 0.98)`,
+          // blend weight: 0 in dark (pure screen), 1 in bright (pure color-preserving)
+          `w = iif(L < ${coreStart}, 0.0, iif(L > ${coreEnd}, 1.0, (L - ${coreStart}) / ${range}))`,
+          // final output
+          `rgb * (1 - w) + cp * w`,
+        ].join('; ');
+      });
 
       await ctx.pjsr(`
         var P = new PixelMath;
-        var lumExpr = '0.2126*${input.target_id}[0]+0.7152*${input.target_id}[1]+0.0722*${input.target_id}[2]';
-        P.expression = 'lum=' + lumExpr + '; prot=${protExpr}; ~(~$T * ~(${starsId} * ${str} * prot))';
-        P.useSingleExpression = true;
+        P.expression = "${channelExprs[0].replace(/"/g, '\\"')}";
+        P.expression1 = "${channelExprs[1].replace(/"/g, '\\"')}";
+        P.expression2 = "${channelExprs[2].replace(/"/g, '\\"')}";
+        P.useSingleExpression = false;
         P.use64BitWorkingImage = true;
         P.truncate = true; P.truncateLower = 0; P.truncateUpper = 1;
         P.createNewImage = false;
-        P.symbols = 'lum, prot';
-        P.executeOn(ImageWindow.windowById('${input.target_id}').mainView);
+        P.symbols = 'L, SL, prot, k, rgb, Lrgb, cp, w';
+        P.executeOn(ImageWindow.windowById('${targetId}').mainView);
       `);
 
-      const stats = await getStats(ctx, input.target_id);
+      // ================================================================
+      // OPTIONAL: Post-blend color restoration from pre-star reference
+      // ================================================================
+      let restorationNote = '';
+      if (input.pre_star_id) {
+        const preId = input.pre_star_id;
+        const restoreStart = coreStart;
+        const restoreEnd = coreEnd;
+        const restRange = (restoreEnd - restoreStart).toFixed(6);
+
+        const restoreExprs = [0, 1, 2].map(c => {
+          return [
+            `Lp = (${preId}[0] + ${preId}[1] + ${preId}[2]) / 3`,
+            `Lb = ($T[0] + $T[1] + $T[2]) / 3`,
+            `restored = min(${preId}[${c}] * Lb / max(Lp, 0.001), 0.98)`,
+            `wr = iif(Lp < ${restoreStart}, 0.0, iif(Lp > ${restoreEnd}, 1.0, (Lp - ${restoreStart}) / ${restRange}))`,
+            `$T * (1 - wr) + restored * wr`,
+          ].join('; ');
+        });
+
+        await ctx.pjsr(`
+          var P = new PixelMath;
+          P.expression = "${restoreExprs[0].replace(/"/g, '\\"')}";
+          P.expression1 = "${restoreExprs[1].replace(/"/g, '\\"')}";
+          P.expression2 = "${restoreExprs[2].replace(/"/g, '\\"')}";
+          P.useSingleExpression = false;
+          P.use64BitWorkingImage = true;
+          P.truncate = true; P.truncateLower = 0; P.truncateUpper = 1;
+          P.createNewImage = false;
+          P.symbols = 'Lp, Lb, restored, wr';
+          P.executeOn(ImageWindow.windowById('${targetId}').mainView);
+        `);
+        restorationNote = ` + color restoration from ${preId}`;
+      }
+
+      const postStat = await getStats(ctx, targetId);
       const staleNote = integrityRecord.turnsAgo > 15
         ? ' (NOTE: star integrity check is stale — consider re-checking)'
         : '';
       return {
         type: 'text',
-        text: `Stars blended (protected, strength=${str}, core_low=${low}, core_high=${high}, min_frac=${minFrac}). ` +
-          `${statsLine(stats)}${staleNote}`
+        text: `Stars blended (HYBRID color-preserving, strength=${str}, core=[${low},${high}], min_frac=${minFrac}${restorationNote}). ` +
+          `Pre: median=${preStat.median.toFixed(4)}, max=${(preStat.max ?? 0).toFixed(4)} → ` +
+          `Post: ${statsLine(postStat)}${staleNote}`
+      };
+    }
+  },
+
+  // Standalone color restoration tool (can be used independently after any star blend)
+  restore_star_color: {
+    category: 'stars',
+    definition: {
+      name: 'restore_star_color',
+      description: 'Post-blend color restoration: restores pre-star color ratios in bright areas while keeping post-star luminance (and stars). Use when star blend washed out color in the bright core. Requires the pre-star image to still be open.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          target_id: { type: 'string', description: 'Post-star image to repair (modified in-place)' },
+          pre_star_id: { type: 'string', description: 'Pre-star reference image (must still be open)' },
+          restore_start: { type: 'number', description: 'Luminance below which no restoration applies (default 0.60)' },
+          restore_end: { type: 'number', description: 'Luminance above which full restoration applies (default 0.82)' }
+        },
+        required: ['target_id', 'pre_star_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const targetId = input.target_id;
+      const preId = input.pre_star_id;
+      const restoreStart = input.restore_start ?? 0.60;
+      const restoreEnd = input.restore_end ?? 0.82;
+      const restRange = (restoreEnd - restoreStart).toFixed(6);
+
+      const preStat = await getStats(ctx, targetId);
+
+      const restoreExprs = [0, 1, 2].map(c => {
+        return [
+          `Lp = (${preId}[0] + ${preId}[1] + ${preId}[2]) / 3`,
+          `Lb = ($T[0] + $T[1] + $T[2]) / 3`,
+          `restored = min(${preId}[${c}] * Lb / max(Lp, 0.001), 0.98)`,
+          `wr = iif(Lp < ${restoreStart}, 0.0, iif(Lp > ${restoreEnd}, 1.0, (Lp - ${restoreStart}) / ${restRange}))`,
+          `$T * (1 - wr) + restored * wr`,
+        ].join('; ');
+      });
+
+      await ctx.pjsr(`
+        var P = new PixelMath;
+        P.expression = "${restoreExprs[0].replace(/"/g, '\\"')}";
+        P.expression1 = "${restoreExprs[1].replace(/"/g, '\\"')}";
+        P.expression2 = "${restoreExprs[2].replace(/"/g, '\\"')}";
+        P.useSingleExpression = false;
+        P.use64BitWorkingImage = true;
+        P.truncate = true; P.truncateLower = 0; P.truncateUpper = 1;
+        P.createNewImage = false;
+        P.symbols = 'Lp, Lb, restored, wr';
+        P.executeOn(ImageWindow.windowById('${targetId}').mainView);
+      `);
+
+      const postStat = await getStats(ctx, targetId);
+      return {
+        type: 'text',
+        text: `Color restoration applied (ref=${preId}, range=[${restoreStart},${restoreEnd}]). ` +
+          `Pre: median=${preStat.median.toFixed(4)}, max=${(preStat.max ?? 0).toFixed(4)} → ` +
+          `Post: ${statsLine(postStat)}`
       };
     }
   },
@@ -2414,6 +2560,13 @@ const TOOL_CATALOG = {
     handler: async (ctx, _store, brief, input) => {
       const result = await checkStarLayerIntegrity(ctx, input.view_id);
 
+      // Detect unstretched star layer: median near zero AND most non-zero pixels are faint
+      // A properly stretched star layer has bright star peaks spread across the range.
+      // An unstretched one has median ~0 and only a handful of pixels above 0.1
+      const stats = await getStats(ctx, input.view_id);
+      const isUnstretched = (stats.median < 0.001) && (result.max_value > 0.1) &&
+        (result.nonzero_pixel_count < 20000); // linear star layers have very few detectable pixels
+
       // Store result in brief for star_protected_blend precondition check
       if (brief) {
         if (!brief._starIntegrity) brief._starIntegrity = {};
@@ -2421,6 +2574,9 @@ const TOOL_CATALOG = {
           verdict: result.verdict,
           pass: result.pass,
           max_value: result.max_value,
+          median: stats.median,
+          nonzero_pixel_count: result.nonzero_pixel_count,
+          unstretched: isUnstretched,
           seq: brief._budget?.turnsUsed || 0,
           turnsAgo: 0,
         };
@@ -2434,17 +2590,50 @@ const TOOL_CATALOG = {
           '  Or simpler: "min($T, 0.95)" then re-check.\n' +
           '  Then call check_star_layer_integrity again to verify.';
       }
+      if (isUnstretched) {
+        guidance += '\n\nWARNING: Star layer appears UNSTRETCHED (median=' + stats.median.toFixed(6) +
+          '). Stars will be invisible after blend.\n' +
+          '  You MUST call stretch_stars on this layer before blending.\n' +
+          '  star_protected_blend will REFUSE an unstretched star layer.';
+      }
 
       return {
         type: 'text',
-        text: `[STAR INTEGRITY: ${result.verdict}] ${result.details}\n` +
+        text: `[STAR INTEGRITY: ${result.verdict}${isUnstretched ? ' — UNSTRETCHED' : ''}] ${result.details}\n` +
           `  Max value: ${result.max_value?.toFixed(4) || 'N/A'} (limit: <0.98)\n` +
+          `  Median: ${stats.median?.toFixed(6) || 'N/A'} ${isUnstretched ? '⚠️ NEAR ZERO — unstretched!' : ''}\n` +
           `  Clipped >0.98: ${((result.clipped_fraction_98 || 0) * 100).toFixed(2)}%\n` +
           `  Clipped >0.995: ${((result.clipped_fraction_995 || 0) * 100).toFixed(2)}%\n` +
           `  Color diversity: ${result.color_diversity?.toFixed(4) || 'N/A'} (min: 0.05)\n` +
           `  Bright star chroma: ${result.bright_star_chroma?.toFixed(4) || 'N/A'}\n` +
           `  Non-zero pixels: ${result.nonzero_pixel_count || 0}` +
           guidance
+      };
+    }
+  },
+
+  check_bright_chroma: {
+    category: 'quality_gate',
+    definition: {
+      name: 'check_bright_chroma',
+      description: 'Measures color differentiation in bright subject pixels. Detects chroma collapse (core washout) that burn scans miss. Run BEFORE and AFTER star blend — if median chroma drops significantly, the blend washed out the core. Fix with restore_star_color or re-blend with tighter parameters.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'View ID to check' },
+          brightness_threshold: { type: 'number', description: 'Luminance above which to measure chroma (default 0.50)' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const result = await checkBrightChroma(ctx, input.view_id, input.brightness_threshold ?? 0.50);
+      const warn = result.medianChroma < 0.05 && result.brightPixelCount > 100;
+      return {
+        type: 'text',
+        text: `[BRIGHT CHROMA${warn ? ' — WARNING: CHROMA COLLAPSE' : ''}] ${result.details}` +
+          (warn ? '\n  Bright areas have near-zero color differentiation — core is visually washed out.' +
+            '\n  Fix: use restore_star_color with the pre-star reference, or re-blend with tighter core protection.' : '')
       };
     }
   },

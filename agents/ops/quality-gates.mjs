@@ -1204,3 +1204,89 @@ export async function checkStarLayerIntegrity(ctx, viewId) {
     details: details.join(' '),
   };
 }
+
+/**
+ * Check bright-region chroma collapse: measures whether bright subject pixels
+ * have lost color differentiation (all channels near-equal = white wash).
+ *
+ * Returns the median channel spread in bright subject pixels.
+ * Useful as a post-star-blend check — if bright-region chroma drops
+ * significantly compared to pre-star, the blend washed out the core.
+ *
+ * @param {object} ctx - Bridge context
+ * @param {string} viewId - View ID to check
+ * @param {number} brightnessThreshold - Luminance above which to measure (default 0.50)
+ * @returns {object} { medianChroma, meanChroma, brightPixelCount, details }
+ */
+export async function checkBrightChroma(ctx, viewId, brightnessThreshold = 0.50) {
+  const r = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}');
+    if (w.isNull) throw new Error('checkBrightChroma: view not found: ${viewId}');
+    var img = w.mainView.image;
+    if (!img.isColor) {
+      JSON.stringify({ mono: true, medianChroma: 0, meanChroma: 0, brightPixelCount: 0 });
+    } else {
+      var threshold = ${brightnessThreshold};
+      var step = 8;
+      var chromaValues = [];
+
+      for (var y = 0; y < img.height; y += step) {
+        for (var x = 0; x < img.width; x += step) {
+          var rv = img.sample(x, y, 0);
+          var gv = img.sample(x, y, 1);
+          var bv = img.sample(x, y, 2);
+          var lum = (rv + gv + bv) / 3;
+          if (lum > threshold) {
+            var maxC = Math.max(rv, gv, bv);
+            var minC = Math.min(rv, gv, bv);
+            var chroma = maxC > 0.001 ? (maxC - minC) / maxC : 0;
+            chromaValues.push(chroma);
+          }
+        }
+      }
+
+      chromaValues.sort(function(a, b) { return a - b; });
+      var n = chromaValues.length;
+      var medianC = n > 0 ? chromaValues[Math.floor(n * 0.5)] : 0;
+      var meanC = 0;
+      for (var i = 0; i < n; i++) meanC += chromaValues[i];
+      meanC = n > 0 ? meanC / n : 0;
+
+      JSON.stringify({
+        mono: false,
+        medianChroma: medianC,
+        meanChroma: meanC,
+        brightPixelCount: n,
+        p25Chroma: n > 0 ? chromaValues[Math.floor(n * 0.25)] : 0,
+        p75Chroma: n > 0 ? chromaValues[Math.floor(n * 0.75)] : 0
+      });
+    }
+  `);
+
+  if (r.status === 'error') {
+    return { medianChroma: 0, meanChroma: 0, brightPixelCount: 0, error: r.error?.message };
+  }
+
+  let data;
+  try {
+    data = JSON.parse(r.outputs?.consoleOutput || '{}');
+  } catch {
+    return { medianChroma: 0, meanChroma: 0, brightPixelCount: 0, error: 'Failed to parse output' };
+  }
+
+  if (data.mono) {
+    return { medianChroma: 0, meanChroma: 0, brightPixelCount: 0, details: 'Mono image — chroma check skipped' };
+  }
+
+  const details = `Bright-region chroma (lum>${brightnessThreshold}): median=${data.medianChroma.toFixed(4)}, mean=${data.meanChroma.toFixed(4)}, ` +
+    `P25=${data.p25Chroma.toFixed(4)}, P75=${data.p75Chroma.toFixed(4)} (${data.brightPixelCount} bright pixels)`;
+
+  return {
+    medianChroma: data.medianChroma,
+    meanChroma: data.meanChroma,
+    brightPixelCount: data.brightPixelCount,
+    p25Chroma: data.p25Chroma,
+    p75Chroma: data.p75Chroma,
+    details,
+  };
+}
