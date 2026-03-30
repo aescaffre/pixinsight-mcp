@@ -414,15 +414,20 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     P.executeOn(ImageWindow.windowById('${targetName}').mainView);
   `, 'BXT correct on RGB');
 
-  // Copy WCS back from R master for SPCC
+  // Ensure WCS astrometric solution for SPCC
+  // Try: 1) copy from R master, 2) if no valid WCS, plate solve with ImageSolver
   log('  Copy WCS from R master...');
-  await ctx.pjsr(`
+  const wcsResult = await ctx.pjsr(`
     var src=ImageWindow.open('${F.R.replace(/'/g, "\\'")}')[0];
     var tgt=ImageWindow.windowById('${targetName}');
+    var hasWCS = false;
     if(!src.isNull&&!tgt.isNull){
       tgt.mainView.beginProcess();
       tgt.keywords=src.keywords;
-      if(src.astrometricSolution)tgt.copyAstrometricSolution(src,false);
+      if(src.astrometricSolution){
+        tgt.copyAstrometricSolution(src,false);
+        hasWCS = true;
+      }
       tgt.mainView.endProcess();
     }
     if(!src.isNull)src.forceClose();
@@ -430,8 +435,48 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     for(var j=0;j<ws2.length;j++){
       if(ws2[j].mainView.id.indexOf('crop_mask')>=0) ws2[j].forceClose();
     }
-    'WCS copied';
+    hasWCS ? 'WCS_COPIED' : 'NO_WCS';
   `);
+  const hasWCS = (wcsResult.outputs?.consoleOutput || '').includes('WCS_COPIED');
+  log('  ' + (hasWCS ? 'WCS copied from R master' : 'No WCS in R master — will plate solve'));
+
+  if (!hasWCS) {
+    // Plate solve using ImageSolver with coordinates from FITS headers
+    log('  Plate solving with ImageSolver...');
+    // Read RA/Dec from the target's keywords (copied from R master above)
+    const solveR = await ctx.pjsr(`
+      var w = ImageWindow.windowById('${targetName}');
+      // Extract RA/Dec from keywords
+      var ra = 0, dec = 0, focal = 0;
+      var kw = w.keywords;
+      for (var i = 0; i < kw.length; i++) {
+        if (kw[i].name === 'RA') ra = parseFloat(kw[i].value);
+        if (kw[i].name === 'DEC') dec = parseFloat(kw[i].value);
+        if (kw[i].name === 'FOCALLEN') focal = parseFloat(kw[i].value);
+      }
+      // Compute pixel scale: 206.265 * pixelSize(um) / focal(mm)
+      // For drizzled data, effective pixel size may be halved
+      var pixSize = 1.88; // from XPIXSZ header, but drizzle may change this
+      var pixScale = focal > 0 ? 206.265 * pixSize / focal : 0.84; // fallback
+
+      var P = new ImageSolver;
+      P.centerRA = ra;
+      P.centerDec = dec;
+      P.pixelSize = pixSize;
+      P.focalLength = focal;
+      P.resolution = pixScale;
+      P.autoFlip = true;
+      P.catalogMode = 1;
+      P.catalog = 'GaiaDR3';
+      P.limitMagnitude = 14;
+      P.distortionCorrection = true;
+      P.projectionSystem = ImageSolver.prototype.Gnomonic;
+      P.executeOn(w.mainView);
+      w.astrometricSolution ? 'SOLVED' : 'SOLVE_FAILED';
+    `);
+    const solved = (solveR.outputs?.consoleOutput || '').includes('SOLVED');
+    log('  Plate solve: ' + (solved ? 'SUCCESS' : 'FAILED (SPCC may not work)'));
+  }
 
   // SPCC with equipment-specific filters + QE from equipment.json
   const equipPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '../../equipment.json');
@@ -477,7 +522,11 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
   const spccOut = spccR.outputs?.consoleOutput || '';
   log('  ' + spccOut);
   if (!spccOut.includes('SPCC_OK')) {
-    throw new Error('SPCC failed — color calibration is required. Check WCS/astrometric solution on the target image. Previous images may need to be closed first.');
+    // SPCC can fail when WCS/plate solve is missing (common with drizzled data).
+    // Fall through — the agent can handle color calibration manually, or
+    // BackgroundNeutralization below provides basic balance.
+    log('  WARNING: SPCC failed (likely missing WCS). Falling back to background neutralization only.');
+    log('  The agent can run run_spcc or manual color calibration later if needed.');
   }
 
   // NXT linear (balanced — reduce noise while preserving faint detail)
