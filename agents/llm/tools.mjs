@@ -11,10 +11,10 @@ import {
   runGC, runABE, runPerChannelABE, runSCNR,
   setiStretch,
   createLumMask, applyMask, removeMask, closeMask,
-  checkStarQuality, checkRinging, checkSharpness, checkCoreBurning, scanBurntRegions, checkSaturation, checkTonalPresence, checkStarLayerIntegrity, checkBrightChroma,
-  measureSubjectDetail,
-  multiScaleEnhance,
-  extractPseudoOIII, continuumSubtractHa, dynamicNarrowbandBlend, createSyntheticLuminance, createZoneMasks, continuousClamp,
+  checkStarQuality, checkRinging, checkSharpness, checkCoreBurning, scanBurntRegions, checkSaturation, checkTonalPresence, checkStarLayerIntegrity, checkBrightChroma, checkHighlightTexture,
+  measureSubjectDetail, locateSubjectROI,
+  multiScaleEnhance, shellDetailEnhance,
+  extractPseudoOIII, continuumSubtractHa, dynamicNarrowbandBlend, createSyntheticLuminance, createZoneMasks, createAdaptiveZoneMasks, continuousClamp,
 } from '../ops/index.mjs';
 import { checkHardConstraints, statsToScores, computeAggregate } from '../scoring.mjs';
 import { jpegToContentBlock } from './vision.mjs';
@@ -1690,14 +1690,17 @@ const TOOL_CATALOG = {
     category: 'narrowband',
     definition: {
       name: 'continuous_clamp',
-      description: 'Apply smooth brightness clamping that varies by brightness — bright cores clamped harder, faint regions barely affected. Uses a single smooth luminance mask with large blur. ZERO mask boundary artifacts. Replaces zone-based clamping. Core (brightest) gets clamped near min_clamp (default 0.80), shell (~0.5 brightness) near midpoint (~0.875), background (faint) near max_clamp (default 0.95). One tool call replaces three zone mask operations.',
+      description: 'Apply smooth brightness control that varies by brightness — bright cores compressed harder, faint regions barely affected. Uses a single smooth luminance mask with large blur. ZERO mask boundary artifacts.\n\nDefault mode is SOFT COMPRESSION (exponential saturation): values above the per-pixel knee are smoothly compressed, preserving relative brightness. A pixel at 0.90 and one at 0.85 remain distinguishable — gradients and detail are preserved. Hard mode (legacy) flattens everything above knee to a single value, destroying internal detail.\n\nCore (brightest) gets knee near min_clamp (default 0.80), shell (~0.5 brightness) near midpoint, background (faint) near max_clamp (default 0.95).',
       input_schema: {
         type: 'object',
         properties: {
           view_id: { type: 'string', description: 'Target view to clamp (modified in place)' },
-          min_clamp: { type: 'number', description: 'Clamp level for brightest regions (default 0.80). Lower = harder clamp on core.' },
-          max_clamp: { type: 'number', description: 'Clamp level for faintest regions (default 0.95). Higher = less effect on background.' },
-          blur_sigma: { type: 'number', description: 'Gaussian blur sigma for luminance mask (default: auto = max(60, imageWidth/100)). Larger = smoother transitions.' }
+          min_clamp: { type: 'number', description: 'Knee level for brightest regions (default 0.80). Lower = harder compression on core.' },
+          max_clamp: { type: 'number', description: 'Knee level for faintest regions (default 0.95). Higher = less effect on background.' },
+          blur_sigma: { type: 'number', description: 'Gaussian blur sigma for luminance mask (default: auto = max(60, imageWidth/100)). Larger = smoother transitions.' },
+          mode: { type: 'string', enum: ['soft', 'hard'], description: 'soft (default): exponential compression preserving detail. hard: legacy min() clamp that flattens to knee.' },
+          headroom: { type: 'number', description: 'Soft mode only: how far above knee the output can reach (default 0.12). Higher = more dynamic range preserved above knee.' },
+          rate: { type: 'number', description: 'Soft mode only: compression steepness (default 3.0). Higher = sharper rolloff at knee. 2.0 = gentle, 5.0 = aggressive.' }
         },
         required: ['view_id']
       }
@@ -1706,9 +1709,12 @@ const TOOL_CATALOG = {
       const result = await continuousClamp(ctx, input.view_id, {
         min_clamp: input.min_clamp,
         max_clamp: input.max_clamp,
-        blur_sigma: input.blur_sigma
+        blur_sigma: input.blur_sigma,
+        mode: input.mode,
+        headroom: input.headroom,
+        rate: input.rate
       });
-      return { type: 'text', text: `Continuous clamp applied: median=${result.median?.toFixed(6)}, max=${result.max?.toFixed(4)}, range=[${result.clampRange?.[0]}, ${result.clampRange?.[1]}], blur_sigma=${result.blur_sigma}` };
+      return { type: 'text', text: `Continuous clamp applied (${result.mode} mode): median=${result.median?.toFixed(6)}, max=${result.max?.toFixed(4)}, range=[${result.clampRange?.[0]}, ${result.clampRange?.[1]}], blur_sigma=${result.blur_sigma}${result.mode === 'soft' ? `, headroom=${result.headroom}, rate=${result.rate}` : ''}` };
     }
   },
 
@@ -1858,10 +1864,27 @@ const TOOL_CATALOG = {
         warnings.push(`EMERGENCY BUDGET: ${budget.turnsRemaining} turns remaining. Non-safety gates relaxed to allow finish.`);
       }
 
-      // Gate 1: Star quality (FWHM + color) — non-blocking (native PSF can exceed 6px)
+      // Gate 1: Star quality (FWHM + color + brightness)
+      // FWHM and color are advisory (native PSF can exceed 6px).
+      // Brightness is BLOCKING — dim stars are always a failure when the profile asks for prominent/balanced.
       try {
         const starResult = await checkStarQuality(ctx, viewId);
-        if (!starResult.pass) {
+        const prominence = brief?.processingProfile?.stars?.prominence || 'balanced';
+        const minContrast = prominence === 'prominent' ? 4.0 : prominence === 'subdued' ? 2.0 : 3.0;
+        const brightnessOk = (starResult.starBgContrast || 0) >= minContrast;
+
+        if (!brightnessOk) {
+          const msg = `STARS TOO DIM: contrast=${(starResult.starBgContrast || 0).toFixed(1)}× vs background (limit: ${minContrast}× for ${prominence} stars), ` +
+            `median peak=${(starResult.medianPeak || 0).toFixed(3)}, bg=${(starResult.bgMedian || 0).toFixed(4)}. ` +
+            `FIX: increase star_protected_blend strength, use brighter stretch_stars params (lower setiMidtone or more iterations), or boost star layer with curves before blending.`;
+          if (isEmergency) {
+            warnings.push(`[RELAXED] ${msg}`);
+          } else {
+            failures.push(msg);
+          }
+        }
+        // FWHM, color, count remain non-blocking warnings
+        if (!starResult.pass && brightnessOk) {
           warnings.push(`STAR QUALITY WARNING: ${starResult.details}`);
         }
       } catch (e) {
@@ -1882,18 +1905,33 @@ const TOOL_CATALOG = {
         warnings.push(`RINGING CHECK ERROR: ${e.message} — inspect manually`);
       }
 
-      // Gate 3: Burn scan — HARD FAIL only at 0.95 (actual clipping), WARNING at 0.80 (perceptually bright)
-      // v13 showed that aggressive clamping (0.70-0.80 hard gate) destroys core detail.
-      // Better to warn and let the agent decide than force detail-destroying clamps.
+      // Gate 3: Burn scan — HARD FAIL at 0.95 (actual clipping)
+      // Gate 3b: Bright block fraction — HARD FAIL if too many blocks above 0.80
+      // v13 showed aggressive clamping destroys core detail, so a FEW bright blocks are OK.
+      // But when a large fraction of the image is above 0.80 (e.g. entire nebula shell),
+      // detail is being lost across extended structure. Per-profile limit controls this.
       try {
         const burnResult = await scanBurntRegions(ctx, viewId); // threshold 0.95
         if (!burnResult.pass) {
           failures.push(`BURN SCAN FAILED: ${burnResult.details}`);
         }
-        // Soft warning at 0.80 — agent should consider continuous_clamp but isn't forced
+        // Bright block fraction gate at 0.80
         const softBurn = await scanBurntRegions(ctx, viewId, { threshold: 0.80 });
         if (!softBurn.pass) {
-          warnings.push(`BRIGHT REGIONS: ${softBurn.burntBlockCount} block(s) above 0.80. Core may look bright — consider continuous_clamp if detail is lost, but do NOT clamp if internal structure is still visible.`);
+          const totalBlocks = softBurn.totalBlocks || 1;
+          const brightPct = (softBurn.burntBlockCount / totalBlocks) * 100;
+          const maxBrightPct = brief?.processingProfile?.burn?.max_bright_block_pct ?? 3.0;
+          if (brightPct > maxBrightPct) {
+            const msg = `TOO MANY BRIGHT REGIONS: ${softBurn.burntBlockCount} blocks (${brightPct.toFixed(1)}%) above 0.80 (limit: ${maxBrightPct}%). ` +
+              `Extended structure is losing detail. Apply continuous_clamp (min_clamp=0.75, max_clamp=0.90) to recover detail in bright areas.`;
+            if (isEmergency) {
+              warnings.push(`[RELAXED] ${msg}`);
+            } else {
+              failures.push(msg);
+            }
+          } else {
+            warnings.push(`BRIGHT REGIONS: ${softBurn.burntBlockCount} block(s) (${brightPct.toFixed(1)}%) above 0.80, within limit (${maxBrightPct}%). Core may look bright — verify internal structure is still visible.`);
+          }
         }
       } catch (e) {
         // Non-blocking if check fails
@@ -2016,6 +2054,63 @@ const TOOL_CATALOG = {
         }
       } catch (e) {
         // Non-blocking
+      }
+
+      // Gate 9: Highlight texture — emission nebulae only
+      // Detects perceptual burn (bright shell zones with collapsed tonal variation)
+      const category = brief?.target?.classification || 'unknown';
+      if (category.includes('emission') || brief?.target?.fieldCharacteristics?.structuralZones === 'multi_zone') {
+        try {
+          // Try to find a reference checkpoint for relative comparison
+          // Look for the most recent variant tagged as pre-composition reference
+          let refViewId = null;
+          if (store) {
+            const variants = store.listVariants(agentName);
+            for (let i = variants.length - 1; i >= 0; i--) {
+              const notes = (variants[i].params?.notes || '').toLowerCase();
+              if (notes.includes('pre_comp') || notes.includes('pre_clamp') || notes.includes('reference') || notes.includes('pre_ha')) {
+                // Open the variant XISF temporarily for measurement
+                try {
+                  const loadResult = await ctx.pjsr(`
+                    var w = ImageWindow.open('${variants[i].xisfPath.replace(/'/g, "\\'")}');
+                    if (w.length > 0) { w[0].show(); JSON.stringify({ id: w[0].mainView.id }); }
+                    else JSON.stringify({ error: 'failed to open' });
+                  `);
+                  const loadData = JSON.parse(loadResult.outputs?.consoleOutput || '{}');
+                  if (loadData.id) {
+                    refViewId = loadData.id;
+                    break;
+                  }
+                } catch {}
+              }
+            }
+          }
+
+          const htResult = await checkHighlightTexture(ctx, viewId, {
+            referenceId: refViewId
+          });
+
+          // Clean up temporarily opened reference
+          if (refViewId) {
+            try { await ctx.pjsr(`var w = ImageWindow.windowById('${refViewId}'); if (!w.isNull) w.forceClose();`); } catch {}
+          }
+
+          if (!htResult.pass) {
+            const msg = `HIGHLIGHT TEXTURE COLLAPSED: ${htResult.details}. ` +
+              `Restore pre-operation checkpoint. If after clamp: raise knee, increase headroom, or skip clamp. ` +
+              `If after detail tool: switch to shell_detail_enhance or reduce amounts. Do NOT clamp harder.`;
+            if (isEmergency) {
+              warnings.push(`[RELAXED] ${msg}`);
+            } else {
+              failures.push(msg);
+            }
+          } else if (htResult.verdict === 'degraded') {
+            warnings.push(`HIGHLIGHT TEXTURE WARNING: ${htResult.details}`);
+          }
+        } catch (e) {
+          // Non-blocking on error
+          warnings.push(`Highlight texture check error: ${e.message}`);
+        }
       }
 
       if (failures.length > 0) {
@@ -2370,16 +2465,25 @@ const TOOL_CATALOG = {
         required: ['view_id']
       }
     },
-    handler: async (ctx, _store, _brief, input) => {
+    handler: async (ctx, _store, brief, input) => {
       const result = await checkStarQuality(ctx, input.view_id);
-      const status = result.pass ? 'PASS' : 'FAIL';
-      return {
-        type: 'text',
-        text: `[STAR QUALITY GATE: ${status}] ${result.details}\n` +
-          `  Median FWHM: ${result.medianFWHM?.toFixed(2) || 'N/A'}px (limit: 6.0)\n` +
-          `  Color diversity: ${result.colorDiversity?.toFixed(3) || 'N/A'} (limit: 0.05)\n` +
-          `  Stars found: ${result.starsFound || 0}, measured: ${result.starsMeasured || 0}`
-      };
+      // Per-profile brightness threshold
+      const prominence = brief?.processingProfile?.stars?.prominence || 'balanced';
+      const minContrast = prominence === 'prominent' ? 4.0 : prominence === 'subdued' ? 2.0 : 3.0;
+      const brightnessOk = (result.starBgContrast || 0) >= minContrast;
+      const overallPass = result.pass && brightnessOk;
+      const status = overallPass ? 'PASS' : 'FAIL';
+      let text = `[STAR QUALITY GATE: ${status}] ${result.details}\n` +
+        `  Median FWHM: ${result.medianFWHM?.toFixed(2) || 'N/A'}px (limit: 6.0)\n` +
+        `  Color diversity: ${result.colorDiversity?.toFixed(3) || 'N/A'} (limit: 0.05)\n` +
+        `  Stars found: ${result.starsFound || 0}, measured: ${result.starsMeasured || 0}\n` +
+        `  Star brightness: median peak=${result.medianPeak?.toFixed(3) || 'N/A'}, ` +
+        `contrast=${result.starBgContrast?.toFixed(1) || 'N/A'}× vs bg=${result.bgMedian?.toFixed(4) || 'N/A'} ` +
+        `(limit: ${minContrast}× for ${prominence} stars)`;
+      if (!brightnessOk) {
+        text += `\n  FIX: Stars are too dim. Increase star_protected_blend strength, use brighter stretch_stars (lower setiMidtone or more iterations), or boost star layer brightness with curves before blending.`;
+      }
+      return { type: 'text', text };
     }
   },
 
@@ -2743,7 +2847,18 @@ const TOOL_CATALOG = {
         required: ['view_id']
       }
     },
-    handler: async (ctx, _store, _brief, input) => {
+    handler: async (ctx, _store, brief, input) => {
+      // POLICY BLOCK: emission nebulae must use shell_detail_enhance instead
+      const classification = brief?.target?.classification || '';
+      if (classification.includes('emission')) {
+        return {
+          type: 'text',
+          text: `[BLOCKED] multi_scale_enhance is DISABLED for emission nebulae. ` +
+            `LHE-driven brightness amplification causes destructive highlight compression on bright shells. ` +
+            `Use shell_detail_enhance instead — it enhances texture without increasing peak brightness. ` +
+            `Call: shell_detail_enhance(view_id="${input.view_id}", medium_amount=1.0, large_amount=0.5)`
+        };
+      }
       const result = await multiScaleEnhance(ctx, input.view_id, {
         maskClipLow: input.mask_clip_low,
         maskBlur: input.mask_blur,
@@ -2800,6 +2915,119 @@ const TOOL_CATALOG = {
     handler: async (_ctx, _store, _brief, input) => {
       // The orchestrator reads this from the finish result
       return { type: 'text', text: `Scores submitted. Verdict: ${input.verdict}` };
+    }
+  },
+
+  // --- Highlight texture / shell-nebula tools ---
+
+  check_highlight_texture: {
+    category: 'quality_gate',
+    definition: {
+      name: 'check_highlight_texture',
+      description: 'Detect perceptual burn — bright subject zones where internal tonal variation has collapsed into a featureless plateau. PRIMARY signal: relative texture retention vs a reference checkpoint (blocking). WITHOUT reference: advisory-only absolute heuristics. Clone BEFORE the operation, then call this AFTER with reference_id pointing to the clone.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'Current image to assess' },
+          reference_id: { type: 'string', description: 'Pre-operation clone/view for comparison. REQUIRED for blocking verdict. Without it, results are advisory only.' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, brief, input) => {
+      const result = await checkHighlightTexture(ctx, input.view_id, {
+        referenceId: input.reference_id,
+        roi: brief?._roi
+      });
+      const status = result.pass ? (result.verdict === 'preserved' ? 'PASS' : 'ADVISORY') : 'FAIL';
+      let text = `[HIGHLIGHT TEXTURE: ${status}] ${result.details}\n`;
+      if (result.current) {
+        text += `  Current: localStdDev=${result.current.shellLocalStdDev?.toFixed(4)}, tonalSpan=${result.current.shellTonalSpan?.toFixed(3)}, gradient=${result.current.shellGradientEnergy?.toFixed(6)}\n`;
+      }
+      if (result.reference) {
+        text += `  Reference: localStdDev=${result.reference.shellLocalStdDev?.toFixed(4)}, tonalSpan=${result.reference.shellTonalSpan?.toFixed(3)}, gradient=${result.reference.shellGradientEnergy?.toFixed(6)}\n`;
+        text += `  Retention: texture=${((result.textureRetention ?? 1) * 100).toFixed(0)}%, span=${((result.spanRetention ?? 1) * 100).toFixed(0)}%, gradient=${((result.gradientRetention ?? 1) * 100).toFixed(0)}%`;
+      }
+      if (!result.pass) {
+        text += `\n  FIX: Restore pre-operation checkpoint. If after clamp: raise knee, increase headroom, or skip clamp. If after detail tool: reduce amount or switch to shell_detail_enhance. If after Ha: reduce strength or max_output. Do NOT clamp harder.`;
+      }
+      return { type: 'text', text };
+    }
+  },
+
+  shell_detail_enhance: {
+    category: 'detail',
+    definition: {
+      name: 'shell_detail_enhance',
+      description: 'EMISSION SHELL DETAIL TOOL: Enhances texture/filament detail in bright emission shells WITHOUT increasing peak brightness. Uses multi-scale high-pass decomposition with soft protection factor — brightness-neutral by design, no subsequent clamping needed. Use this INSTEAD of multi_scale_enhance on bright emission shells (LHE pushes brightness, causing the clamp→flatten cycle). Returns before/after shell texture metrics.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'View to enhance (modified in place)' },
+          mask_id: { type: 'string', description: 'Shell zone mask ID (auto-created if omitted)' },
+          medium_sigma: { type: 'number', description: 'Filament-scale blur sigma (default 18, range 10-30)' },
+          medium_amount: { type: 'number', description: 'Filament boost strength (default 1.0, range 0.3-2.5)' },
+          large_sigma: { type: 'number', description: 'Regional tonal gradient sigma (default 55, range 35-80)' },
+          large_amount: { type: 'number', description: 'Regional boost strength (default 0.5, range 0.0-1.5)' },
+          protect_knee: { type: 'number', description: 'Luminance above which enhancement attenuates (default 0.80)' },
+          protect_softness: { type: 'number', description: 'Attenuation rate — higher=steeper rolloff (default 4.0)' },
+          auto_zone: { type: 'boolean', description: 'Auto-create adaptive shell zone mask (default true)' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, brief, input) => {
+      const result = await shellDetailEnhance(ctx, input.view_id, {
+        maskId: input.mask_id,
+        mediumSigma: input.medium_sigma,
+        mediumAmount: input.medium_amount,
+        largeSigma: input.large_sigma,
+        largeAmount: input.large_amount,
+        protectKnee: input.protect_knee,
+        protectSoftness: input.protect_softness,
+        autoZone: input.auto_zone,
+        roi: brief?._roi
+      });
+      if (result.error) return { type: 'text', text: `shell_detail_enhance error: ${result.error}` };
+      return {
+        type: 'text',
+        text: `[SHELL DETAIL ENHANCE] ${result.details}\n` +
+          `  Before: gradient=${result.before?.gradientEnergy?.toFixed(6)}, localStdDev=${result.before?.shellLocalStdDev?.toFixed(4)}\n` +
+          `  After:  gradient=${result.after?.gradientEnergy?.toFixed(6)}, localStdDev=${result.after?.shellLocalStdDev?.toFixed(4)}\n` +
+          `  Improvement: gradient=${result.improvement?.toFixed(1)}%, stddev=${result.stddevImprovement?.toFixed(1)}%\n` +
+          `  Max after: ${result.maxAfter?.toFixed(4)}, protection engaged: ${result.protectionEngaged}\n` +
+          `  Params: medium=${result.params?.mediumSigma}/${result.params?.mediumAmount} large=${result.params?.largeSigma}/${result.params?.largeAmount} knee=${result.params?.protectKnee}`
+      };
+    }
+  },
+
+  create_adaptive_zone_masks: {
+    category: 'masks',
+    definition: {
+      name: 'create_adaptive_zone_masks',
+      description: 'Create ROI-anchored adaptive zone masks from actual image statistics. Unlike fixed-threshold zone masks, these adapt to the stretch level and subject brightness. Creates 3 soft masks: hot_core (top ~10%), bright_shell (P25-P90), outer_nebula (background-P25). Best for shell emission nebulae where zones need independent processing.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'Source view for zone computation' },
+          core_bias: { type: 'number', description: 'Shift core threshold: 0=wider core, 1=tighter core (default 0.5)' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, brief, input) => {
+      const result = await createAdaptiveZoneMasks(ctx, input.view_id, {
+        roi: brief?._roi,
+        coreBias: input.core_bias
+      });
+      return {
+        type: 'text',
+        text: `Adaptive zone masks created:\n` +
+          `  Core: ${result.coreId} (${result.pixelCounts?.core} px, threshold=${result.thresholds?.core?.toFixed(3)})\n` +
+          `  Shell: ${result.shellId} (${result.pixelCounts?.shell} px, range=${result.thresholds?.shellLow?.toFixed(3)}–${result.thresholds?.core?.toFixed(3)})\n` +
+          `  Outer: ${result.outerId} (${result.pixelCounts?.outer} px, threshold=${result.thresholds?.outer?.toFixed(3)})\n` +
+          `  ROI: center=(${result.roi?.cx},${result.roi?.cy}), radius=${result.roi?.radius}`
+      };
     }
   }
 };

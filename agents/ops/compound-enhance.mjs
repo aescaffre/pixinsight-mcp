@@ -237,3 +237,336 @@ export async function multiScaleEnhance(ctx, viewId, opts = {}) {
     details: details.join(' ')
   };
 }
+
+/**
+ * Shell-safe detail enhancement via multi-scale high-pass decomposition.
+ *
+ * Unlike multi_scale_enhance (LHE-based, pushes brightness), this tool
+ * extracts detail at specific spatial scales and amplifies it while
+ * preserving the smooth brightness component. Brightness-neutral by design.
+ *
+ * For each scale:
+ *   1. Create smoothed version (Gaussian blur at target sigma)
+ *   2. Detail layer = original - smoothed (locally zero-mean)
+ *   3. Soft protection factor = exp(-softness * max(0, lum - knee) / (1 - knee))
+ *      Attenuates enhancement near bright peaks to prevent ANY upward push.
+ *   4. Result = original + amount × detail × protection (through optional mask)
+ *
+ * The detail layer sums to ~0 locally, so overall brightness is unchanged.
+ * The protection factor ensures bright peaks receive near-zero enhancement.
+ * No hard ceiling needed — the tool cannot significantly increase max pixel value.
+ *
+ * @param {object} ctx - Bridge context
+ * @param {string} viewId - View to enhance (modified in place)
+ * @param {object} opts
+ * @param {string} opts.maskId - Shell zone mask (auto-created if omitted + autoZone=true)
+ * @param {number} opts.mediumSigma - Filament-scale blur sigma (default 18, range 10-30)
+ * @param {number} opts.mediumAmount - Filament boost (default 1.0, range 0.3-2.5)
+ * @param {number} opts.largeSigma - Regional tonal gradient sigma (default 55, range 35-80)
+ * @param {number} opts.largeAmount - Regional boost (default 0.5, range 0.0-1.5)
+ * @param {number} opts.protectKnee - Luminance where attenuation begins (default 0.80)
+ * @param {number} opts.protectSoftness - Attenuation rate (default 4.0)
+ * @param {boolean} opts.autoZone - Auto-create adaptive shell mask (default true)
+ * @returns {object} { before, after, improvement, maxAfter, protectionEngaged, params }
+ */
+export async function shellDetailEnhance(ctx, viewId, opts = {}) {
+  const medSigma = opts.mediumSigma ?? 18;
+  const medAmount = opts.mediumAmount ?? 1.0;
+  const lgSigma = opts.largeSigma ?? 55;
+  const lgAmount = opts.largeAmount ?? 0.5;
+  const knee = opts.protectKnee ?? 0.80;
+  const softness = opts.protectSoftness ?? 4.0;
+  const maskId = opts.maskId || null;
+  const autoZone = opts.autoZone !== false;
+
+  // Auto-create shell mask if needed
+  let createdMask = false;
+  let shellMaskId = maskId;
+  if (!shellMaskId && autoZone) {
+    try {
+      const { createAdaptiveZoneMasks } = await import('./narrowband-enhance.mjs');
+      const zones = await createAdaptiveZoneMasks(ctx, viewId, { roi: opts.roi });
+      shellMaskId = zones.shellId;
+      createdMask = true;
+    } catch (e) {
+      // Fall back to no mask
+      shellMaskId = null;
+    }
+  }
+
+  const hasMask = !!shellMaskId;
+  const oneMinusKnee = Math.max(0.01, 1.0 - knee);
+
+  // Pre-query color status in Node.js scope so template interpolation works
+  const colorCheckResult = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}');
+    if (w.isNull) throw new Error('shellDetailEnhance: view not found: ${viewId}');
+    JSON.stringify({ isColor: w.mainView.image.isColor });
+  `);
+  const imageIsColor = JSON.parse(colorCheckResult.outputs?.consoleOutput || '{}').isColor;
+
+  const r = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}');
+    if (w.isNull) throw new Error('shellDetailEnhance: view not found: ${viewId}');
+    var img = w.mainView.image;
+    var isColor = img.isColor;
+    var W = img.width, H = img.height;
+
+    function getLum(px, py) {
+      if (isColor) {
+        return 0.2126 * img.sample(px, py, 0) + 0.7152 * img.sample(px, py, 1) + 0.0722 * img.sample(px, py, 2);
+      }
+      return img.sample(px, py);
+    }
+
+    // Measure shell texture before (in shell zone or all bright pixels)
+    var bgMedian = img.median();
+    var bgMAD = img.MAD();
+    var subTh = bgMedian + 5 * 1.4826 * bgMAD;
+    var beforeEnergy = 0, beforeCount = 0;
+    var beforeVals = [];
+    var step = 8;
+    for (var y = 1; y < H-1; y += step) {
+      for (var x = 1; x < W-1; x += step) {
+        var lum = getLum(x, y);
+        if (lum > subTh && lum < 0.98) {
+          beforeVals.push(lum);
+          var tl = getLum(x-1,y-1), tc = getLum(x,y-1), tr = getLum(x+1,y-1);
+          var ml = getLum(x-1,y),                        mr = getLum(x+1,y);
+          var bl = getLum(x-1,y+1), bc = getLum(x,y+1), br = getLum(x+1,y+1);
+          var gx = -tl + tr - 2*ml + 2*mr - bl + br;
+          var gy = -tl - 2*tc - tr + bl + 2*bc + br;
+          beforeEnergy += gx*gx + gy*gy;
+          beforeCount++;
+        }
+      }
+    }
+    var beforeGrad = beforeCount > 0 ? beforeEnergy / beforeCount : 0;
+
+    // Local stddev before
+    var bs = 16;
+    var bStdDevs = [];
+    for (var by = 0; by < H - bs; by += bs) {
+      for (var bx = 0; bx < W - bs; bx += bs) {
+        var vals = [], shellN = 0;
+        for (var py = by; py < by+bs; py += 2) {
+          for (var px = bx; px < bx+bs; px += 2) {
+            if (px >= W || py >= H) continue;
+            var l = getLum(px, py);
+            vals.push(l);
+            if (l > subTh && l < 0.98) shellN++;
+          }
+        }
+        if (shellN < vals.length * 0.3) continue;
+        var s = 0, s2 = 0;
+        for (var k = 0; k < vals.length; k++) { s += vals[k]; s2 += vals[k]*vals[k]; }
+        var mn = s / vals.length;
+        var v = s2 / vals.length - mn*mn;
+        if (v > 0) bStdDevs.push(Math.sqrt(v));
+      }
+    }
+    bStdDevs.sort(function(a,b){return a-b;});
+    var beforeStdDev = bStdDevs.length > 0 ? bStdDevs[Math.floor(bStdDevs.length/2)] : 0;
+
+    // Apply mask if available
+    ${hasMask ? `
+    var maskW = ImageWindow.windowById('${shellMaskId}');
+    if (!maskW.isNull) {
+      w.mask = maskW;
+      w.maskVisible = false;
+      w.maskInverted = false;
+    }` : '// No mask'}
+
+    // Scale 1: medium (filament scale)
+    if (${medAmount} > 0.01) {
+      var blurId1 = '__shell_blur1';
+      var oldB1 = ImageWindow.windowById(blurId1);
+      if (!oldB1.isNull) oldB1.forceClose();
+
+      // Clone view for blur
+      var blurW1 = new ImageWindow(W, H, isColor ? 3 : 1, 32, true, isColor, blurId1);
+      blurW1.mainView.beginProcess();
+      blurW1.mainView.image.assign(img);
+      blurW1.mainView.endProcess();
+      blurW1.show();
+
+      // Blur at medium sigma
+      var conv1 = new Convolution;
+      conv1.mode = Convolution.prototype.Parametric;
+      conv1.sigma = ${medSigma};
+      conv1.shape = 2;
+      conv1.aspectRatio = 1;
+      conv1.rotationAngle = 0;
+      conv1.executeOn(blurW1.mainView);
+
+      // PixelMath: $T + amount * ($T - blur) * protection
+      // protection = exp(-softness * max(0, lum - knee) / (1 - knee))
+      var PM1 = new PixelMath;
+      var protExpr = 'exp(-${softness} * max(0, (0.2126*$T[0]+0.7152*$T[1]+0.0722*$T[2]) - ${knee}) / ${oneMinusKnee})';
+      ${imageIsColor ? `
+      var expr1 = '$T + ${medAmount} * ($T - ' + blurId1 + ') * ' + protExpr;
+      PM1.expression = expr1;
+      PM1.expression1 = expr1;
+      PM1.expression2 = expr1;
+      PM1.useSingleExpression = false;` : `
+      var protMono = 'exp(-${softness} * max(0, $T - ${knee}) / ${oneMinusKnee})';
+      PM1.expression = '$T + ${medAmount} * ($T - ' + blurId1 + ') * ' + protMono;
+      PM1.useSingleExpression = true;`}
+      PM1.use64BitWorkingImage = true;
+      PM1.truncate = true;
+      PM1.truncateLower = 0;
+      PM1.truncateUpper = 1;
+      PM1.createNewImage = false;
+      PM1.executeOn(w.mainView);
+
+      blurW1.forceClose();
+    }
+
+    // Scale 2: large (regional tonal gradients)
+    if (${lgAmount} > 0.01) {
+      var blurId2 = '__shell_blur2';
+      var oldB2 = ImageWindow.windowById(blurId2);
+      if (!oldB2.isNull) oldB2.forceClose();
+
+      var blurW2 = new ImageWindow(W, H, isColor ? 3 : 1, 32, true, isColor, blurId2);
+      blurW2.mainView.beginProcess();
+      blurW2.mainView.image.assign(img);
+      blurW2.mainView.endProcess();
+      blurW2.show();
+
+      var conv2 = new Convolution;
+      conv2.mode = Convolution.prototype.Parametric;
+      conv2.sigma = ${lgSigma};
+      conv2.shape = 2;
+      conv2.aspectRatio = 1;
+      conv2.rotationAngle = 0;
+      conv2.executeOn(blurW2.mainView);
+
+      var PM2 = new PixelMath;
+      var protExpr2 = 'exp(-${softness} * max(0, (0.2126*$T[0]+0.7152*$T[1]+0.0722*$T[2]) - ${knee}) / ${oneMinusKnee})';
+      ${imageIsColor ? `
+      var expr2 = '$T + ${lgAmount} * ($T - ' + blurId2 + ') * ' + protExpr2;
+      PM2.expression = expr2;
+      PM2.expression1 = expr2;
+      PM2.expression2 = expr2;
+      PM2.useSingleExpression = false;` : `
+      var protMono2 = 'exp(-${softness} * max(0, $T - ${knee}) / ${oneMinusKnee})';
+      PM2.expression = '$T + ${lgAmount} * ($T - ' + blurId2 + ') * ' + protMono2;
+      PM2.useSingleExpression = true;`}
+      PM2.use64BitWorkingImage = true;
+      PM2.truncate = true;
+      PM2.truncateLower = 0;
+      PM2.truncateUpper = 1;
+      PM2.createNewImage = false;
+      PM2.executeOn(w.mainView);
+
+      blurW2.forceClose();
+    }
+
+    // Remove mask
+    ${hasMask ? 'w.removeMask();' : ''}
+
+    // Measure after
+    img = w.mainView.image; // re-read
+    var afterEnergy = 0, afterCount = 0;
+    var maxAfter = 0;
+    var protEngaged = 0, totalEnhanced = 0;
+    for (var y = 1; y < H-1; y += step) {
+      for (var x = 1; x < W-1; x += step) {
+        var lum = getLum(x, y);
+        if (lum > maxAfter) maxAfter = lum;
+        if (lum > subTh && lum < 0.98) {
+          var tl = getLum(x-1,y-1), tc = getLum(x,y-1), tr = getLum(x+1,y-1);
+          var ml = getLum(x-1,y),                        mr = getLum(x+1,y);
+          var bl = getLum(x-1,y+1), bc = getLum(x,y+1), br = getLum(x+1,y+1);
+          var gx = -tl + tr - 2*ml + 2*mr - bl + br;
+          var gy = -tl - 2*tc - tr + bl + 2*bc + br;
+          afterEnergy += gx*gx + gy*gy;
+          afterCount++;
+          totalEnhanced++;
+          var prot = Math.exp(-${softness} * Math.max(0, lum - ${knee}) / ${oneMinusKnee});
+          if (prot < 0.5) protEngaged++;
+        }
+      }
+    }
+    var afterGrad = afterCount > 0 ? afterEnergy / afterCount : 0;
+
+    // Local stddev after
+    var aStdDevs = [];
+    for (var by = 0; by < H - bs; by += bs) {
+      for (var bx = 0; bx < W - bs; bx += bs) {
+        var vals = [], shellN = 0;
+        for (var py = by; py < by+bs; py += 2) {
+          for (var px = bx; px < bx+bs; px += 2) {
+            if (px >= W || py >= H) continue;
+            var l = getLum(px, py);
+            vals.push(l);
+            if (l > subTh && l < 0.98) shellN++;
+          }
+        }
+        if (shellN < vals.length * 0.3) continue;
+        var s = 0, s2 = 0;
+        for (var k = 0; k < vals.length; k++) { s += vals[k]; s2 += vals[k]*vals[k]; }
+        var mn = s / vals.length;
+        var v = s2 / vals.length - mn*mn;
+        if (v > 0) aStdDevs.push(Math.sqrt(v));
+      }
+    }
+    aStdDevs.sort(function(a,b){return a-b;});
+    var afterStdDev = aStdDevs.length > 0 ? aStdDevs[Math.floor(aStdDevs.length/2)] : 0;
+
+    var improvement = beforeGrad > 0 ? ((afterGrad - beforeGrad) / beforeGrad) * 100 : 0;
+
+    JSON.stringify({
+      before: { gradientEnergy: beforeGrad, shellLocalStdDev: beforeStdDev },
+      after: { gradientEnergy: afterGrad, shellLocalStdDev: afterStdDev },
+      improvement: improvement,
+      stddevImprovement: beforeStdDev > 0 ? ((afterStdDev - beforeStdDev) / beforeStdDev) * 100 : 0,
+      maxAfter: maxAfter,
+      protectionEngaged: totalEnhanced > 0 ? (protEngaged / totalEnhanced * 100) : 0,
+      params: {
+        mediumSigma: ${medSigma}, mediumAmount: ${medAmount},
+        largeSigma: ${lgSigma}, largeAmount: ${lgAmount},
+        protectKnee: ${knee}, protectSoftness: ${softness},
+        hasMask: ${hasMask}
+      }
+    });
+  `);
+
+  // Clean up auto-created masks
+  if (createdMask) {
+    try {
+      await ctx.pjsr(`
+        var ids = ['azone_core', 'azone_shell', 'azone_outer'];
+        for (var i = 0; i < ids.length; i++) {
+          var mw = ImageWindow.windowById(ids[i]);
+          if (!mw.isNull) mw.forceClose();
+        }
+      `);
+    } catch {}
+  }
+
+  if (r.status === 'error') {
+    throw new Error('shellDetailEnhance failed: ' + (r.error?.message || 'unknown'));
+  }
+
+  let data;
+  try {
+    data = JSON.parse(r.outputs?.consoleOutput || '{}');
+  } catch {
+    return { error: 'Failed to parse output' };
+  }
+
+  return {
+    before: data.before,
+    after: data.after,
+    improvement: data.improvement,
+    stddevImprovement: data.stddevImprovement,
+    maxAfter: data.maxAfter,
+    protectionEngaged: data.protectionEngaged?.toFixed(1) + '%',
+    params: data.params,
+    details: `Shell detail: gradient ${data.improvement > 0 ? '+' : ''}${data.improvement?.toFixed(1)}%, ` +
+      `stddev ${data.stddevImprovement > 0 ? '+' : ''}${data.stddevImprovement?.toFixed(1)}%, ` +
+      `max=${data.maxAfter?.toFixed(4)}, protection engaged on ${data.protectionEngaged?.toFixed(1)}% of pixels`
+  };
+}

@@ -258,6 +258,15 @@ ${prepResult.views.stars ? `### Stars available: \`${prepResult.views.stars}\` (
 ### Winning Parameters from Previous Runs
 ${extractWinningParams(brief.target.classification)}
 
+${brief.target.classification.includes('emission') ? `
+### TARGET-CLASS TOOL POLICY — READ THIS FIRST
+**This is an emission nebula. The Branch A detail tool is \`shell_detail_enhance\`.**
+\`multi_scale_enhance\` is BLOCKED for this target class — it will refuse with an error.
+Reason: LHE amplifies brightness in bright shells, forcing clamping that destroys texture.
+\`shell_detail_enhance\` enhances texture without increasing peak brightness.
+Use \`create_adaptive_zone_masks\` for zone-based processing.
+Use \`check_highlight_texture\` with reference checkpoints to verify texture preservation.
+` : ''}
 ## SKIP Phase 0 and Phase 1 — they are done.
 ## Begin at Phase 2: Branch Generation.
 ## Call recall_memory first, then start generating bracketed candidate sets.`;
@@ -268,7 +277,7 @@ ${extractWinningParams(brief.target.classification)}
     systemPrompt,
     agentName: 'giga_orchestrator',
     tools: { definitions, handlers },
-    budget: { maxTurns: 200 }, // Large budget for the full pipeline
+    budget: { maxTurns: 250 }, // Large budget for the full pipeline
     store,
     brief,
     ctx,

@@ -50,7 +50,7 @@ const STATE_TOOLS = {
 
   generate_candidates: new Set([
     // Candidate generation
-    'multi_scale_enhance', 'run_hdrmt', 'run_curves', 'run_pixelmath',
+    'multi_scale_enhance', 'shell_detail_enhance', 'run_hdrmt', 'run_curves', 'run_pixelmath',
     'run_nxt', 'run_bxt', 'run_scnr', 'run_sxt',
     'seti_stretch', 'stretch_stars', 'auto_stretch',
     'run_spcc', 'run_background_neutralization',
@@ -59,7 +59,7 @@ const STATE_TOOLS = {
     'extract_pseudo_oiii', 'dynamic_narrowband_blend', 'create_synthetic_luminance',
     // Masks
     'create_luminance_mask', 'apply_mask', 'remove_mask', 'close_mask',
-    'create_zone_masks',
+    'create_zone_masks', 'create_adaptive_zone_masks',
     // Image management
     'clone_image', 'restore_from_clone', 'close_image', 'purge_undo',
     'rename_view', 'open_image', 'combine_channels',
@@ -69,6 +69,7 @@ const STATE_TOOLS = {
     'check_sharpness', 'check_core_burning', 'scan_burnt_regions',
     'check_constraints', 'compute_scores',
     'check_tonal_presence', 'check_star_layer_integrity', 'check_bright_chroma',
+    'check_highlight_texture',
     // Artifacts
     'continuous_clamp',
     // Variants
@@ -83,7 +84,7 @@ const STATE_TOOLS = {
     'finish',
     'lrgb_combine', 'star_screen_blend', 'star_protected_blend', 'restore_star_color',
     'run_curves', 'run_pixelmath',
-    'multi_scale_enhance', 'continuous_clamp',
+    'multi_scale_enhance', 'shell_detail_enhance', 'continuous_clamp',
     'clone_image', 'restore_from_clone', 'close_image',
     'save_variant', 'load_variant', 'list_variants',
     'save_and_show_preview',
@@ -91,8 +92,10 @@ const STATE_TOOLS = {
     'check_saturation', 'check_star_quality', 'check_ringing',
     'check_sharpness', 'scan_burnt_regions', 'check_constraints',
     'check_tonal_presence', 'check_star_layer_integrity', 'check_bright_chroma',
+    'check_highlight_texture',
     'compute_scores', 'submit_scores',
-    'create_luminance_mask', 'apply_mask', 'remove_mask', 'close_mask',
+    'create_luminance_mask', 'create_adaptive_zone_masks',
+    'apply_mask', 'remove_mask', 'close_mask',
     'list_open_images', 'rename_view', 'purge_undo',
   ]),
 
@@ -106,6 +109,7 @@ const STATE_TOOLS = {
     'check_saturation', 'check_star_quality', 'check_ringing',
     'scan_burnt_regions', 'check_constraints', 'check_sharpness',
     'check_tonal_presence', 'check_star_layer_integrity', 'check_bright_chroma',
+    'check_highlight_texture',
     'compute_scores',
     'list_open_images', 'close_image',
   ]),

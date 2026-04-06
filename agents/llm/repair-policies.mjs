@@ -502,6 +502,178 @@ const POLICIES = [
 
     maxRepairTurns: 0,
   },
+
+  // ---- 9. highlight_collapsed_after_compression ----
+  {
+    id: 'highlight_collapsed_after_compression',
+    description:
+      'Shell texture collapsed after continuous_clamp — compression was too destructive. ' +
+      'Restore pre-clamp checkpoint, then either skip clamp (if burn gates pass without it) ' +
+      'or re-clamp with less aggressive params (higher knee, more headroom).',
+    failureGate: 'check_highlight_texture',
+    blocking: true,
+
+    matches(gateName, gateResult, provenance, _category) {
+      return (
+        gateName === 'check_highlight_texture' &&
+        gateResult?.resultText?.includes('COLLAPSED') &&
+        provenance?.tool === 'continuous_clamp'
+      );
+    },
+
+    requiredActions: [
+      'RESTORE from pre-clamp checkpoint (the reference_id used in the failing check)',
+      'Check whether absolute burn gates (0.95) actually fail WITHOUT clamping',
+      'If burn gates PASS without clamp: SKIP clamping entirely — it was unnecessary',
+      'If burn gates fail: re-apply continuous_clamp with LESS compression (higher knee, more headroom)',
+      'After any re-application: check_highlight_texture against pre-clamp reference',
+      'If retention still < 50% after 2 retries: accept pre-clamp state as-is',
+    ],
+    allowedTools: new Set([
+      ...BASELINE_TOOLS,
+      'continuous_clamp',
+      'check_highlight_texture',
+      'run_curves',
+      'run_pixelmath',
+    ]),
+    forbiddenTools: new Set(),
+    forbiddenPatterns: [
+      {
+        pattern: 'continuous_clamp with min_clamp lower than current',
+        reason: 'More aggressive clamping destroys shell texture further',
+      },
+    ],
+
+    buildRetryLadder(provenance) {
+      const mc = provenance?.params?.min_clamp ?? 0.75;
+      const hd = provenance?.params?.headroom ?? 0.12;
+      return [
+        { action: 'skip_clamp_if_burn_passes', note: 'Check 0.95 gate without clamp first' },
+        { min_clamp: +(mc + 0.08).toFixed(2), headroom: +(hd + 0.04).toFixed(2), rate: 2.0, note: 'Higher knee, more headroom' },
+        { action: 'accept_pre_clamp', note: 'Visible texture > dim image. Accept brighter result.' },
+      ];
+    },
+
+    postRepairValidation: [
+      'check_highlight_texture',
+      'measureSubjectDetail',
+      'check_saturation',
+    ],
+
+    maxRepairTurns: 8,
+  },
+
+  // ---- 10. highlight_collapsed_after_detail ----
+  {
+    id: 'highlight_collapsed_after_detail',
+    description:
+      'Shell texture degraded after detail enhancement — wrong tool or too aggressive. ' +
+      'If multi_scale_enhance was used on emission shell: SWITCH to shell_detail_enhance. ' +
+      'If shell_detail_enhance was used: reduce amounts.',
+    failureGate: 'check_highlight_texture',
+    blocking: true,
+
+    matches(gateName, _gateResult, provenance, _category) {
+      return (
+        gateName === 'check_highlight_texture' &&
+        (provenance?.tool === 'multi_scale_enhance' || provenance?.tool === 'shell_detail_enhance')
+      );
+    },
+
+    requiredActions: [
+      'RESTORE from pre-detail checkpoint',
+      'If multi_scale_enhance was used: SWITCH to shell_detail_enhance (LHE causes brightness amplification)',
+      'If shell_detail_enhance was used: reduce medium_amount and large_amount by 30%',
+      'After re-application: check_highlight_texture against pre-detail reference',
+    ],
+    allowedTools: new Set([
+      ...BASELINE_TOOLS,
+      'shell_detail_enhance',
+      'multi_scale_enhance',
+      'check_highlight_texture',
+      'create_adaptive_zone_masks',
+      'apply_mask',
+      'remove_mask',
+    ]),
+    forbiddenTools: new Set([
+      'continuous_clamp', // Clamping is not the answer for detail-tool failures
+    ]),
+    forbiddenPatterns: [],
+
+    buildRetryLadder(provenance) {
+      if (provenance?.tool === 'multi_scale_enhance') {
+        return [{ switchTool: 'shell_detail_enhance', medium_amount: 1.0, large_amount: 0.5 }];
+      }
+      const ma = provenance?.params?.medium_amount ?? 1.0;
+      const la = provenance?.params?.large_amount ?? 0.5;
+      return [
+        { medium_amount: +(ma * 0.7).toFixed(2), large_amount: +(la * 0.7).toFixed(2) },
+        { medium_amount: +(ma * 0.5).toFixed(2), large_amount: +(la * 0.5).toFixed(2) },
+      ];
+    },
+
+    postRepairValidation: [
+      'check_highlight_texture',
+      'measureSubjectDetail',
+      'scan_burnt_regions',
+    ],
+
+    maxRepairTurns: 8,
+  },
+
+  // ---- 11. highlight_collapsed_after_ha ----
+  {
+    id: 'highlight_collapsed_after_ha',
+    description:
+      'Shell texture swamped by Ha injection brightness. ' +
+      'Reduce Ha strength or max_output, then verify texture retention.',
+    failureGate: 'check_highlight_texture',
+    blocking: true,
+
+    matches(gateName, _gateResult, provenance, _category) {
+      return (
+        gateName === 'check_highlight_texture' &&
+        (provenance?.tool?.includes('ha_inject') || provenance?.tool === 'dynamic_narrowband_blend')
+      );
+    },
+
+    requiredActions: [
+      'RESTORE from pre-Ha checkpoint',
+      'Reduce Ha injection strength by 20% or lower max_output by 0.05',
+      'Re-apply Ha injection with reduced parameters',
+      'check_highlight_texture against pre-Ha reference',
+    ],
+    allowedTools: new Set([
+      ...BASELINE_TOOLS,
+      'ha_inject_red',
+      'ha_inject_luminance',
+      'dynamic_narrowband_blend',
+      'check_highlight_texture',
+      'apply_mask',
+      'remove_mask',
+    ]),
+    forbiddenTools: new Set([
+      'continuous_clamp', // Ha brightness issue, not a clamping issue
+    ]),
+    forbiddenPatterns: [],
+
+    buildRetryLadder(provenance) {
+      const str = provenance?.params?.ha_strength ?? 0.40;
+      const mo = provenance?.params?.max_output ?? 0.85;
+      return [
+        { ha_strength: +(str * 0.80).toFixed(2), max_output: +(mo - 0.05).toFixed(2) },
+        { ha_strength: +(str * 0.65).toFixed(2), max_output: +(mo - 0.10).toFixed(2) },
+      ];
+    },
+
+    postRepairValidation: [
+      'check_highlight_texture',
+      'measureSubjectDetail',
+      'check_saturation',
+    ],
+
+    maxRepairTurns: 6,
+  },
 ];
 
 // ---------------------------------------------------------------------------

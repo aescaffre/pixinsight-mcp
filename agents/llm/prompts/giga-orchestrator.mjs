@@ -126,12 +126,16 @@ HDRMT and aggressive sharpening create concentric ring patterns around bright co
 - Donut mask: apply \`$T*(1-$T)*4\` to luminance mask — protects BOTH core and background
 - Prevention: maskClipLow >= 0.35 for HDRMT, or donut mask for bright cores
 
-### 2. STAR QUALITY — NATURAL, COLORFUL, PRESENT
-Stars must be small, colorful, and natural — not white blobs or invisible dots.
+### 2. STAR QUALITY — NATURAL, COLORFUL, PRESENT, BRIGHT ENOUGH
+Stars must be small, colorful, natural, AND bright enough to give the field life.
 - Use \`check_star_quality\` after star reintegration to verify
 - FWHM must be < 6px (bloated stars = FAIL)
 - Color diversity must be > 0.05 (colorless stars = FAIL)
 - Minimum 50 stars detected (too few = stars missing or over-reduced = FAIL)
+- **Star brightness: HARD GATE** — median star peak must be ≥ 3× background (balanced), ≥ 4× (prominent), ≥ 2× (subdued)
+  - This measures star-to-background contrast ratio for the top 30 detected stars
+  - If stars are too dim: increase \`star_protected_blend\` strength, use brighter \`stretch_stars\` params (lower setiMidtone or more iterations), or boost star layer brightness with curves before blending
+  - Do NOT reduce core_threshold_low to brighten stars — that washes out nebula cores
 - Stars are a SEPARATE layer — NEVER apply LHE/HDRMT to the star layer
 - Star reduction should be MINIMAL (factor 0.90-0.95) or skipped entirely
 - Apply saturation curves to stars: S channel [[0,0],[0.30,0.55],[0.60,0.85],[1,1]]
@@ -144,9 +148,11 @@ Only EXTENDED burnt regions trigger this gate.
 
 - Use \`scan_burnt_regions\` after EVERY stretch, HDRMT, LHE, curves, Ha injection, and L enhancement
 - **HARD GATE at 0.95**: ZERO 50×50 blocks with >3% pixels above 0.95. Actual pixel clipping = FAIL.
-- **SOFT WARNING at 0.80**: Blocks above 0.80 trigger a warning but NOT a failure. The agent should VISUALLY check the core: if internal structure (knots, filaments, color zonation) is visible, bright is OK. If the core is a featureless flat blob, apply \`continuous_clamp\`.
-- **WHY two levels?** v13 showed that a bright core (max 0.93) WITH visible detail is far better than a dim core (max 0.78) that's been clamped into a flat gray blob. Aggressive clamping destroys the very detail we're trying to preserve. Trust your EYES over the numbers.
-- Use \`continuous_clamp\` only when VISUAL inspection confirms detail loss — NOT as a preventive measure.
+- **HARD GATE: BRIGHT BLOCK FRACTION at 0.80**: If the PERCENTAGE of blocks above 0.80 exceeds the per-profile \`burn.max_bright_block_pct\` limit, it is a HARD FAILURE. This catches extended detail loss (e.g. entire nebula shell washed out) that individual block scanning misses. Typical limits: 2% for emission nebulae, 5% for galaxies, 1% for reflection nebulae.
+  - A few bright blocks (< limit) around a galaxy core = OK (advisory warning only)
+  - Hundreds of bright blocks across an emission shell = FAIL — apply \`continuous_clamp\` (min_clamp=0.75, max_clamp=0.90). Default soft mode preserves internal detail via exponential compression (unlike hard mode which flattens everything to the knee). Use headroom=0.12 (default) to keep ~0.12 of dynamic range above the knee.
+- **WHY two levels?** v13 showed a bright core (max 0.93) WITH visible detail is better than a clamped flat blob. But NGC7635 showed that 292 bright blocks (3.3% of image) destroys shell detail even when no pixel reaches 0.95. The fraction gate catches this.
+- Use \`continuous_clamp\` when the fraction exceeds the limit OR when VISUAL inspection confirms detail loss.
 - Seti stretch headroom=0.10 for L channel. For planetary nebulae: L stretch 0.25 max.
 - **Pre-star clamp** (if needed): If \`scan_burnt_regions\` detects blocks above 0.95 BEFORE star blend, apply \`continuous_clamp\` (min_clamp=0.80, max_clamp=0.95). Verify with burn scan after.
 - **Post-star clamp is SECONDARY cleanup only**: \`star_protected_blend\` auto-attenuates in bright cores. If burn scan still fails AFTER protected blend, the correct fix is to restore pre-star checkpoint and re-blend with lower strength or tighter core protection — NOT to apply continuous_clamp on the result. Clamp is only acceptable as a final safety net if the re-blend approach has already been tried.
@@ -192,6 +198,47 @@ Use \`check_tonal_presence\` on composition candidates BEFORE star blend.
 - Low ROI confidence → advisory only (few subject pixels detected)
 - This catches images that are technically safe but emotionally flat — a dim galaxy that passes brightness gate but doesn't STAND OUT from the background
 
+${brief.target.classification.includes('emission') || brief.target.fieldCharacteristics?.structuralZones === 'multi_zone' ? `
+### ${hasHa ? '7' : '6'}. HIGHLIGHT TEXTURE — SHELL DETAIL MUST SURVIVE PROCESSING
+Bright emission shells can appear "burnt" at moderate brightness (0.40–0.73) if internal
+tonal variation has collapsed into a featureless plateau. This is **perceptual burn**.
+
+**PRIMARY SIGNAL: RELATIVE texture retention vs reference checkpoint (blocking).**
+- BEFORE any operation that damages shell texture (clamp, detail tool, Ha injection):
+  create a clone: \`clone_image\` (e.g., "pre_clamp_COMP_boldcolor")
+- AFTER the operation: \`check_highlight_texture(view_id=..., reference_id="pre_clamp_...")\`
+- **BLOCKING**: textureRetention < 40% on any metric = FAIL (>60% of texture destroyed)
+- **WARNING**: textureRetention < 60%
+- WITHOUT reference: advisory only (absolute heuristics, never blocking)
+
+**Reference checkpoints — clone BEFORE which operation:**
+- Before continuous_clamp → \`pre_clamp_{comp}\`
+- Before shell_detail_enhance → \`pre_detail_{comp}\`
+- Before Ha injection → \`pre_ha_{comp}\`
+
+**WHEN THIS GATE FAILS:**
+- After clamp: RESTORE pre-clamp. If absolute burn gates pass without clamp: SKIP clamp.
+  Otherwise: raise knee +0.08, increase headroom +0.04. After 2 attempts: accept brighter image.
+- After detail tool: If multi_scale_enhance was used: SWITCH to shell_detail_enhance.
+  If shell_detail_enhance: reduce amounts by 30%. Do NOT clamp harder.
+- After Ha injection: reduce strength by 20% or lower max_output by 0.05.
+
+**DETAIL TOOL FOR EMISSION SHELLS:**
+- Do NOT use \`multi_scale_enhance\` on bright emission shells. LHE equalizes local histograms,
+  pushing bright shell pixels toward clipping, forcing destructive clamping.
+- Use \`shell_detail_enhance\` instead — it extracts detail at filament scale and amplifies it
+  while PRESERVING the smooth brightness component. Brightness-neutral by design.
+- Use \`create_adaptive_zone_masks\` for ROI-anchored zone masks (core/shell/outer).
+
+**PREFERRED PROCESSING ORDER FOR SHELL EMISSION NEBULAE:**
+1. Ha injection FIRST — establishes emission brightness before detail work
+2. Gentle highlight protection if burn gates require it (check first, skip if unnecessary)
+3. Adaptive zone masks within subject ROI
+4. \`shell_detail_enhance\` through shell mask — texture enhancement within the established range
+5. Zone-specific curves, check_highlight_texture at each step
+6. Star blend + finish gates
+The agent may deviate from this order if justified, but this avoids the detail→burn→clamp→flatten cycle.
+` : ''}
 ### WORKFLOW: Burn-scan EVERY branch, EVERY step
 **CRITICAL: scan_burnt_regions is not just for compositions — run it on EVERY view after EVERY histogram-modifying operation:**
 - After stretch (seti_stretch, stretch_stars)
@@ -288,8 +335,46 @@ Do NOT accept a branch result where subjects are dim blobs. The numbers tell you
 
 Generate separate candidate sets. Each branch works from stable parent, NOT from mutation chain.
 
-## BRANCH A — LUMINANCE DETAIL
-${hasL ? `
+## BRANCH A — DETAIL ENHANCEMENT
+${brief.target.classification.includes('emission') ? `
+**THIS IS AN EMISSION NEBULA. Branch A uses \`shell_detail_enhance\`, NOT \`multi_scale_enhance\`.**
+
+\`multi_scale_enhance\` is BLOCKED for emission nebulae. It will refuse with an error.
+The reason: LHE (inside multi_scale_enhance) equalizes local histograms, pushing bright shell
+pixels toward clipping. This forces destructive clamping that collapses shell texture.
+
+**Your Branch A detail tool is \`shell_detail_enhance\`.**
+It extracts detail at filament and regional scales via high-pass decomposition
+and amplifies texture while PRESERVING the smooth brightness component.
+Brightness-neutral by design — no subsequent clamping needed.
+
+**WORKFLOW:**
+1. Clone baseline → \`create_adaptive_zone_masks\` to get shell zone mask
+2. Clone → \`shell_detail_enhance\` with conservative params (medium_amount=0.5, large_amount=0.3)
+3. Check improvement: \`measure_subject_detail\` + \`check_highlight_texture\`
+4. Clone → stronger params (medium_amount=1.0, large_amount=0.5)
+5. Clone → edge params (medium_amount=1.5, large_amount=0.8)
+6. Clone → overdone (medium_amount=2.5, large_amount=1.5) — mark the boundary
+
+**Tuning \`shell_detail_enhance\`:**
+- medium_sigma (10-30): filament-scale detail. Default 18. Lower = finer structure.
+- medium_amount (0.3-2.5): filament boost. Start at 1.0.
+- large_sigma (35-80): regional tonal gradients. Default 55.
+- large_amount (0.0-1.5): regional boost. Start at 0.5.
+- protect_knee (default 0.80): brightness above which enhancement attenuates
+- The tool auto-creates adaptive zone masks when auto_zone=true (default)
+
+**After each candidate:** \`scan_burnt_regions\` to verify no new burns.
+The shell_detail_enhance tool should NOT create burns (it is brightness-neutral),
+but verify anyway. If burns appear, the params are too aggressive — reduce amounts.
+
+Required candidates: detail_restrained, detail_target, detail_edge, detail_overdone
+At least one must be clearly too aggressive to mark the boundary.
+
+Tools: shell_detail_enhance (PRIMARY), create_adaptive_zone_masks, clone_image, restore_from_clone,
+measure_subject_detail, check_highlight_texture, save_variant
+- **finish will REJECT if subjectBrightness < 0.25, contrastRatio < 3×, or detailScore < 0.001**
+` : hasL ? `
 Work on FILTER_L. Goal: maximize believable structure (core separation, arm texture, local contrast).
 NOT IFN (that's Branch B). NOT stars. NOT composition.
 
@@ -320,7 +405,7 @@ Tools: multi_scale_enhance (PRIMARY — use this, NOT individual run_lhe calls),
 - For each candidate: check detail improvement %. If < 5%, params are wrong.
 - You MUST revert at least once — if you never revert, you didn't push hard enough.
 - **finish will REJECT if subjectBrightness < 0.25, contrastRatio < 3×, or detailScore < 0.001**
-` : 'No L channel. Apply LHE/HDRMT to RGB directly with same bracketing discipline and masking strategy.'}
+` : 'No L channel. Apply detail enhancement to RGB directly with same bracketing discipline and masking strategy.'}
 
 ## BRANCH B — IFN REVEAL *** HIGHEST PRIORITY BRANCH ***
 ${hasIFN ? `
@@ -419,16 +504,32 @@ The \`check_star_quality\` gate requires >= 50 detected stars.
 Required candidates: stars_bright, stars_target, stars_reduced, stars_overreduced
 
 Tools: stretch_stars, run_curves, run_pixelmath, check_star_layer_integrity, save_variant
-- Start with NO reduction and STRONG color saturation: S channel [[0,0],[0.30,0.55],[0.60,0.85],[1,1]] (apply twice)
-- Brighten stars if needed: \`max($T * 1.3, $T)\` or gentle curves lift on the star layer
-- Do NOT reduce stars unless they are genuinely bloated (FWHM > 6px). Default: NO reduction (factor 1.0).
-- Never go below factor 0.90. Stars that are barely visible = FAILURE.
-- The "overdone" candidate here should be OVER-REDUCED (too faint) to mark the boundary.
-- **BEFORE blending**: call \`check_star_layer_integrity\` on the star winner
-- Star max must be < 0.98 — if clipped, apply soft rolloff on star layer FIRST:
+
+**CRITICAL: Stars are delivered LINEAR from prep. You MUST call \`stretch_stars\` FIRST.**
+The star layer from SXT extraction is LINEAR (median near zero, max near 1.0).
+If you skip stretch_stars and go straight to curves/rolloff, stars will be INVISIBLE in the final image.
+\`star_protected_blend\` will REFUSE an unstretched star layer.
+
+**Step 1: stretch_stars** (MANDATORY)
+- Default: midtone=0.20, iterations=5. This is correct for most data.
+- If stars look too faint after stretch, try midtone=0.15 or iterations=7.
+
+**Step 2: Color saturation**
+- STRONG saturation: S channel [[0,0],[0.30,0.55],[0.60,0.85],[1,1]] (apply twice)
+- Brighten stars if needed: \`max($T * 1.3, $T)\` or gentle curves lift
+
+**Step 3: Soft rolloff** (if needed)
+- Star max must be < 0.98 — if clipped, apply soft rolloff:
   \`iif($T > 0.65, 0.65 + ($T - 0.65) * 0.46, $T)\` (compresses 0.65-1.0 → 0.65-0.81)
+
+**Step 4: check_star_layer_integrity** (MANDATORY before blend)
+- Will detect unstretched layers and REFUSE blend
+
+- Do NOT reduce stars unless genuinely bloated (FWHM > 6px). Default: NO reduction.
+- Never go below factor 0.90. Stars that are barely visible = FAILURE.
+- The "overdone" candidate should be OVER-REDUCED (too faint) to mark the boundary.
 - \`star_protected_blend\` auto-attenuates in bright cores — replaces star_screen_blend
-- Blend strength: **0.90-1.00** — do NOT go below 0.85. Previous runs used 0.55-0.65 which killed stars.
+- Blend strength: **0.95-1.00** — do NOT go below 0.90. Previous runs killed stars with low blend strength.
 
 # ======================================================================
 # PHASE 3 — BRANCH CRITIC PASS

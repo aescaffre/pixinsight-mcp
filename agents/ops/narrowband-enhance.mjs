@@ -295,25 +295,38 @@ export async function createSyntheticLuminance(ctx, haId, oiiiId, haWeight = 0.5
  *
  * How it works:
  *   1. Extract luminance, blur with LARGE sigma (60-100px proportional to image)
- *   2. Compute per-pixel clamp level:
- *      clamp_level = min_clamp + (max_clamp - min_clamp) * (1 - smooth_lum)
- *      Bright core (mask~1.0) → clamped near min_clamp (0.80)
- *      Shell (mask~0.5)       → clamped near midpoint (0.875)
- *      Background (mask~0)    → clamped near max_clamp (0.95)
- *   3. result = min($T, clamp_level)
+ *   2. Compute per-pixel knee level:
+ *      knee = min_clamp + (max_clamp - min_clamp) * (1 - smooth_lum)
+ *      Bright core (mask~1.0) → knee near min_clamp (0.80)
+ *      Shell (mask~0.5)       → knee near midpoint (0.875)
+ *      Background (mask~0)    → knee near max_clamp (0.95)
+ *   3. Soft compression (default): values above knee are smoothly compressed
+ *      using exponential saturation, preserving relative brightness:
+ *        result = knee + headroom * (1 - exp(-rate * (pixel - knee) / headroom))
+ *      Hard mode (legacy): result = min(pixel, knee)
+ *
+ * Soft mode preserves detail within bright areas — a pixel at 0.90 and one at 0.85
+ * remain distinguishable after compression. Hard mode flattens both to the knee.
  *
  * Zero boundary artifacts because the mask is a single continuous gradient.
  *
  * @param {object} ctx - Bridge context
  * @param {string} viewId - Target view to clamp (modified in place)
- * @param {object} opts - { min_clamp, max_clamp, blur_sigma }
- * @returns {object} { median, max, clampRange: [min_clamp, max_clamp], blur_sigma }
+ * @param {object} opts - { min_clamp, max_clamp, blur_sigma, mode, headroom, rate }
+ *   mode: 'soft' (default) or 'hard'
+ *   headroom: how far above knee the compression allows (default 0.12)
+ *   rate: compression steepness (default 3.0; higher = more aggressive)
+ * @returns {object} { median, max, clampRange: [min_clamp, max_clamp], blur_sigma, mode }
  */
 export async function continuousClamp(ctx, viewId, opts = {}) {
   const minClamp = opts.min_clamp ?? 0.80;
   const maxClamp = opts.max_clamp ?? 0.95;
+  const mode = opts.mode ?? 'soft';       // 'soft' (exponential compression) or 'hard' (min clamp)
+  const headroom = opts.headroom ?? 0.12; // soft mode: how far above knee the output can reach
+  const rate = opts.rate ?? 3.0;          // soft mode: compression steepness (higher = more aggressive)
   // blur_sigma: default auto = max(60, imageWidth/100)
   const blurSigmaExpr = opts.blur_sigma != null ? String(opts.blur_sigma) : null;
+  const range = maxClamp - minClamp;
 
   const r = await ctx.pjsr(`
     var src = ImageWindow.windowById('${viewId}');
@@ -372,11 +385,25 @@ export async function continuousClamp(ctx, viewId, opts = {}) {
 
     maskW.show();
 
-    // Apply continuous clamp via PixelMath:
-    // clamp_level = min_clamp + (max_clamp - min_clamp) * (1 - smooth_lum)
-    // result = min($T, clamp_level)
+    // Build PixelMath expression
+    // knee = per-pixel threshold from the blurred luminance mask
+    var knee = '${minClamp} + ${range} * (1 - ' + tmpId + ')';
+
+    var clampExpr;
+    if ('${mode}' === 'soft') {
+      // Soft compression: exponential saturation preserves relative brightness
+      // result = iif($T > knee, knee + headroom * (1 - exp(-rate * ($T - knee) / headroom)), $T)
+      // At knee: unchanged. Above knee: smoothly compressed toward knee + headroom.
+      // A pixel at 0.90 and one at 0.85 remain distinguishable (gradient preserved).
+      var hd = '${headroom}';
+      var rt = '${rate}';
+      clampExpr = 'iif($T > (' + knee + '), (' + knee + ') + ' + hd + ' * (1 - exp(-' + rt + ' * ($T - (' + knee + ')) / ' + hd + ')), $T)';
+    } else {
+      // Hard clamp (legacy): everything above knee flattened to knee value
+      clampExpr = 'min($T, ' + knee + ')';
+    }
+
     var PM = new PixelMath;
-    var clampExpr = "min($T, ${minClamp} + ${maxClamp - minClamp} * (1 - " + tmpId + "))";
     PM.expression = clampExpr;
     PM.expression1 = clampExpr;
     PM.expression2 = clampExpr;
@@ -397,7 +424,10 @@ export async function continuousClamp(ctx, viewId, opts = {}) {
       median: finalImg.median(),
       max: finalImg.maximum(),
       clampRange: [${minClamp}, ${maxClamp}],
-      blur_sigma: blurSigma
+      blur_sigma: blurSigma,
+      mode: '${mode}',
+      headroom: ${headroom},
+      rate: ${rate}
     });
   `);
 
@@ -509,4 +539,150 @@ export async function createZoneMasks(ctx, viewId, thresholds = {}) {
   }
 
   return JSON.parse(r.outputs?.consoleOutput || '{}');
+}
+
+/**
+ * Adaptive zone masks — ROI-anchored, percentile-based zones for shell nebulae.
+ *
+ * Unlike createZoneMasks (fixed thresholds), this computes zone boundaries
+ * from the actual pixel distribution within a subject ROI. Produces 3 soft masks:
+ * hot_core (top ~10%), bright_shell (P25–P90), outer_nebula (below P25 above background).
+ *
+ * @param {object} ctx - Bridge context
+ * @param {string} viewId - Source view
+ * @param {object} opts - { roi: {cx,cy,radius}, coreBias }
+ * @returns {object} { coreId, shellId, outerId, roi, thresholds, pixelCounts }
+ */
+export async function createAdaptiveZoneMasks(ctx, viewId, opts = {}) {
+  const roiCx = opts.roi?.cx ?? -1;
+  const roiCy = opts.roi?.cy ?? -1;
+  const roiR = opts.roi?.radius ?? -1;
+  const coreBias = opts.coreBias ?? 0.5;
+
+  const r = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}');
+    if (w.isNull) throw new Error('createAdaptiveZoneMasks: view not found: ${viewId}');
+    var img = w.mainView.image;
+    var isColor = img.isColor;
+    var W = img.width, H = img.height;
+
+    function getLum(px, py) {
+      if (isColor) {
+        return 0.2126 * img.sample(px, py, 0) + 0.7152 * img.sample(px, py, 1) + 0.0722 * img.sample(px, py, 2);
+      }
+      return img.sample(px, py);
+    }
+
+    var cx = ${roiCx}, cy = ${roiCy}, rad = ${roiR};
+    if (cx < 0) {
+      var bgM = img.median();
+      var df = [];
+      for (var y = 0; y < H; y += 32) for (var x = 0; x < W; x += 32) df.push(Math.abs(getLum(x,y) - bgM));
+      df.sort(function(a,b){return a-b;});
+      var bMAD = df[Math.floor(df.length/2)];
+      var sTh = bgM + 5 * bMAD;
+      var swx=0,swy=0,sw=0;
+      for (var y=8;y<H-8;y+=8) for (var x=8;x<W-8;x+=8) {
+        var l=getLum(x,y); if(l>sTh){swx+=x*l;swy+=y*l;sw+=l;}
+      }
+      cx = sw > 0 ? Math.round(swx/sw) : Math.round(W/2);
+      cy = sw > 0 ? Math.round(swy/sw) : Math.round(H/2);
+      rad = Math.round(Math.min(W,H)*0.35);
+    }
+
+    var bgMed = img.median();
+    var df2 = [];
+    for (var y = 0; y < H; y += 32) for (var x = 0; x < W; x += 32) df2.push(Math.abs(getLum(x,y) - bgMed));
+    df2.sort(function(a,b){return a-b;});
+    var bgMAD = df2[Math.floor(df2.length/2)];
+    var subjectTh = bgMed + 5 * bgMAD;
+
+    var roiSubject = [];
+    for (var y = Math.max(0, cy-rad); y < Math.min(H, cy+rad); y += 4) {
+      for (var x = Math.max(0, cx-rad); x < Math.min(W, cx+rad); x += 4) {
+        var dx = x-cx, dy = y-cy;
+        if (dx*dx + dy*dy > rad*rad) continue;
+        var l = getLum(x, y);
+        if (l > subjectTh) roiSubject.push(l);
+      }
+    }
+    roiSubject.sort(function(a,b){return a-b;});
+
+    if (roiSubject.length < 50) {
+      JSON.stringify({ error: 'too_few_subject_pixels', count: roiSubject.length });
+    } else {
+      var corePerc = 0.85 + 0.10 * ${coreBias};
+      var coreTh = roiSubject[Math.floor(roiSubject.length * corePerc)];
+      var shellLow = roiSubject[Math.floor(roiSubject.length * 0.25)];
+
+      var ids = ['azone_core', 'azone_shell', 'azone_outer'];
+      for (var i = 0; i < 3; i++) {
+        var old = ImageWindow.windowById(ids[i]);
+        if (!old.isNull) old.forceClose();
+      }
+
+      var mC = new ImageWindow(W, H, 1, 32, true, false, 'azone_core');
+      var mS = new ImageWindow(W, H, 1, 32, true, false, 'azone_shell');
+      var mO = new ImageWindow(W, H, 1, 32, true, false, 'azone_outer');
+      var iC = mC.mainView.image, iS = mS.mainView.image, iO = mO.mainView.image;
+      var cc=0, sc=0, oc=0;
+
+      mC.mainView.beginProcess(); mS.mainView.beginProcess(); mO.mainView.beginProcess();
+
+      for (var y = 0; y < H; y++) {
+        for (var x = 0; x < W; x++) {
+          var lum = getLum(x, y);
+          var dx = x - cx, dy = y - cy;
+          var dist = Math.sqrt(dx*dx + dy*dy);
+          var roiW = dist < rad ? 1.0 : Math.max(0, 1.0 - (dist - rad) / 20.0);
+
+          var cV = 0;
+          if (lum > coreTh) {
+            cV = Math.min(1.0, (lum - coreTh) / Math.max(0.01, 1.0 - coreTh));
+            cc++;
+          }
+          var sV = 0;
+          if (lum > shellLow && lum <= coreTh) {
+            var mid = (shellLow + coreTh) / 2;
+            var half = (coreTh - shellLow) / 2;
+            sV = Math.max(0, Math.min(1, 1.0 - Math.abs(lum - mid) / half));
+            sc++;
+          }
+          var oV = 0;
+          if (lum > subjectTh && lum <= shellLow) {
+            oV = Math.min(1.0, (lum - subjectTh) / Math.max(0.01, shellLow - subjectTh));
+            oc++;
+          }
+          iC.setSample(cV * roiW, x, y);
+          iS.setSample(sV * roiW, x, y);
+          iO.setSample(oV * roiW, x, y);
+        }
+      }
+      mC.mainView.endProcess(); mS.mainView.endProcess(); mO.mainView.endProcess();
+
+      var sigmas = [5, 10, 20];
+      var ms = [mC, mS, mO];
+      for (var m = 0; m < 3; m++) {
+        var conv = new Convolution;
+        conv.mode = Convolution.prototype.Parametric;
+        conv.sigma = sigmas[m]; conv.shape = 2; conv.aspectRatio = 1; conv.rotationAngle = 0;
+        conv.executeOn(ms[m].mainView);
+        ms[m].show();
+      }
+
+      JSON.stringify({
+        coreId: 'azone_core', shellId: 'azone_shell', outerId: 'azone_outer',
+        roi: { cx: cx, cy: cy, radius: rad },
+        thresholds: { core: coreTh, shellLow: shellLow, outer: subjectTh },
+        pixelCounts: { core: cc, shell: sc, outer: oc }
+      });
+    }
+  `);
+
+  if (r.status === 'error') {
+    throw new Error('createAdaptiveZoneMasks failed: ' + (r.error?.message || 'unknown'));
+  }
+  const data = JSON.parse(r.outputs?.consoleOutput || '{}');
+  if (data.error) throw new Error('createAdaptiveZoneMasks: ' + data.error + ' (' + data.count + ' pixels)');
+  return data;
 }

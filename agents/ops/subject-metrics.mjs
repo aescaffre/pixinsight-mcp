@@ -169,3 +169,153 @@ export async function measureSubjectDetail(ctx, viewId) {
     raw: data
   };
 }
+
+/**
+ * Locate subject ROI — produces a single authoritative subject location
+ * used by adaptive zone masks and the highlight-texture critic.
+ *
+ * Computes a luminance-weighted centroid with spatial compactness filtering
+ * (rejects isolated stars), plus a bounding radius enclosing 90% of subject flux.
+ *
+ * @param {object} ctx - Bridge context
+ * @param {string} viewId - View ID to analyze
+ * @returns {object} { cx, cy, radius, confidence, subjectPixelCount, subjectFraction }
+ */
+export async function locateSubjectROI(ctx, viewId) {
+  const r = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}');
+    if (w.isNull) throw new Error('locateSubjectROI: view not found: ${viewId}');
+    var img = w.mainView.image;
+    var isColor = img.isColor;
+    var W = img.width, H = img.height;
+
+    function getLum(px, py) {
+      if (isColor) {
+        return 0.2126 * img.sample(px, py, 0) + 0.7152 * img.sample(px, py, 1) + 0.0722 * img.sample(px, py, 2);
+      }
+      return img.sample(px, py);
+    }
+
+    // Background stats via sampling
+    var bgMedian = img.median();
+    var sampleStep = 32;
+    var diffs = [];
+    for (var y = 0; y < H; y += sampleStep) {
+      for (var x = 0; x < W; x += sampleStep) {
+        diffs.push(Math.abs(getLum(x, y) - bgMedian));
+      }
+    }
+    diffs.sort(function(a, b) { return a - b; });
+    var bgMAD = diffs[Math.floor(diffs.length / 2)];
+    var subjectThreshold = bgMedian + 5 * bgMAD;
+
+    // Collect subject pixels with spatial compactness (reject isolated stars)
+    var step = 8;
+    var probeD = 3;
+    var sumWX = 0, sumWY = 0, sumW = 0;
+    var subjectCount = 0;
+    var totalSampled = 0;
+    var subjectDistances = []; // filled after centroid is known
+
+    // First pass: compute centroid
+    var subjectCoords = [];
+    for (var y = step; y < H - step; y += step) {
+      for (var x = step; x < W - step; x += step) {
+        totalSampled++;
+        var lum = getLum(x, y);
+        if (lum > subjectThreshold) {
+          var bn = 0;
+          if (x - probeD >= 0 && getLum(x - probeD, y) > subjectThreshold) bn++;
+          if (x + probeD < W && getLum(x + probeD, y) > subjectThreshold) bn++;
+          if (y - probeD >= 0 && getLum(x, y - probeD) > subjectThreshold) bn++;
+          if (y + probeD < H && getLum(x, y + probeD) > subjectThreshold) bn++;
+          if (bn >= 2) {
+            sumWX += x * lum;
+            sumWY += y * lum;
+            sumW += lum;
+            subjectCount++;
+            subjectCoords.push(x * 65536 + y); // pack coords for second pass
+          }
+        }
+      }
+    }
+
+    var cx = sumW > 0 ? Math.round(sumWX / sumW) : Math.round(W / 2);
+    var cy = sumW > 0 ? Math.round(sumWY / sumW) : Math.round(H / 2);
+
+    // Second pass: compute distances from centroid to determine bounding radius
+    var distances = [];
+    for (var i = 0; i < subjectCoords.length; i++) {
+      var sx = Math.floor(subjectCoords[i] / 65536);
+      var sy = subjectCoords[i] % 65536;
+      var dx = sx - cx, dy = sy - cy;
+      distances.push(Math.sqrt(dx * dx + dy * dy));
+    }
+    distances.sort(function(a, b) { return a - b; });
+
+    // Radius enclosing 90% of subject pixels
+    var radius = distances.length > 0
+      ? distances[Math.floor(distances.length * 0.90)]
+      : Math.min(W, H) / 4;
+
+    // Clamp radius
+    var maxRadius = Math.min(W, H) * 0.45;
+    var minRadius = 50;
+    if (radius > maxRadius) radius = maxRadius;
+    if (radius < minRadius) radius = minRadius;
+    radius = Math.round(radius);
+
+    var subjectFraction = totalSampled > 0 ? subjectCount / totalSampled : 0;
+
+    JSON.stringify({
+      cx: cx,
+      cy: cy,
+      radius: radius,
+      subjectPixelCount: subjectCount,
+      subjectFraction: subjectFraction,
+      totalSampled: totalSampled,
+      bgMedian: bgMedian,
+      bgMAD: bgMAD,
+      subjectThreshold: subjectThreshold
+    });
+  `);
+
+  if (r.status === 'error') {
+    return { cx: 0, cy: 0, radius: 200, confidence: 'low', error: r.error?.message };
+  }
+
+  let data;
+  try {
+    data = JSON.parse(r.outputs?.consoleOutput || '{}');
+  } catch {
+    return { cx: 0, cy: 0, radius: 200, confidence: 'low', error: 'Parse failed' };
+  }
+
+  // Confidence from subject fraction
+  let confidence;
+  if (data.subjectFraction > 0.03 && data.subjectPixelCount > 500) {
+    confidence = 'high';
+  } else if (data.subjectFraction > 0.01) {
+    confidence = 'medium';
+  } else {
+    confidence = 'low';
+  }
+
+  // Widen radius for medium confidence
+  let radius = data.radius;
+  if (confidence === 'medium') {
+    radius = Math.round(radius * 1.2);
+  }
+
+  return {
+    cx: data.cx,
+    cy: data.cy,
+    radius,
+    confidence,
+    subjectPixelCount: data.subjectPixelCount,
+    subjectFraction: data.subjectFraction,
+    bgMedian: data.bgMedian,
+    bgMAD: data.bgMAD,
+    subjectThreshold: data.subjectThreshold
+  };
+}

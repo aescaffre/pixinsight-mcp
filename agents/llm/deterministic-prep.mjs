@@ -51,7 +51,7 @@ function fileFingerprint(filePath) {
  * Compute the cache key for a given config.
  * Combines: prep script hash + fingerprint of each input master.
  */
-function computeCacheKey(config) {
+function computeCacheKey(config, brief) {
   const hash = crypto.createHash('sha256');
   // Hash this script's content
   hash.update(fs.readFileSync(__filename, 'utf-8'));
@@ -60,6 +60,11 @@ function computeCacheKey(config) {
   for (const key of ['R', 'G', 'B', 'L', 'Ha']) {
     const fp = fileFingerprint(F[key]);
     hash.update(`${key}:${fp}|`);
+  }
+  // Hash stretch parameters from processing profile (invalidate when profile changes)
+  const pp = brief?.processingProfile;
+  if (pp?.stretch) {
+    hash.update(`stretch:${pp.stretch.target_median}:${pp.stretch.headroom}|`);
   }
   return hash.digest('hex').slice(0, 24);
 }
@@ -199,7 +204,7 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
   // ========================================================================
   // CACHE CHECK — skip all processing if inputs haven't changed
   // ========================================================================
-  const cacheKey = computeCacheKey(config);
+  const cacheKey = computeCacheKey(config, brief);
   log(`\n[PREP] Cache key: ${cacheKey}`);
 
   const cached = await loadFromCache(ctx, config, cacheKey, log);

@@ -31,6 +31,9 @@
       "hue_selective": true,
       "max_p90": 0.80
     },
+    "burn": {
+      "max_bright_block_pct": 3.0
+    },
     "stars": {
       "screen_blend_strength": 1.00,
       "prominence": "prominent"
@@ -77,6 +80,9 @@
       "pink_boost": 1.25,
       "max_p90": 0.75
     },
+    "burn": {
+      "max_bright_block_pct": 5.0
+    },
     "stars": {
       "screen_blend_strength": 1.00,
       "prominence": "subdued"
@@ -116,6 +122,9 @@
       "composition_target": 0.75,
       "hue_selective": false,
       "max_p90": 0.80
+    },
+    "burn": {
+      "max_bright_block_pct": 5.0
     },
     "stars": {
       "screen_blend_strength": 0.95,
@@ -157,6 +166,9 @@
       "hue_selective": false,
       "max_p90": 0.50
     },
+    "burn": {
+      "max_bright_block_pct": 5.0
+    },
     "stars": {
       "screen_blend_strength": 0.90,
       "prominence": "subdued"
@@ -187,26 +199,33 @@
       "NXT": { "use": true, "denoise_linear": 0.20, "denoise_post_stretch": 0.25 },
       "SXT": { "use": true, "safe": true },
       "LHE": { "use": true, "start_amount": 0.25, "start_radius": 96, "mask_blur": 8, "mask_clipLow": 0.08 },
-      "HDRMT": { "use": "try", "inverted": true, "layers": 5, "iterations": 1 },
-      "LRGB": { "use": true, "lightness": 0.50, "saturation": 0.80 },
+      "HDRMT": { "use": true, "inverted": true, "layers": 5, "iterations": 1, "median_transform": true, "reason": "HDRMT with medianTransform is the main detail driver for clusters (+18% on Abell2151). Push harder — try layers 5-7, iterations 1-2." },
+      "LRGB": { "use": true, "lightness": 0.50, "saturation": 0.85 },
       "Ha_injection": { "use": false }
     },
     "saturation": {
-      "rgb_initial": 0.65,
-      "composition_target": 0.70,
-      "hue_selective": false,
-      "max_p90": 0.60
+      "rgb_initial": 0.70,
+      "composition_target": 0.80,
+      "hue_selective": true,
+      "blue_boost": 1.30,
+      "max_p90": 0.75
+    },
+    "burn": {
+      "max_bright_block_pct": 5.0
     },
     "stars": {
       "screen_blend_strength": 1.00,
       "prominence": "subdued"
     },
-    "notes": "Many small galaxies — each needs to be visible. Dark background essential. Bold saturation to show galaxy color differences. SCNR often needed.",
-    "learned_overrides": {}
+    "notes": "Many small galaxies — each needs to be visible with distinct colors (blue spirals, golden ellipticals). Push saturation HARD — blue galaxies must look blue. Dark background essential. HDRMT with medianTransform is the primary detail tool — push layers and iterations. LHE on individual galaxies through tight masks.",
+    "learned_overrides": {
+      "hdrmt_median_transform": true,
+      "push_blue_saturation": true
+    }
   },
 
   "emission_nebula": {
-    "description": "Bright emission nebula. M42, NGC 7000, Rosette, IC 1396, Crescent",
+    "description": "Bright emission nebula. M42, NGC 7000, Rosette, IC 1396, Crescent, Bubble",
     "characteristics": {
       "typical_size": "large",
       "dynamic_range": "high",
@@ -215,8 +234,8 @@
       "star_density": "dense"
     },
     "stretch": {
-      "target_median": 0.14,
-      "headroom": 0.05
+      "target_median": 0.10,
+      "headroom": 0.08
     },
     "tools": {
       "GC": { "use": true },
@@ -226,8 +245,9 @@
       "SCNR": { "use": "try", "reason": "Emission nebulae often have green excess" },
       "NXT": { "use": true, "denoise_linear": 0.20, "denoise_post_stretch": 0.25 },
       "SXT": { "use": true, "safe": true },
-      "LHE": { "use": true, "start_amount": 0.25, "start_radius": 96, "mask_blur": 10, "mask_clipLow": 0.06 },
-      "HDRMT": { "use": "try", "inverted": false, "layers": 6, "iterations": 2, "reason": "Normal mode to compress bright cores (M42). Try on bright regions only." },
+      "LHE": { "use": "avoid_on_shells", "start_amount": 0.25, "start_radius": 96, "mask_blur": 10, "mask_clipLow": 0.06, "reason": "LHE pushes shell brightness causing clamp→flatten cycle. Use shell_detail_enhance for bright shell nebulae." },
+      "shell_detail_enhance": { "use": true, "medium_amount": 1.0, "large_amount": 0.5, "reason": "Brightness-neutral detail enhancement for emission shells. Preferred over LHE/multi_scale_enhance." },
+      "HDRMT": { "use": "try", "inverted": false, "layers": 6, "iterations": 2, "reason": "Normal mode to compress bright cores (M42). Try on bright regions only. May trigger ringing on shell structures." },
       "LRGB": { "use": true, "lightness": 0.50, "saturation": 0.50 },
       "Ha_injection": { "use": true, "strength": 0.40, "reason": "Ha is primary signal for emission nebulae" }
     },
@@ -237,12 +257,26 @@
       "hue_selective": false,
       "max_p90": 0.75
     },
-    "stars": {
-      "screen_blend_strength": 0.85,
-      "prominence": "subdued"
+    "burn": {
+      "max_bright_block_pct": 2.0
     },
-    "notes": "Color is the primary value. Ha strongly enhances. Bright cores may need HDRMT in normal (non-inverted) mode. Filament structure is the detail target.",
-    "learned_overrides": {}
+    "detail": {
+      "preferred_tool": "shell_detail_enhance",
+      "reason": "LHE (multi_scale_enhance) pushes shell brightness causing highlight compression cycle"
+    },
+    "highlight_texture": {
+      "min_retention": 0.40,
+      "warn_retention": 0.60
+    },
+    "stars": {
+      "screen_blend_strength": 0.95,
+      "prominence": "balanced"
+    },
+    "notes": "Color is the primary value. Ha strongly enhances. Use shell_detail_enhance for bright shells — LHE causes perceptual burn from highlight compression. Use create_adaptive_zone_masks for zone-based processing. Lower stretch target (0.10) gives headroom for Ha injection. Filament structure is the detail target.",
+    "learned_overrides": {
+      "prefer_shell_detail_enhance": true,
+      "lower_stretch_for_headroom": true
+    }
   },
 
   "reflection_nebula": {
@@ -276,6 +310,9 @@
       "composition_target": 0.65,
       "hue_selective": false,
       "max_p90": 0.55
+    },
+    "burn": {
+      "max_bright_block_pct": 1.0
     },
     "stars": {
       "screen_blend_strength": 1.00,
@@ -317,6 +354,9 @@
       "hue_selective": false,
       "max_p90": 0.55
     },
+    "burn": {
+      "max_bright_block_pct": 2.0
+    },
     "stars": {
       "screen_blend_strength": 1.00,
       "prominence": "balanced"
@@ -356,6 +396,9 @@
       "composition_target": 0.75,
       "hue_selective": true,
       "max_p90": 0.70
+    },
+    "burn": {
+      "max_bright_block_pct": 2.0
     },
     "stars": {
       "screen_blend_strength": 0.80,
@@ -397,6 +440,9 @@
       "hue_selective": false,
       "max_p90": 0.55
     },
+    "burn": {
+      "max_bright_block_pct": 8.0
+    },
     "stars": {
       "screen_blend_strength": 1.00,
       "prominence": "prominent"
@@ -436,6 +482,9 @@
       "composition_target": 0.70,
       "hue_selective": false,
       "max_p90": 0.55
+    },
+    "burn": {
+      "max_bright_block_pct": 8.0
     },
     "stars": {
       "screen_blend_strength": 1.00,
@@ -477,6 +526,9 @@
       "hue_selective": false,
       "max_p90": 0.55
     },
+    "burn": {
+      "max_bright_block_pct": 8.0
+    },
     "stars": {
       "screen_blend_strength": 1.00,
       "prominence": "prominent"
@@ -516,6 +568,9 @@
       "composition_target": 0.65,
       "hue_selective": false,
       "max_p90": 0.60
+    },
+    "burn": {
+      "max_bright_block_pct": 3.0
     },
     "stars": {
       "screen_blend_strength": 0.90,

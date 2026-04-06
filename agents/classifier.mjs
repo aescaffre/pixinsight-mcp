@@ -57,7 +57,7 @@ const KNOWN_OBJECTS = {
   'IC1848': 'emission_nebula', 'M16': 'emission_nebula',
   'M17': 'emission_nebula', 'M20': 'emission_nebula',
   'NGC2024': 'emission_nebula', 'NGC1499': 'emission_nebula',
-  'Crescent': 'emission_nebula', 'Bubble': 'emission_nebula',
+  'Crescent': 'emission_nebula', 'Bubble': 'emission_nebula', 'NGC7635': 'emission_nebula',
   'IC5070': 'emission_nebula', 'NGC6820': 'emission_nebula',
   'SH2': 'emission_nebula',
   // Reflection nebulae

@@ -1,14 +1,14 @@
 {
   "version": 2,
-  "name": "NGC 7635 Bubble Nebula HaRGB — LLM Agentic Pipeline",
+  "name": "NGC 7635 Bubble Nebula RGB-only — LLM Agentic Pipeline",
   "files": {
     "sourceFolder": "/Users/aescaffre/Downloads/SynologyDrive/Output/master/CLAUDE",
     "L": "",
     "R": "/Users/aescaffre/Downloads/SynologyDrive/Output/master/CLAUDE/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-R_mono_autocrop.xisf",
     "G": "/Users/aescaffre/Downloads/SynologyDrive/Output/master/CLAUDE/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-V_mono_autocrop.xisf",
     "B": "/Users/aescaffre/Downloads/SynologyDrive/Output/master/CLAUDE/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-B_mono_autocrop.xisf",
-    "Ha": "/Users/aescaffre/Downloads/SynologyDrive/Output/master/CLAUDE/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-HAlpha_mono.xisf",
-    "outputDir": "/Users/aescaffre/Downloads/SynologyDrive/Output/master/CLAUDE/agentic",
-    "targetName": "NGC7635"
+    "Ha": "",
+    "outputDir": "/Users/aescaffre/Downloads/SynologyDrive/Output/master/CLAUDE/agentic/rgb_only",
+    "targetName": "NGC7635_RGB"
   }
 }

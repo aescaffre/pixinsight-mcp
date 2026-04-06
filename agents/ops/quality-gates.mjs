@@ -129,13 +129,28 @@ export async function checkStarQuality(ctx, viewId) {
     colorDivs.sort(function(a, b) { return a - b; });
     var medColorDiv = colorDivs.length > 0 ? colorDivs[Math.floor(colorDivs.length / 2)] : 0;
 
+    // Star brightness: collect peak luminance values for all detected stars
+    var starPeaks = [];
+    for (var si = 0; si < topStars.length; si++) {
+      starPeaks.push(topStars[si].peak);
+    }
+    starPeaks.sort(function(a, b) { return a - b; });
+    var medianPeak = starPeaks.length > 0 ? starPeaks[Math.floor(starPeaks.length / 2)] : 0;
+    var p25Peak = starPeaks.length >= 4 ? starPeaks[Math.floor(starPeaks.length * 0.25)] : medianPeak;
+    var starBgContrast = bgMedian > 0.001 ? medianPeak / bgMedian : 0;
+
     JSON.stringify({
       starsFound: stars.length,
       starsMeasured: fwhms.length,
       medianFWHM: medFWHM,
       colorDiversity: medColorDiv,
       fwhms: fwhms.slice(0, 10),
-      colorDivs: colorDivs.slice(0, 10)
+      colorDivs: colorDivs.slice(0, 10),
+      medianPeak: medianPeak,
+      p25Peak: p25Peak,
+      bgMedian: bgMedian,
+      starBgContrast: starBgContrast,
+      starPeaks: starPeaks.slice(0, 10)
     });
   `);
 
@@ -155,13 +170,19 @@ export async function checkStarQuality(ctx, viewId) {
   const fwhmPass = data.medianFWHM <= 8.0;
   const colorPass = data.colorDiversity > 0.05;
   const countPass = data.starsFound >= 50; // minimum star presence
-  const pass = fwhmPass && colorPass && countPass;
+
+  // Star brightness: star-to-background contrast ratio
+  // Prominent: ≥ 4.0, Balanced: ≥ 3.0, Subdued: ≥ 2.0
+  const brightnessPass = data.starBgContrast >= 3.0;
+
+  const pass = fwhmPass && colorPass && countPass && brightnessPass;
 
   const details = [];
   if (!fwhmPass) details.push(`Stars bloated: median FWHM=${data.medianFWHM.toFixed(2)}px (limit: 8.0px)`);
   if (!colorPass) details.push(`Stars colorless: diversity=${data.colorDiversity.toFixed(3)} (limit: 0.05)`);
   if (!countPass) details.push(`Too few stars: ${data.starsFound} found (minimum: 50) — stars may be missing or over-reduced`);
-  if (pass) details.push(`Stars OK: FWHM=${data.medianFWHM.toFixed(2)}px, color=${data.colorDiversity.toFixed(3)}, count=${data.starsFound}`);
+  if (!brightnessPass) details.push(`Stars too dim: contrast=${data.starBgContrast.toFixed(1)}× vs background (limit: 3.0×), median peak=${data.medianPeak.toFixed(3)}, bg=${data.bgMedian.toFixed(4)}`);
+  if (pass) details.push(`Stars OK: FWHM=${data.medianFWHM.toFixed(2)}px, color=${data.colorDiversity.toFixed(3)}, count=${data.starsFound}, brightness=${data.starBgContrast.toFixed(1)}× bg`);
 
   return {
     pass,
@@ -169,9 +190,14 @@ export async function checkStarQuality(ctx, viewId) {
     colorDiversity: data.colorDiversity,
     starsFound: data.starsFound,
     starsMeasured: data.starsMeasured,
+    medianPeak: data.medianPeak,
+    p25Peak: data.p25Peak,
+    bgMedian: data.bgMedian,
+    starBgContrast: data.starBgContrast,
     details: details.join('; '),
     fwhmSamples: data.fwhms,
-    colorSamples: data.colorDivs
+    colorSamples: data.colorDivs,
+    peakSamples: data.starPeaks
   };
 }
 
@@ -1034,6 +1060,313 @@ export async function checkTonalPresence(ctx, viewId, category) {
     starlike_rejected: data.starlike_rejected,
     category_metrics,
     details: details.join(' '),
+  };
+}
+
+/**
+ * Check highlight texture: detects perceptual burn — bright subject zones
+ * where internal tonal variation has collapsed into a featureless plateau.
+ *
+ * Primary signal: RELATIVE texture retention vs a reference checkpoint.
+ * Secondary: absolute heuristics (advisory only, never blocking alone).
+ *
+ * @param {object} ctx - Bridge context
+ * @param {string} viewId - Current image to assess
+ * @param {object} opts
+ * @param {string} opts.referenceId - Pre-operation clone/view for comparison (required for blocking)
+ * @param {object} opts.roi - { cx, cy, radius } from locateSubjectROI (computed internally if omitted)
+ * @returns {object} { pass, verdict, textureRetention, spanRetention, gradientRetention, current, reference, roi, details }
+ */
+export async function checkHighlightTexture(ctx, viewId, opts = {}) {
+  const refId = opts.referenceId || null;
+
+  // Measure function that runs on a single view within an ROI
+  async function measureShellTexture(vid) {
+    const r = await ctx.pjsr(`
+      var w = ImageWindow.windowById('${vid}');
+      if (w.isNull) throw new Error('checkHighlightTexture: view not found: ${vid}');
+      var img = w.mainView.image;
+      var isColor = img.isColor;
+      var W = img.width, H = img.height;
+
+      function getLum(px, py) {
+        if (isColor) {
+          return 0.2126 * img.sample(px, py, 0) + 0.7152 * img.sample(px, py, 1) + 0.0722 * img.sample(px, py, 2);
+        }
+        return img.sample(px, py);
+      }
+
+      // Background stats
+      var bgMedian = img.median();
+      var sampleStep = 32;
+      var diffs = [];
+      for (var y = 0; y < H; y += sampleStep) {
+        for (var x = 0; x < W; x += sampleStep) {
+          diffs.push(Math.abs(getLum(x, y) - bgMedian));
+        }
+      }
+      diffs.sort(function(a, b) { return a - b; });
+      var bgMAD = diffs[Math.floor(diffs.length / 2)];
+      var subjectThreshold = bgMedian + 5 * bgMAD;
+
+      // ROI: use provided or compute from subject centroid
+      var roiCx = ${opts.roi?.cx ?? -1};
+      var roiCy = ${opts.roi?.cy ?? -1};
+      var roiR = ${opts.roi?.radius ?? -1};
+
+      if (roiCx < 0) {
+        // Compute ROI from subject centroid
+        var step = 8, probeD = 3;
+        var swx = 0, swy = 0, sw = 0, sc = 0, totalS = 0;
+        var coords = [];
+        for (var y = step; y < H - step; y += step) {
+          for (var x = step; x < W - step; x += step) {
+            totalS++;
+            var lum = getLum(x, y);
+            if (lum > subjectThreshold) {
+              var bn = 0;
+              if (x - probeD >= 0 && getLum(x - probeD, y) > subjectThreshold) bn++;
+              if (x + probeD < W && getLum(x + probeD, y) > subjectThreshold) bn++;
+              if (y - probeD >= 0 && getLum(x, y - probeD) > subjectThreshold) bn++;
+              if (y + probeD < H && getLum(x, y + probeD) > subjectThreshold) bn++;
+              if (bn >= 2) {
+                swx += x * lum; swy += y * lum; sw += lum; sc++;
+                coords.push(x * 65536 + y);
+              }
+            }
+          }
+        }
+        roiCx = sw > 0 ? Math.round(swx / sw) : Math.round(W / 2);
+        roiCy = sw > 0 ? Math.round(swy / sw) : Math.round(H / 2);
+        // Compute 90th-percentile radius
+        var dists = [];
+        for (var i = 0; i < coords.length; i++) {
+          var sx = Math.floor(coords[i] / 65536);
+          var sy = coords[i] % 65536;
+          var dx2 = sx - roiCx, dy2 = sy - roiCy;
+          dists.push(Math.sqrt(dx2*dx2 + dy2*dy2));
+        }
+        dists.sort(function(a,b){return a-b;});
+        roiR = dists.length > 0 ? dists[Math.floor(dists.length*0.90)] : Math.min(W,H)/4;
+        roiR = Math.max(50, Math.min(roiR, Math.min(W,H)*0.45));
+        roiR = Math.round(roiR);
+      }
+
+      // Collect subject pixels within ROI, identify bright shell zone
+      var roiSubject = [];
+      var step2 = 4;
+      for (var y = Math.max(0, roiCy - roiR); y < Math.min(H, roiCy + roiR); y += step2) {
+        for (var x = Math.max(0, roiCx - roiR); x < Math.min(W, roiCx + roiR); x += step2) {
+          var dx = x - roiCx, dy = y - roiCy;
+          if (dx*dx + dy*dy > roiR*roiR) continue;
+          var lum = getLum(x, y);
+          if (lum > subjectThreshold) {
+            roiSubject.push(lum);
+          }
+        }
+      }
+      roiSubject.sort(function(a,b){return a-b;});
+
+      if (roiSubject.length < 100) {
+        JSON.stringify({ error: 'too_few_subject_pixels', count: roiSubject.length,
+          roiCx: roiCx, roiCy: roiCy, roiR: roiR });
+      } else {
+        // Shell zone: P20 to P92 of subject pixels within ROI
+        var shellLow = roiSubject[Math.floor(roiSubject.length * 0.20)];
+        var shellHigh = roiSubject[Math.floor(roiSubject.length * 0.92)];
+
+        // 1. Local stddev in 16x16 blocks within shell zone
+        var blockSize = 16;
+        var blockStdDevs = [];
+        for (var by = Math.max(0, roiCy - roiR); by < Math.min(H - blockSize, roiCy + roiR); by += blockSize) {
+          for (var bx = Math.max(0, roiCx - roiR); bx < Math.min(W - blockSize, roiCx + roiR); bx += blockSize) {
+            // Check if block center is in ROI
+            var bcx = bx + blockSize/2, bcy = by + blockSize/2;
+            var ddx = bcx - roiCx, ddy = bcy - roiCy;
+            if (ddx*ddx + ddy*ddy > roiR*roiR) continue;
+            // Collect block luminances, count shell pixels
+            var bVals = [];
+            var shellCount = 0;
+            for (var py = by; py < by + blockSize; py += 2) {
+              for (var px = bx; px < bx + blockSize; px += 2) {
+                if (px >= W || py >= H) continue;
+                var l = getLum(px, py);
+                bVals.push(l);
+                if (l >= shellLow && l <= shellHigh) shellCount++;
+              }
+            }
+            // Only use blocks with ≥40% shell pixels
+            if (shellCount < bVals.length * 0.40) continue;
+            // Compute stddev
+            var sum = 0, sum2 = 0;
+            for (var k = 0; k < bVals.length; k++) {
+              sum += bVals[k];
+              sum2 += bVals[k] * bVals[k];
+            }
+            var mean = sum / bVals.length;
+            var variance = sum2 / bVals.length - mean * mean;
+            if (variance > 0) {
+              blockStdDevs.push(Math.sqrt(variance));
+            }
+          }
+        }
+        blockStdDevs.sort(function(a,b){return a-b;});
+        var shellLocalStdDev = blockStdDevs.length > 0
+          ? blockStdDevs[Math.floor(blockStdDevs.length / 2)] : 0;
+
+        // 2. Tonal span: P90 - P10 of shell-zone pixels
+        var shellPixels = [];
+        for (var i = 0; i < roiSubject.length; i++) {
+          if (roiSubject[i] >= shellLow && roiSubject[i] <= shellHigh) {
+            shellPixels.push(roiSubject[i]);
+          }
+        }
+        shellPixels.sort(function(a,b){return a-b;});
+        var shellTonalSpan = shellPixels.length > 10
+          ? shellPixels[Math.floor(shellPixels.length * 0.90)]
+            - shellPixels[Math.floor(shellPixels.length * 0.10)]
+          : 0;
+
+        // 3. Gradient energy (Sobel) restricted to shell zone within ROI
+        var gradEnergy = 0, gradCount = 0;
+        var gStep = 4;
+        for (var y = Math.max(1, roiCy - roiR); y < Math.min(H-1, roiCy + roiR); y += gStep) {
+          for (var x = Math.max(1, roiCx - roiR); x < Math.min(W-1, roiCx + roiR); x += gStep) {
+            var ddx2 = x - roiCx, ddy2 = y - roiCy;
+            if (ddx2*ddx2 + ddy2*ddy2 > roiR*roiR) continue;
+            var cl = getLum(x, y);
+            if (cl < shellLow || cl > shellHigh) continue;
+            var tl = getLum(x-1,y-1), tc = getLum(x,y-1), tr = getLum(x+1,y-1);
+            var ml = getLum(x-1,y),                        mr = getLum(x+1,y);
+            var bl = getLum(x-1,y+1), bc = getLum(x,y+1), br = getLum(x+1,y+1);
+            var gx = -tl + tr - 2*ml + 2*mr - bl + br;
+            var gy = -tl - 2*tc - tr + bl + 2*bc + br;
+            gradEnergy += gx*gx + gy*gy;
+            gradCount++;
+          }
+        }
+        var shellGradientEnergy = gradCount > 0 ? gradEnergy / gradCount : 0;
+
+        JSON.stringify({
+          shellLocalStdDev: shellLocalStdDev,
+          shellTonalSpan: shellTonalSpan,
+          shellGradientEnergy: shellGradientEnergy,
+          shellPixelCount: shellPixels.length,
+          blockCount: blockStdDevs.length,
+          shellZone: { low: shellLow, high: shellHigh },
+          roi: { cx: roiCx, cy: roiCy, radius: roiR },
+          bgMedian: bgMedian
+        });
+      }
+    `);
+
+    if (r.status === 'error') {
+      return { error: r.error?.message || 'PJSR error' };
+    }
+    try {
+      return JSON.parse(r.outputs?.consoleOutput || '{}');
+    } catch {
+      return { error: 'Parse failed' };
+    }
+  }
+
+  // Measure current view
+  const current = await measureShellTexture(viewId);
+  if (current.error) {
+    const isTooFew = current.error === 'too_few_subject_pixels';
+    return {
+      pass: true, // Don't block on measurement failure
+      verdict: 'unmeasurable',
+      details: isTooFew
+        ? `Too few subject pixels (${current.count}) in ROI for texture measurement — advisory only`
+        : `Measurement error: ${current.error}`,
+      current: null, reference: null, roi: current
+    };
+  }
+
+  // Cache ROI from current measurement for reference
+  const roi = current.roi;
+
+  // Measure reference if provided
+  let reference = null;
+  let retention = {};
+  if (refId) {
+    reference = await measureShellTexture(refId);
+    if (reference.error) {
+      reference = null;
+    }
+  }
+
+  // Compute retention ratios
+  if (reference && !reference.error) {
+    retention.texture = reference.shellLocalStdDev > 0.0001
+      ? current.shellLocalStdDev / reference.shellLocalStdDev : 1.0;
+    retention.span = reference.shellTonalSpan > 0.001
+      ? current.shellTonalSpan / reference.shellTonalSpan : 1.0;
+    retention.gradient = reference.shellGradientEnergy > 0.0001
+      ? current.shellGradientEnergy / reference.shellGradientEnergy : 1.0;
+  }
+
+  // Verdict logic
+  let pass, verdict;
+  const details = [];
+
+  if (reference && !reference.error) {
+    // RELATIVE mode (primary, can be blocking)
+    const worstRetention = Math.min(retention.texture ?? 1.0, retention.span ?? 1.0);
+    if (worstRetention < 0.40) {
+      pass = false;
+      verdict = 'collapsed';
+      details.push(`HIGHLIGHT TEXTURE COLLAPSED: worst retention=${(worstRetention * 100).toFixed(0)}% (limit: 40%). ` +
+        `texture=${(retention.texture * 100).toFixed(0)}%, span=${(retention.span * 100).toFixed(0)}%, gradient=${((retention.gradient ?? 1) * 100).toFixed(0)}%. ` +
+        `Restore pre-operation checkpoint and use less destructive processing.`);
+    } else if (worstRetention < 0.60) {
+      pass = true; // Warning, not blocking
+      verdict = 'degraded';
+      details.push(`Highlight texture degraded: retention=${(worstRetention * 100).toFixed(0)}% (warning at 60%). ` +
+        `Consider gentler processing.`);
+    } else {
+      pass = true;
+      verdict = 'preserved';
+      details.push(`Highlight texture preserved: retention=${(worstRetention * 100).toFixed(0)}%.`);
+    }
+  } else {
+    // ADVISORY-ONLY mode (no reference, never blocking)
+    pass = true;
+    verdict = current.shellLocalStdDev < 0.010 ? 'low_advisory' : 'ok_advisory';
+    details.push(`Highlight texture (advisory, no reference): localStdDev=${current.shellLocalStdDev.toFixed(4)}` +
+      ` (heuristic floor: 0.010), tonalSpan=${current.shellTonalSpan.toFixed(3)}` +
+      ` (heuristic floor: 0.05).`);
+    if (current.shellLocalStdDev < 0.010) {
+      details.push(`Advisory: localStdDev is very low — bright shell may lack visible texture. ` +
+        `Provide a reference_id for blocking assessment.`);
+    }
+  }
+
+  // Add absolute context
+  details.push(`Shell zone [${current.shellZone.low.toFixed(3)}–${current.shellZone.high.toFixed(3)}], ` +
+    `${current.shellPixelCount} pixels, ${current.blockCount} blocks measured.`);
+
+  return {
+    pass,
+    verdict,
+    mode: reference ? 'relative' : 'advisory',
+    textureRetention: retention.texture ?? null,
+    spanRetention: retention.span ?? null,
+    gradientRetention: retention.gradient ?? null,
+    current: {
+      shellLocalStdDev: current.shellLocalStdDev,
+      shellTonalSpan: current.shellTonalSpan,
+      shellGradientEnergy: current.shellGradientEnergy,
+    },
+    reference: reference ? {
+      shellLocalStdDev: reference.shellLocalStdDev,
+      shellTonalSpan: reference.shellTonalSpan,
+      shellGradientEnergy: reference.shellGradientEnergy,
+    } : null,
+    roi,
+    shellZone: current.shellZone,
+    details: details.join(' ')
   };
 }
 

@@ -55,7 +55,7 @@ let traceSeq = 0;
 const traceFile = storeBaseDir ? path.join(storeBaseDir, 'trace.jsonl') : null;
 
 // State machine governs tool access per phase
-const stateMachine = createStateMachine(200);
+const stateMachine = createStateMachine(250);
 
 // Provenance: track last composition/processing tool per view
 const viewProvenance = new Map();
@@ -228,7 +228,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     // === REPAIR POLICY: detect gate failures that need structured repair ===
     let repairGuidance = '';
-    if (['check_saturation', 'scan_burnt_regions', 'check_star_quality', 'check_tonal_presence'].includes(name)) {
+    if (['check_saturation', 'scan_burnt_regions', 'check_star_quality', 'check_tonal_presence', 'check_highlight_texture'].includes(name)) {
       const isFail = resultText.includes('FAIL') || resultText.includes('REJECTED');
       if (isFail && stateMachine.state !== 'repair') {
         const prov = viewProvenance.get(viewId || args?.view_id);
@@ -316,3 +316,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 // Start
 const transport = new StdioServerTransport();
 await server.connect(transport);
+
+// Auto-exit when parent process disconnects (stdin closes)
+process.stdin.on('end', () => {
+  process.stderr.write('[mcp] stdin closed — parent exited. Shutting down.\n');
+  process.exit(0);
+});
+process.stdin.on('error', () => {
+  process.exit(0);
+});
