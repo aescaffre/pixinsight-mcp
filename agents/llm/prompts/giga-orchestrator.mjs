@@ -198,7 +198,7 @@ Use \`check_tonal_presence\` on composition candidates BEFORE star blend.
 - Low ROI confidence → advisory only (few subject pixels detected)
 - This catches images that are technically safe but emotionally flat — a dim galaxy that passes brightness gate but doesn't STAND OUT from the background
 
-${brief.target.classification.includes('emission') || brief.target.fieldCharacteristics?.structuralZones === 'multi_zone' ? `
+${brief.target.classification.includes('emission') || brief.target.classification.includes('planetary') || brief.target.fieldCharacteristics?.structuralZones === 'multi_zone' ? `
 ### ${hasHa ? '7' : '6'}. HIGHLIGHT TEXTURE — SHELL DETAIL MUST SURVIVE PROCESSING
 Bright emission shells can appear "burnt" at moderate brightness (0.40–0.73) if internal
 tonal variation has collapsed into a featureless plateau. This is **perceptual burn**.
@@ -336,7 +336,42 @@ Do NOT accept a branch result where subjects are dim blobs. The numbers tell you
 Generate separate candidate sets. Each branch works from stable parent, NOT from mutation chain.
 
 ## BRANCH A — DETAIL ENHANCEMENT
-${brief.target.classification.includes('emission') ? `
+${brief.target.classification === 'planetary_nebula' ? `
+**THIS IS A PLANETARY NEBULA. Branch A uses BOTH detail tools competitively.**
+
+PNe have bright emission shells (risk of LHE highlight compression) BUT also need
+strong subject brightness to pass the tonal presence gate (separation ≥ 3×).
+Generate 2+2 candidates using BOTH tools. Compare, then DEEPEN the winning approach.
+
+**PHASE 1: Two shell_detail_enhance candidates (brightness-neutral, texture-safe):**
+1. Clone baseline → \`shell_detail_enhance(medium_amount=0.8, large_amount=0.4)\`
+   → \`measure_subject_detail\` + \`check_highlight_texture(reference_id=<auto from tool return>)\`
+   → \`scan_burnt_regions\` → \`save_variant\` as "detail_shell_restrained"
+2. Clone baseline → \`shell_detail_enhance(medium_amount=1.5, large_amount=0.8)\`
+   → same measurement chain → \`save_variant\` as "detail_shell_target"
+
+**PHASE 2: Two multi_scale_enhance candidates (LHE, stronger contrast push):**
+3. Clone baseline → \`multi_scale_enhance(lhe_large_amount=0.35, lhe_mid_amount=0.35, lhe_fine_amount=0.25, mask_clip_low=0.10, do_hdrmt=false)\`
+   → \`measure_subject_detail\` + \`check_highlight_texture(reference_id=<auto from tool return>)\`
+   → \`scan_burnt_regions\` → clamp if burns → \`save_variant\` as "detail_lhe_target"
+4. Clone baseline → \`multi_scale_enhance(lhe_large_amount=0.45, lhe_mid_amount=0.45, lhe_fine_amount=0.35, mask_clip_low=0.10, do_hdrmt=true, hdrmt_layers=5)\`
+   → same chain → \`save_variant\` as "detail_lhe_edge"
+
+Both tools now auto-create a pre-detail reference clone. The tool return includes \`referenceCloneId\`.
+Pass it to \`check_highlight_texture(reference_id=<referenceCloneId>)\` for RELATIVE texture comparison.
+
+**PHASE 3: Compare and deepen the winner.**
+Compare all 4 candidates on: detail score improvement, texture retention, subject brightness.
+- If shell_detail wins on texture AND detail: deepen with 1-2 more shell_detail candidates (amounts 1.0, 2.0)
+- If multi_scale wins on detail AND brightness: deepen with 1-2 more LHE candidates (amounts 0.40, 0.55)
+- Save the overdone boundary from the winning branch.
+
+Required: at least 4 initial candidates (2+2), then 1-2 deepening. Total 5-6 variants.
+
+**CRITICAL**: After each candidate, \`check_highlight_texture\` with the auto-created reference.
+This is what makes the comparison fair — both tools are measured on the SAME texture-retention scale.
+- **finish will REJECT if subjectBrightness < 0.25, contrastRatio < 3×, or detailScore < 0.001**
+` : brief.target.classification.includes('emission') ? `
 **THIS IS AN EMISSION NEBULA. Branch A uses \`shell_detail_enhance\`, NOT \`multi_scale_enhance\`.**
 
 \`multi_scale_enhance\` is BLOCKED for emission nebulae. It will refuse with an error.
@@ -349,27 +384,15 @@ and amplifies texture while PRESERVING the smooth brightness component.
 Brightness-neutral by design — no subsequent clamping needed.
 
 **WORKFLOW:**
-1. Clone baseline → \`create_adaptive_zone_masks\` to get shell zone mask
-2. Clone → \`shell_detail_enhance\` with conservative params (medium_amount=0.5, large_amount=0.3)
-3. Check improvement: \`measure_subject_detail\` + \`check_highlight_texture\`
-4. Clone → stronger params (medium_amount=1.0, large_amount=0.5)
+1. Clone baseline → \`shell_detail_enhance\` with conservative params (medium_amount=0.5, large_amount=0.3)
+   The tool auto-creates a pre-detail reference clone (returned as referenceCloneId).
+2. \`measure_subject_detail\` + \`check_highlight_texture(reference_id=<referenceCloneId>)\`
+3. \`scan_burnt_regions\` → \`save_variant\`
+4. Clone → stronger params (medium_amount=1.0, large_amount=0.5) → same chain
 5. Clone → edge params (medium_amount=1.5, large_amount=0.8)
 6. Clone → overdone (medium_amount=2.5, large_amount=1.5) — mark the boundary
 
-**Tuning \`shell_detail_enhance\`:**
-- medium_sigma (10-30): filament-scale detail. Default 18. Lower = finer structure.
-- medium_amount (0.3-2.5): filament boost. Start at 1.0.
-- large_sigma (35-80): regional tonal gradients. Default 55.
-- large_amount (0.0-1.5): regional boost. Start at 0.5.
-- protect_knee (default 0.80): brightness above which enhancement attenuates
-- The tool auto-creates adaptive zone masks when auto_zone=true (default)
-
-**After each candidate:** \`scan_burnt_regions\` to verify no new burns.
-The shell_detail_enhance tool should NOT create burns (it is brightness-neutral),
-but verify anyway. If burns appear, the params are too aggressive — reduce amounts.
-
 Required candidates: detail_restrained, detail_target, detail_edge, detail_overdone
-At least one must be clearly too aggressive to mark the boundary.
 
 Tools: shell_detail_enhance (PRIMARY), create_adaptive_zone_masks, clone_image, restore_from_clone,
 measure_subject_detail, check_highlight_texture, save_variant
@@ -675,20 +698,26 @@ ${hasL ? '1. Match RGB brightness to L (curves if needed), then lrgb_combine (FI
 2. Post-LRGB brightness recovery if needed (CIE L* curves)
 3. Apply IFN shadow-lift if applicable (through inverted mask for faint structure)
 4. Apply saturation
-5. \`check_tonal_presence\` — if subdued (separation <3×), apply ONE subject-masked midtone lift BEFORE stars
+5. **\`check_highlight_texture\`** — BEFORE star blend, verify bright-shell texture survived composition.
+   Clone the color branch winner BEFORE luminance replacement as "pre_comp_{comp_name}".
+   After luminance replacement + curves + saturation:
+   \`check_highlight_texture(view_id=composition, reference_id="pre_comp_{comp_name}")\`
+   If textureRetention < 60%: the luminance replacement or curves damaged shell texture.
+   Fix: reduce luminance factor, or use additive detail injection instead of multiplicative CIE Y replacement.
+6. \`check_tonal_presence\` — if subdued (separation <3×), apply ONE subject-masked midtone lift BEFORE stars
    - ROI-based deterministic measurement, not visual impression
    - Low ROI confidence = advisory only. High/medium confidence = hard fail if subdued.
    - Fix: create luminance mask → run_curves through mask → re-check tonal presence
-6. \`check_star_layer_integrity\` on star winner (PRECONDITION — blend will REFUSE without it)
+7. \`check_star_layer_integrity\` on star winner (PRECONDITION — blend will REFUSE without it)
    - FAIL (max ≥ 0.98): apply soft rolloff to star layer first, then re-check
    - Integrity record is INVALIDATED if you modify the star layer after checking
-7. \`star_protected_blend\` (auto core attenuation — reduces star contribution smoothly in bright areas)
-8. \`scan_burnt_regions\` — verify no burns after blend
+8. \`star_protected_blend\` (auto core attenuation — reduces star contribution smoothly in bright areas)
+9. \`scan_burnt_regions\` — verify no burns after blend
    - If burn detected: restore pre-star checkpoint → re-blend with lower strength. Do NOT use continuous_clamp as primary fix.
    - continuous_clamp is ONLY acceptable as secondary cleanup after re-blend has been tried
-9. \`check_tonal_presence\` — if subdued after star blend, restore pre-star checkpoint and repair upstream
-10. measure_subject_detail — verify brightness > 0.25, contrast > 3×
-11. save_variant
+10. \`check_tonal_presence\` — if subdued after star blend, restore pre-star checkpoint and repair upstream
+11. measure_subject_detail — verify brightness > 0.25, contrast > 3×
+12. save_variant
 
 # ======================================================================
 # PHASE 6 — COMPOSITION CRITIC PASS

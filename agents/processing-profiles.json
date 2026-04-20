@@ -20,8 +20,9 @@
       "SCNR": { "use": "try", "reason": "Only if SPCC fails" },
       "NXT": { "use": true, "denoise_linear": 0.20, "denoise_post_stretch": 0.25 },
       "SXT": { "use": true, "safe": true },
-      "LHE": { "use": true, "start_amount": 0.35, "start_radius": 64, "mask_blur": 8, "mask_clipLow": 0.06 },
-      "HDRMT": { "use": "core_only", "inverted": true, "layers": 5, "iterations": 1, "reason": "Apply ONLY through core zone mask — compresses core dynamic range to reveal detail. Do NOT apply globally (flattens faint structure). v7-v9 showed core burns without it." },
+      "LHE": { "use": "competitive", "start_amount": 0.35, "start_radius": 64, "mask_blur": 8, "mask_clipLow": 0.10, "reason": "Allowed in competitive PNe mode. May help tonal presence but risks highlight compression." },
+      "shell_detail_enhance": { "use": true, "medium_amount": 1.0, "large_amount": 0.5, "reason": "Brightness-neutral detail for PNe shells. Competitive with LHE — compare both." },
+      "HDRMT": { "use": "core_only", "inverted": true, "layers": 5, "iterations": 1, "reason": "Apply ONLY through core zone mask or donut mask. Do NOT apply globally." },
       "LRGB": { "use": "avoid", "reason": "v3 showed native LRGB crushes PN brightness. Use RGB-only + PixelMath L enhancement instead." },
       "Ha_injection": { "use": true, "reason": "MANDATORY for HaLRGB — enhances shell structure. Use max_output=0.85 to prevent R burning." }
     },
@@ -34,11 +35,21 @@
     "burn": {
       "max_bright_block_pct": 3.0
     },
+    "detail": {
+      "detail_mode": "competitive_pn",
+      "preferred_tool": "competitive",
+      "tools": ["shell_detail_enhance", "multi_scale_enhance"],
+      "reason": "PNe need both texture safety (shell_detail) and brightness push (LHE) for tonal presence. Evaluate competitively with 2+2 candidates."
+    },
+    "highlight_texture": {
+      "min_retention": 0.40,
+      "warn_retention": 0.60
+    },
     "stars": {
       "screen_blend_strength": 1.00,
       "prominence": "prominent"
     },
-    "notes": "Focus on revealing internal structure (eyes, shells) AND outer halo. Color is teal/blue for OIII-dominant + red/pink for Ha. OUTER HALO is a key differentiator — apply shadow-lifting curves through inverted luminance mask to make it OBVIOUSLY visible. Push OIII saturation hard (blue/teal). Background should reveal faint outer structure, not be crushed to black. RGB-only + PixelMath L enhancement preferred over native LRGB (which crushes brightness).",
+    "notes": "Focus on revealing internal structure (eyes, shells) AND outer halo. Color is teal/blue for OIII-dominant + red/pink for Ha. OUTER HALO is a key differentiator. Push OIII saturation hard. RGB-only + PixelMath L enhancement preferred over native LRGB. DETAIL: competitive mode — 2 shell_detail_enhance + 2 multi_scale_enhance candidates, compare texture retention and brightness, deepen the winner.",
     "learned_overrides": {
       "avoid_native_lrgb": true,
       "shadow_lift_mandatory": true,
