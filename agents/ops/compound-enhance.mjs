@@ -44,25 +44,6 @@ export async function multiScaleEnhance(ctx, viewId, opts = {}) {
   const hdrmtLayers = opts.hdrmtLayers ?? 5;
   const hdrmtMedian = opts.hdrmtMedianTransform !== false;
 
-  // Auto-create pre-detail reference clone for highlight-texture comparison
-  const refCloneId = `__ref_pre_detail_${viewId}`;
-  try {
-    await ctx.pjsr(`
-      var old = ImageWindow.windowById('${refCloneId}');
-      if (!old.isNull) old.forceClose();
-      var src = ImageWindow.windowById('${viewId}');
-      if (src.isNull) throw new Error('multiScaleEnhance: view not found for ref clone: ${viewId}');
-      var img = src.mainView.image;
-      var clone = new ImageWindow(img.width, img.height, img.numberOfChannels, 32, true, img.isColor, '${refCloneId}');
-      clone.mainView.beginProcess();
-      clone.mainView.image.assign(img);
-      clone.mainView.endProcess();
-      clone.hide();
-    `);
-  } catch (e) {
-    // Non-fatal — highlight texture check will fall back to advisory mode
-  }
-
   const r = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}');
     if (w.isNull) throw new Error('View not found: ${viewId}');
@@ -252,9 +233,8 @@ export async function multiScaleEnhance(ctx, viewId, opts = {}) {
     before: data.before,
     after: data.after,
     improvement: data.improvement,
-    referenceCloneId: refCloneId,
     params: data.params,
-    details: details.join(' ') + ` Reference clone: ${refCloneId} (use with check_highlight_texture)`
+    details: details.join(' ')
   };
 }
 
@@ -298,25 +278,6 @@ export async function shellDetailEnhance(ctx, viewId, opts = {}) {
   const softness = opts.protectSoftness ?? 4.0;
   const maskId = opts.maskId || null;
   const autoZone = opts.autoZone !== false;
-
-  // Auto-create pre-detail reference clone for highlight-texture comparison
-  const refCloneId = `__ref_pre_detail_${viewId}`;
-  try {
-    await ctx.pjsr(`
-      var old = ImageWindow.windowById('${refCloneId}');
-      if (!old.isNull) old.forceClose();
-      var src = ImageWindow.windowById('${viewId}');
-      if (src.isNull) throw new Error('shellDetailEnhance: view not found for ref clone: ${viewId}');
-      var img = src.mainView.image;
-      var clone = new ImageWindow(img.width, img.height, img.numberOfChannels, 32, true, img.isColor, '${refCloneId}');
-      clone.mainView.beginProcess();
-      clone.mainView.image.assign(img);
-      clone.mainView.endProcess();
-      clone.hide();
-    `);
-  } catch (e) {
-    // Non-fatal — highlight texture check will fall back to advisory mode
-  }
 
   // Auto-create shell mask if needed
   let createdMask = false;
@@ -603,11 +564,9 @@ export async function shellDetailEnhance(ctx, viewId, opts = {}) {
     stddevImprovement: data.stddevImprovement,
     maxAfter: data.maxAfter,
     protectionEngaged: data.protectionEngaged?.toFixed(1) + '%',
-    referenceCloneId: refCloneId,
     params: data.params,
     details: `Shell detail: gradient ${data.improvement > 0 ? '+' : ''}${data.improvement?.toFixed(1)}%, ` +
       `stddev ${data.stddevImprovement > 0 ? '+' : ''}${data.stddevImprovement?.toFixed(1)}%, ` +
-      `max=${data.maxAfter?.toFixed(4)}, protection engaged on ${data.protectionEngaged?.toFixed(1)}% of pixels. ` +
-      `Reference clone: ${refCloneId} (use with check_highlight_texture)`
+      `max=${data.maxAfter?.toFixed(4)}, protection engaged on ${data.protectionEngaged?.toFixed(1)}% of pixels`
   };
 }

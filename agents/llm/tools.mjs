@@ -2059,7 +2059,7 @@ const TOOL_CATALOG = {
       // Gate 9: Highlight texture — emission nebulae only
       // Detects perceptual burn (bright shell zones with collapsed tonal variation)
       const category = brief?.target?.classification || 'unknown';
-      if (category.includes('emission') || category.includes('planetary') || brief?.target?.fieldCharacteristics?.structuralZones === 'multi_zone') {
+      if (category.includes('emission') || brief?.target?.fieldCharacteristics?.structuralZones === 'multi_zone') {
         try {
           // Try to find a reference checkpoint for relative comparison
           // Look for the most recent variant tagged as pre-composition reference
@@ -2825,7 +2825,7 @@ const TOOL_CATALOG = {
     category: 'detail',
     definition: {
       name: 'multi_scale_enhance',
-      description: 'COMPOUND TOOL (GALAXY/BROADBAND): applies 3-scale masked LHE + optional HDRMT in ONE call with before/after metrics. BLOCKED for emission nebulae (use shell_detail_enhance instead). Allowed for planetary nebulae in competitive mode. Auto-creates a pre-detail reference clone (returned as referenceCloneId) for use with check_highlight_texture. Returns detail score improvement %. If improvement < 5%, adjust mask (softer clipLow) or increase amounts.',
+      description: 'COMPOUND TOOL: applies 3-scale masked LHE + optional HDRMT in ONE call with before/after metrics. Much faster than individual LHE calls. Returns detail score improvement %. Use this INSTEAD of individual run_lhe calls for detail enhancement. Call multiple times with different params to bracket. If improvement < 5%, adjust mask (softer clipLow) or increase amounts.',
       input_schema: {
         type: 'object',
         properties: {
@@ -2849,14 +2849,11 @@ const TOOL_CATALOG = {
     },
     handler: async (ctx, _store, brief, input) => {
       // POLICY BLOCK: emission nebulae must use shell_detail_enhance instead
-      // Planetary nebulae in competitive_pn mode are ALLOWED to use both tools
       const classification = brief?.target?.classification || '';
-      const detailMode = brief?.processingProfile?.detail?.detail_mode;
-      const isCompetitivePn = classification === 'planetary_nebula' && detailMode === 'competitive_pn';
-      if (classification.includes('emission') && !isCompetitivePn) {
+      if (classification.includes('emission')) {
         return {
           type: 'text',
-          text: `[BLOCKED] multi_scale_enhance is DISABLED for ${classification}. ` +
+          text: `[BLOCKED] multi_scale_enhance is DISABLED for emission nebulae. ` +
             `LHE-driven brightness amplification causes destructive highlight compression on bright shells. ` +
             `Use shell_detail_enhance instead — it enhances texture without increasing peak brightness. ` +
             `Call: shell_detail_enhance(view_id="${input.view_id}", medium_amount=1.0, large_amount=0.5)`
@@ -2886,8 +2883,7 @@ const TOOL_CATALOG = {
           `  Before: detail=${result.before.detailScore.toFixed(6)}, brightPx=${result.before.brightPixels}\n` +
           `  After:  detail=${result.after.detailScore.toFixed(6)}, brightPx=${result.after.brightPixels}\n` +
           `  Improvement: ${result.improvement > 0 ? '+' : ''}${result.improvement.toFixed(1)}%\n` +
-          `  Params: LHE fine=${result.params.lhe.fine.r}/${result.params.lhe.fine.a} mid=${result.params.lhe.mid.r}/${result.params.lhe.mid.a} large=${result.params.lhe.large.r}/${result.params.lhe.large.a} | HDRMT=${result.params.hdrmt.applied ? result.params.hdrmt.layers + 'L' : 'off'}\n` +
-          `  Reference clone: ${result.referenceCloneId} (use with check_highlight_texture)`
+          `  Params: LHE fine=${result.params.lhe.fine.r}/${result.params.lhe.fine.a} mid=${result.params.lhe.mid.r}/${result.params.lhe.mid.a} large=${result.params.lhe.large.r}/${result.params.lhe.large.a} | HDRMT=${result.params.hdrmt.applied ? result.params.hdrmt.layers + 'L' : 'off'}`
       };
     }
   },

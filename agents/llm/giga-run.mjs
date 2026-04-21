@@ -258,7 +258,7 @@ ${prepResult.views.stars ? `### Stars available: \`${prepResult.views.stars}\` (
 ### Winning Parameters from Previous Runs
 ${extractWinningParams(brief.target.classification)}
 
-${brief.target.classification.includes('emission') && brief.target.classification !== 'planetary_nebula' ? `
+${brief.target.classification.includes('emission') ? `
 ### TARGET-CLASS TOOL POLICY — READ THIS FIRST
 **This is an emission nebula. The Branch A detail tool is \`shell_detail_enhance\`.**
 \`multi_scale_enhance\` is BLOCKED for this target class — it will refuse with an error.
@@ -266,15 +266,6 @@ Reason: LHE amplifies brightness in bright shells, forcing clamping that destroy
 \`shell_detail_enhance\` enhances texture without increasing peak brightness.
 Use \`create_adaptive_zone_masks\` for zone-based processing.
 Use \`check_highlight_texture\` with reference checkpoints to verify texture preservation.
-` : brief.target.classification === 'planetary_nebula' ? `
-### TARGET-CLASS TOOL POLICY — READ THIS FIRST
-**This is a planetary nebula. Branch A uses BOTH detail tools competitively (2+2 candidates).**
-- \`shell_detail_enhance\`: brightness-neutral, preserves shell texture. Try first (2 candidates).
-- \`multi_scale_enhance\`: LHE-based, pushes brightness harder. May help tonal presence. Try second (2 candidates).
-Both tools auto-create a pre-detail reference clone (returned as \`referenceCloneId\`).
-After EACH candidate: \`check_highlight_texture(reference_id=<referenceCloneId>)\` for fair texture comparison.
-Compare results, then deepen the winning approach with 1-2 more candidates.
-Also: \`check_highlight_texture\` AFTER composition luminance replacement, BEFORE star blend.
 ` : ''}
 ## SKIP Phase 0 and Phase 1 — they are done.
 ## Begin at Phase 2: Branch Generation.
