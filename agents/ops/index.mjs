@@ -2,7 +2,7 @@
 // Barrel export for all ops modules
 // ============================================================================
 export { createBridgeContext } from './bridge.mjs';
-export { getStats, measureUniformity } from './stats.mjs';
+export { getStats, measureUniformity, measureColorGradient } from './stats.mjs';
 export { savePreview, autoStretch } from './preview.mjs';
 export { createMask, createLumMask, applyMask, removeMask, closeMask, createOiiiMask } from './masks.mjs';
 export { setiStretch, computeGHSCoefficients, buildGHSExpr, ghsCode } from './stretch.mjs';

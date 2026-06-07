@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "name": "NGC 3628 Hamburger Galaxy LRGB — LLM Agentic Pipeline",
+  "files": {
+    "sourceFolder": "/Volumes/Extension/NGC3628/agentic",
+    "L": "/Volumes/Extension/NGC3628/agentic/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-L_mono_autocrop.xisf",
+    "R": "/Volumes/Extension/NGC3628/agentic/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-R_mono_autocrop.xisf",
+    "G": "/Volumes/Extension/NGC3628/agentic/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-V_mono_autocrop.xisf",
+    "B": "/Volumes/Extension/NGC3628/agentic/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-B_mono_autocrop.xisf",
+    "Ha": "",
+    "outputDir": "/Volumes/Extension/NGC3628/agentic/output",
+    "targetName": "NGC3628"
+  }
+}

@@ -202,26 +202,22 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
   }
 
   // ========================================================================
-  // CACHE CHECK — skip all processing if inputs haven't changed
+  // PHASE 1 CACHE — only the deterministic open/align/combine is cached.
+  // Gradient correction (agentic, via opts.onAfterCombine) + SPCC/stretch/etc
+  // run fresh every time, so gradient scale decisions can vary per run.
   // ========================================================================
   const cacheKey = computeCacheKey(config, brief);
-  log(`\n[PREP] Cache key: ${cacheKey}`);
+  const phase1Key = cacheKey + '_p1';
+  log(`\n[PREP] Cache key: ${cacheKey} (phase 1: ${phase1Key})`);
 
-  const cached = await loadFromCache(ctx, config, cacheKey, log);
-  if (cached) {
-    log('[PREP] === LOADED FROM CACHE (skipped all processing) ===');
-    // Re-gather live stats from the loaded views
-    cached.stats = {};
-    if (cached.views.rgb) cached.stats.rgb = await getStats(ctx, cached.views.rgb);
-    if (cached.views.l) cached.stats.l = await getStats(ctx, cached.views.l);
-    if (cached.views.ha) cached.stats.ha = await getStats(ctx, cached.views.ha);
-    log(`  RGB: ${cached.views.rgb} (median=${cached.stats.rgb?.median?.toFixed(4) || 'N/A'})`);
-    if (cached.views.l) log(`  L: ${cached.views.l} (median=${cached.stats.l?.median?.toFixed(4) || 'N/A'})`);
-    if (cached.views.ha) log(`  Ha: ${cached.views.ha} (median=${cached.stats.ha?.median?.toFixed(4) || 'N/A'})`);
-    if (cached.views.stars) log(`  Stars: ${cached.views.stars}`);
-    return cached;
+  let phase1FromCache = false;
+  const p1cached = await loadFromCache(ctx, config, phase1Key, log);
+  if (p1cached) {
+    log('[PREP] === PHASE 1 LOADED FROM CACHE (open/align/combine skipped) ===');
+    phase1FromCache = true;
+  } else {
+    log('[PREP] Phase 1 cache MISS — running open/align/combine...');
   }
-  log('[PREP] Cache MISS — running full prep...');
 
   // Helper: run PJSR and abort on error
   async function pjsrOrDie(script, stepName) {
@@ -239,6 +235,8 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     previews: {},
   };
 
+  // ===== PHASE 1 (cacheable): open / align / combine RGB =====
+  if (!phase1FromCache) {
   // ========================================================================
   // STEP 0: Close ALL open images — start clean
   // ========================================================================
@@ -394,16 +392,38 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     await ctx.pjsr(`var w=ImageWindow.windowById('${id}');if(!w.isNull)w.forceClose();`).catch(() => {});
   }
 
+    // ====================================================================
+    // Save PHASE 1 cache: linear combined RGB (+ linear L). NO gradient yet.
+    // ====================================================================
+    const p1result = { targetName, views: { rgb: targetName } };
+    if (hasL) p1result.views.l = 'FILTER_L';
+    log('\n[PREP] Saving phase 1 cache (linear combined RGB + L)...');
+    try { await saveToCache(ctx, config, phase1Key, p1result, log); }
+    catch (e) { log(`  Phase 1 cache save failed (non-fatal): ${e.message}`); }
+  } // ===== end PHASE 1 =====
+
   // ========================================================================
-  // STEP 4: Linear processing on RGB
+  // GRADIENT CORRECTION — agentic (onAfterCombine hook) or default.
+  // Runs on the LINEAR combined RGB (+ L) BEFORE SPCC/stretch, where gradients
+  // bias color calibration and get amplified by the stretch.
+  // ========================================================================
+  if (opts.onAfterCombine) {
+    log('\n[PREP] === Gradient phase: handing linear views to agent ===');
+    await opts.onAfterCombine({ ctx, targetName, hasL, hasHa, rgbTarget });
+  } else {
+    log('\n[PREP] Default gradient correction (GC on RGB, GC on L)...');
+    await runGC(ctx, targetName);
+    if (hasL) await runGC(ctx, 'FILTER_L');
+  }
+
+  // ========================================================================
+  // STEP 4: Linear processing on RGB (gradient already corrected above)
   // ========================================================================
   log('\n[PREP] Step 4: Linear processing on RGB...');
 
-  // GC
-  log('  GC...');
-  await runGC(ctx, targetName);
-
-  // Background neutralization (immediately after GC, before BXT)
+  // Background neutralization — always once, after gradient correction, before
+  // SPCC (SPCC wants a neutral background reference). Runs in both the agentic
+  // and default gradient paths.
   log('  Background neutralization...');
   await ctx.pjsr(`
     var P=new BackgroundNeutralization;
@@ -598,13 +618,7 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
   // STEP 5: Linear processing on L (if present)
   // ========================================================================
   if (hasL) {
-    log('\n[PREP] Step 5: Linear processing on L...');
-
-    // GC
-    log('  GC on L...');
-    await runGC(ctx, 'FILTER_L');
-
-    // Background neutralization skipped for mono L — only meaningful on color images
+    log('\n[PREP] Step 5: Linear processing on L (gradient already corrected above)...');
 
     // BXT correct
     log('  BXT correct on L...');
@@ -780,15 +794,8 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     log('\n[PREP] Step 7: Star layer kept LINEAR (agent will stretch via stretch_stars tool)');
   }
 
-  // ========================================================================
-  // Save to cache
-  // ========================================================================
-  log('\n[PREP] Saving to cache...');
-  try {
-    await saveToCache(ctx, config, cacheKey, result, log);
-  } catch (e) {
-    log(`  Cache save failed (non-fatal): ${e.message}`);
-  }
+  // Note: only PHASE 1 (open/align/combine) is cached — see above. The gradient
+  // phase and everything after it run fresh each time and are not cached.
 
   // ========================================================================
   // Summary

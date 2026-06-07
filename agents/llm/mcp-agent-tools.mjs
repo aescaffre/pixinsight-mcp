@@ -54,8 +54,23 @@ const TRACE_START = Date.now();
 let traceSeq = 0;
 const traceFile = storeBaseDir ? path.join(storeBaseDir, 'trace.jsonl') : null;
 
-// State machine governs tool access per phase
-const stateMachine = createStateMachine(250);
+// State machine governs tool access per phase — but ONLY for the giga_orchestrator,
+// which has the branch/compose/finish flow it was designed for. Focused sub-agents
+// (e.g. gradient_agent) are not part of that flow; gating them blocks their core
+// tools (per-channel ABE, save_memory) in irrelevant states. Give them a permissive
+// stub so every stateMachine.* call site keeps working without per-site guards.
+const stateMachine = (agentName === 'giga_orchestrator')
+  ? createStateMachine(250)
+  : {
+      state: 'free',
+      repairPolicy: null,
+      _branchCompletenessOverride: false,
+      checkToolAccess: () => ({ allowed: true }),
+      recordToolCall: () => {},
+      enterRepair: () => {},
+      transitionTo: () => {},
+      getBudgetStatus: () => ({ turnsRemaining: 999, maxTurns: 999, status: 'ok', guidance: [] }),
+    };
 
 // Provenance: track last composition/processing tool per view
 const viewProvenance = new Map();
@@ -281,7 +296,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // Budget + state status suffix
     const budget = stateMachine.getBudgetStatus();
     const budgetSuffix = `\n[Budget: ${budget.turnsRemaining}/${budget.maxTurns} turns — ${budget.status} | State: ${stateMachine.state}` +
-      (budget.guidance.length > 0 ? ` | ${budget.guidance.join('; ')}` : '') + ']' +
+      ((budget.guidance?.length || 0) > 0 ? ` | ${budget.guidance.join('; ')}` : '') + ']' +
       repairGuidance + branchWarnings;
 
     // Normalize to MCP content format

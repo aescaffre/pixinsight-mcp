@@ -29,6 +29,7 @@ import { MaxAgent } from './engine-max.mjs';
 import { buildToolSet } from './tools.mjs';
 import { generateDiagnosticViews, buildImageMessage } from './vision.mjs';
 import { buildGigaOrchestratorPrompt } from './prompts/giga-orchestrator.mjs';
+import { buildGradientAgentPrompt } from './prompts/gradient-agent.mjs';
 import { runDeterministicPrep } from './deterministic-prep.mjs';
 
 const home = os.homedir();
@@ -200,6 +201,34 @@ async function main() {
     runDir: store.baseDir,
     log: console.log,
     brief: brief,
+    // ----------------------------------------------------------------
+    // Phase 1.5: AGENTIC GRADIENT CORRECTION (Claude Max sub-agent).
+    // Fires after open/align/combine, on the LINEAR combined RGB (+ L),
+    // before SPCC/stretch. It iterates correction scale until the
+    // background color gradient is flat without eating faint signal.
+    // ----------------------------------------------------------------
+    onAfterCombine: async ({ targetName, hasL }) => {
+      console.log('\n--- Phase 1.5: Gradient Agent via Claude Max ---');
+      const gradInitial = `## LINEAR DATA READY — your turn (gradient correction).
+
+Working linear assets in PixInsight (DO NOT stretch them):
+- **RGB (combined, linear)**: \`${targetName}\`${hasL ? `\n- **L (linear, mono)**: \`FILTER_L\`` : ''}
+
+Flatten the background color gradient on ${hasL ? 'both views (RGB first, then L)' : 'the RGB view'}, following your instructions.
+Start with \`recall_memory\`, then \`measure_color_gradient\` with linear=true on \`${targetName}\` to get the baseline.
+Iterate correction scale until FLAT (score < 0.008) or until further scale costs faint signal.
+The corrected views MUST stay under these exact IDs. Do NOT stretch, denoise, run SXT/SPCC, export, or finish.`;
+      const gradAgent = new MaxAgent('gradient_agent', {
+        systemPrompt: buildGradientAgentPrompt(brief),
+        agentName: 'gradient_agent',
+        budget: { maxTurns: 50 },
+        store,
+        brief,
+        ctx,
+      });
+      await gradAgent.run(gradInitial);
+      console.log('--- Gradient Agent done — handing flattened linear views to prep phase 2 ---');
+    },
   });
 
   // Generate diagnostic views for the agent to start with

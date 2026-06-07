@@ -94,3 +94,89 @@ export async function measureUniformity(ctx, viewId, sampleSize = 200) {
   }
   return JSON.parse(r.outputs?.consoleOutput?.trim() || '{"score":999}');
 }
+
+// ============================================================================
+// Color-gradient measurement
+// ----------------------------------------------------------------------------
+// measureUniformity collapses to a single luminance stddev over 4 corners — a
+// red corner and a green glow elsewhere can cancel and read "clean". This grids
+// the whole frame, rejects subject cells (galaxies/bright stars), and reports
+// the CHROMINANCE spread of the background — the thing a colored gradient moves.
+// score = peak-to-peak chrominance across background cells (image units).
+// Used by the agent to iterate gradient-correction scale until the background
+// is color-flat WITHOUT eating faint signal.
+// ============================================================================
+export async function measureColorGradient(ctx, viewId, opts = {}) {
+  const cols = opts.cols ?? 8;
+  const rows = opts.rows ?? 6;
+  const r = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}');
+    if (w.isNull) throw new Error('measureColorGradient: not found: ${viewId}');
+    var img = w.mainView.image;
+    if (!img.isColor) { JSON.stringify({ error: 'mono image — no color gradient' }); }
+    else {
+      var cols = ${cols}, rows = ${rows};
+      var cw = Math.floor(img.width / cols), ch = Math.floor(img.height / rows);
+      var box = Math.max(24, Math.floor(Math.min(cw, ch) * 0.6));
+      var cells = [];
+      for (var gy = 0; gy < rows; gy++) {
+        for (var gx = 0; gx < cols; gx++) {
+          var cx = gx * cw + Math.floor((cw - box) / 2);
+          var cy = gy * ch + Math.floor((ch - box) / 2);
+          img.selectedRect = new Rect(cx, cy, cx + box, cy + box);
+          var m = [];
+          for (var c = 0; c < 3; c++) { img.selectedChannel = c; m.push(img.median()); }
+          img.resetChannelSelection();
+          var lum = (m[0] + m[1] + m[2]) / 3;
+          cells.push({ gx: gx, gy: gy, R: m[0], G: m[1], B: m[2], lum: lum });
+        }
+      }
+      img.resetSelections();
+      // Reject subject cells: lum > median(lum) + 3*MAD(lum)
+      var lums = []; for (var i = 0; i < cells.length; i++) lums.push(cells[i].lum);
+      lums.sort(function(a,b){return a-b;});
+      var medLum = lums[Math.floor(lums.length/2)];
+      var devs = []; for (var i = 0; i < lums.length; i++) devs.push(Math.abs(lums[i]-medLum));
+      devs.sort(function(a,b){return a-b;});
+      var madLum = devs[Math.floor(devs.length/2)] * 1.4826;
+      var thr = medLum + 3 * madLum;
+      var bg = [];
+      for (var i = 0; i < cells.length; i++) if (cells[i].lum <= thr) bg.push(cells[i]);
+      // Chrominance per background cell: channel minus local luminance
+      var crMin=1, crMax=-1, cgMin=1, cgMax=-1, cbMin=1, cbMax=-1;
+      var worst = null, worstAmp = -1;
+      for (var i = 0; i < bg.length; i++) {
+        var L = bg[i].lum;
+        var cr = bg[i].R - L, cg = bg[i].G - L, cb = bg[i].B - L;
+        if (cr<crMin)crMin=cr; if(cr>crMax)crMax=cr;
+        if (cg<cgMin)cgMin=cg; if(cg>cgMax)cgMax=cg;
+        if (cb<cbMin)cbMin=cb; if(cb>cbMax)cbMax=cb;
+        var amp = Math.max(Math.abs(cr), Math.abs(cg), Math.abs(cb));
+        if (amp > worstAmp) {
+          worstAmp = amp;
+          var dom = (Math.abs(cr)>=Math.abs(cg)&&Math.abs(cr)>=Math.abs(cb)) ? (cr>0?'red':'cyan')
+                  : (Math.abs(cg)>=Math.abs(cb)) ? (cg>0?'green':'magenta') : (cb>0?'blue':'yellow');
+          worst = { gx: bg[i].gx, gy: bg[i].gy, dominant: dom, amp: amp };
+        }
+      }
+      var ppR = crMax - crMin, ppG = cgMax - cgMin, ppB = cbMax - cbMin;
+      var score = Math.max(ppR, ppG, ppB);
+      // Luminance peak-to-peak across background cells (reported, not the score)
+      var bgLumMin=1, bgLumMax=-1;
+      for (var i = 0; i < bg.length; i++){ if(bg[i].lum<bgLumMin)bgLumMin=bg[i].lum; if(bg[i].lum>bgLumMax)bgLumMax=bg[i].lum; }
+      JSON.stringify({
+        score: score,
+        chromaPP: { R: ppR, G: ppG, B: ppB },
+        lumPP: bgLumMax - bgLumMin,
+        bgCells: bg.length, totalCells: cells.length,
+        bgMedianLum: medLum,
+        worst: worst
+      });
+    }
+  `);
+  if (r.status === 'error') {
+    ctx.log(`  [colorGradient] WARN: ${r.error?.message || 'unknown error'}`);
+    return { score: 999, error: r.error?.message };
+  }
+  return JSON.parse(r.outputs?.consoleOutput?.trim() || '{"score":999}');
+}

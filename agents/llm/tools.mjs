@@ -5,8 +5,8 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import {
-  getStats, measureUniformity,
-  savePreview,
+  getStats, measureUniformity, measureColorGradient,
+  savePreview, autoStretch,
   cloneImage, restoreFromClone, closeImage, purgeUndoHistory,
   runGC, runABE, runPerChannelABE, runSCNR,
   setiStretch,
@@ -76,6 +76,52 @@ const TOOL_CATALOG = {
     handler: async (ctx, _store, _brief, input) => {
       const uni = await measureUniformity(ctx, input.view_id, input.sample_size || 200);
       return { type: 'text', text: JSON.stringify(uni, null, 2) };
+    }
+  },
+
+  measure_color_gradient: {
+    category: 'measurement',
+    definition: {
+      name: 'measure_color_gradient',
+      description: 'Measure the residual COLOR gradient across the background — what measure_uniformity (a single luminance number over 4 corners) misses. Grids the whole frame, rejects subject cells (galaxies/bright stars), and reports the chrominance peak-to-peak across background cells plus the worst cell\'s location and dominant cast. Use this to drive gradient-correction scale: correct, re-measure, adjust scale until flat — but watch faint signal (measure_subject_detail) so you do not over-correct. On LINEAR data set linear=true so it measures on a temporary STF-stretched clone (chrominance is invisible on un-stretched linear data). Verdict thresholds (stretched units): score < 0.008 = FLAT (pass), 0.008-0.015 = MILD, > 0.015 = VISIBLE COLOR GRADIENT (keep correcting).',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'PixInsight view ID' },
+          linear: { type: 'boolean', description: 'Set true if the image is still linear (un-stretched). Measures on a temporary auto-stretched clone so the metric is meaningful. Default false.' },
+          cols: { type: 'integer', description: 'Grid columns (default 8)' },
+          rows: { type: 'integer', description: 'Grid rows (default 6)' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      let measureId = input.view_id;
+      const tempId = '__cg_eval';
+      let cg;
+      try {
+        if (input.linear) {
+          // Chrominance is invisible on un-stretched linear data — measure on an STF-stretched clone.
+          // Close any leftover temp from a prior call that errored before cleanup (avoids id collision).
+          await closeImage(ctx, tempId).catch(() => {});
+          await cloneImage(ctx, input.view_id, tempId);
+          await autoStretch(ctx, tempId, 0.10);
+          measureId = tempId;
+        }
+        cg = await measureColorGradient(ctx, measureId, { cols: input.cols, rows: input.rows });
+      } finally {
+        if (input.linear) await closeImage(ctx, tempId).catch(() => {});
+      }
+      if (!cg || typeof cg.score !== 'number') {
+        return { type: 'text', text: `[COLOR GRADIENT: measurement failed] ${cg?.error || 'no result'} — retry, or check the view is open.` };
+      }
+      const s = cg.score ?? 999;
+      const verdict = s < 0.008 ? 'FLAT (pass)' : s <= 0.015 ? 'MILD — optional further correction' : 'VISIBLE COLOR GRADIENT — keep correcting';
+      const w = cg.worst ? ` Worst cell (grid ${cg.worst.gx},${cg.worst.gy}): ${cg.worst.dominant} cast, amp=${cg.worst.amp?.toFixed(4)}.` : '';
+      const text = `[COLOR GRADIENT: ${verdict}] score=${s.toFixed(4)} (chroma peak-to-peak across ${cg.bgCells}/${cg.totalCells} background cells).${w}\n` +
+        `  Per-channel chroma PP: R=${cg.chromaPP?.R?.toFixed(4)} G=${cg.chromaPP?.G?.toFixed(4)} B=${cg.chromaPP?.B?.toFixed(4)} | lum PP=${cg.lumPP?.toFixed(4)}\n` +
+        JSON.stringify(cg);
+      return { type: 'text', text };
     }
   },
 
@@ -3139,6 +3185,10 @@ const AGENT_TOOL_CATEGORIES = {
   composition: ['measurement', 'preview', 'image_mgmt', 'curves', 'stars', 'lrgb', 'narrowband', 'masks', 'memory', 'artifacts', 'control'],
   aesthetic_critic: ['measurement', 'memory', 'control', 'scoring'],
   technical_critic: ['measurement', 'memory', 'control', 'scoring'],
+  // Focused gradient sub-agent: flattens the background color gradient on the
+  // LINEAR combined RGB (+ L) before SPCC/stretch. No 'control' (cannot finish/
+  // export) and no 'stretch' (stays linear) — it just corrects and hands off.
+  gradient_agent: ['measurement', 'preview', 'image_mgmt', 'gradient', 'memory'],
 };
 
 /**
