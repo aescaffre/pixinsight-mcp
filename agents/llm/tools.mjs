@@ -3762,6 +3762,12 @@ const AGENT_TOOL_CATEGORIES = {
   // LINEAR combined RGB (+ L) before SPCC/stretch. No 'control' (cannot finish/
   // export) and no 'stretch' (stays linear) — it just corrects and hands off.
   gradient_agent: ['measurement', 'preview', 'image_mgmt', 'gradient', 'memory'],
+  // Focused core specialist (C-tier): improves ONLY the bright core of a finished
+  // image (structure, no flat blob / no halo) through a core mask. Detail/clamp/zone
+  // tools + masks + measurement + recall_champion/save_variant. No 'control' (cannot
+  // finish/export), no 'stars' (no double star blend — the composer grafts only the
+  // core back), no 'gradient'/'lrgb'/'ha' (not its job).
+  core_specialist: ['measurement', 'preview', 'image_mgmt', 'detail', 'masks', 'narrowband', 'curves', 'stretch', 'denoise', 'memory', 'artifacts'],
 };
 
 /**

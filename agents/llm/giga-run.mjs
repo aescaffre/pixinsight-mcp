@@ -30,6 +30,8 @@ import { buildToolSet } from './tools.mjs';
 import { generateDiagnosticViews, buildImageMessage } from './vision.mjs';
 import { buildGigaOrchestratorPrompt } from './prompts/giga-orchestrator.mjs';
 import { buildGradientAgentPrompt } from './prompts/gradient-agent.mjs';
+import { buildCoreSpecialistPrompt } from './prompts/core-specialist.mjs';
+import { composeCore, judgeAB } from './composer.mjs';
 import { runDeterministicPrep } from './deterministic-prep.mjs';
 import { recordOutcomes, extractLedgerGuidance, getChampions } from '../ledger.mjs';
 import { loadBaseRunAsPrep, gradientHash, hasGradientSolution, saveGradientSolution, replayGradientSolution } from './warmstart.mjs';
@@ -136,6 +138,7 @@ for (let i = 0; i < args.length; i++) {
   if (args[i] === '--config' && args[i + 1]) opts.configPath = args[++i];
   else if (args[i] === '--intent') opts.intent = args[++i];
   else if (args[i] === '--base-run') opts.baseRun = args[++i];   // B1 warm-start
+  else if (args[i] === '--core-specialist') opts.coreSpecialist = true;   // C-tier phase 1
   else if (args[i] === '--dry-run') opts.dryRun = true;
 }
 
@@ -451,6 +454,47 @@ RULES:
       }
     } catch (e) {
       console.log(`  Trace recovery error: ${e.message}`);
+    }
+  }
+
+  // === C-TIER PHASE 1: optional core-specialist post-pass (flagged --core-specialist) ===
+  // Improves ONLY the core of the mega-winner via a short scoped specialist, grafts that
+  // core back through a feathered mask (deterministic composer), and a strict no-regression
+  // A/B exports whichever wins. The mega-agent path above is UNCHANGED; this can only
+  // improve or tie. Any error falls back to the mega-winner.
+  if (opts.coreSpecialist && finalSelection && fs.existsSync(finalSelection.variant_path)) {
+    try {
+      console.log('\n--- C-tier: Core Specialist post-pass ---');
+      const megaPath = finalSelection.variant_path;
+      const escMega = megaPath.replace(/'/g, "\\'");
+      await ctx.pjsr(`var ws=ImageWindow.windows;for(var i=0;i<ws.length;i++){ws[i].forceClose();} var a=ImageWindow.open('${escMega}'); var w=a[0]; for(var i=1;i<a.length;i++)a[i].forceClose(); w.mainView.id='CORE_WORK'; w.show(); 'ok';`);
+      const coreAgent = new MaxAgent('core_specialist', {
+        systemPrompt: buildCoreSpecialistPrompt(brief),
+        agentName: 'core_specialist',
+        budget: { maxTurns: 50 },
+        store, brief, ctx,
+      });
+      await coreAgent.run(`## CORE SPECIALIST TASK\nThe finished run-winner is open as \`CORE_WORK\` (a clone). Its surroundings are already what we want — improve ONLY its core (structure, no flat blob, no halo, no white-burn), masked, per your instructions. Leave \`CORE_WORK\` as your BEST result before stopping (restore your best clone into it). Do NOT touch the field/dust/stars.`);
+      const specPath = path.join(outputDir, `${targetName}_core_spec.xisf`);
+      const mergedPath = path.join(outputDir, `${targetName}_merged.xisf`);
+      const chk = await ctx.pjsr(`var w=ImageWindow.windowById('CORE_WORK'); if(w.isNull){'MISSING';}else{w.saveAs('${specPath.replace(/'/g, "\\'")}',false,false,false,false);'ok';}`);
+      if (((chk.outputs?.consoleOutput || chk.result || '').trim()) === 'MISSING') {
+        console.log('  Core specialist left no CORE_WORK view — keeping mega-winner.');
+      } else {
+        await composeCore(ctx, { megaPath, specPath, outPath: mergedPath, log: (m) => console.log(m) });
+        const profile = { ...(brief.processingProfile || {}), _classification: brief.target.classification };
+        const verdict = await judgeAB(ctx, { megaPath, mergedPath, profile, log: (m) => console.log(m) });
+        if (verdict.winner === 'merged') {
+          finalSelection = { ...finalSelection, variant_path: mergedPath, variant_id: `${finalSelection.variant_id || 'variant'}+core` };
+          exportSource = 'core-specialist merge (A/B win)';
+          console.log('  C-tier: MERGE wins the A/B — exporting the core-grafted result.');
+        } else {
+          console.log('  C-tier: mega-winner kept (merge did not beat it).');
+        }
+      }
+      await ctx.pjsr(`var ws=ImageWindow.windows;for(var i=0;i<ws.length;i++){ws[i].forceClose();} 'ok';`);
+    } catch (e) {
+      console.log(`  C-tier core-specialist post-pass error (keeping mega-winner): ${e.message}`);
     }
   }
 
