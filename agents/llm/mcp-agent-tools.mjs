@@ -33,6 +33,29 @@ const { definitions, handlers } = buildToolSet(agentName);
 // Create bridge context
 const ctx = createBridgeContext({ log: (msg) => process.stderr.write(`[mcp] ${msg}\n`) });
 
+// === SWAP GUARD ===
+// Zone-separated runs (core clone + dust clone + masks + many variants + undo history)
+// can balloon PI swap to tens of GB and choke the disk mid-run. PI's per-window UNDO
+// history is the largest reclaimable chunk and this pipeline never uses PI undo (it
+// rolls back via clone_image/restore_from_clone), so purging it is safe. Purge undo on
+// all views + gc PROACTIVELY every N tool calls, and IMMEDIATELY when free disk is low.
+// This does NOT close views or alter image data — only frees undo swap.
+let _swapCalls = 0, _lastPurge = 0;
+const SWAP_PERIODIC = 8;     // purge every N tool calls
+const SWAP_LOW_GB = 14;      // ...and immediately below this much free disk
+async function swapGuard() {
+  _swapCalls++;
+  let freeGB = 999;
+  try { const s = fs.statfsSync('/'); freeGB = (s.bavail * s.bsize) / 1e9; } catch {}
+  const low = freeGB < SWAP_LOW_GB;
+  if (!low && (_swapCalls - _lastPurge) < SWAP_PERIODIC) return;
+  try {
+    const r = await ctx.pjsr(`var ws=ImageWindow.windows;var n=0;for(var i=0;i<ws.length;i++){try{ws[i].purge();n++;}catch(e){}}gc();processEvents();"purged "+n;`);
+    _lastPurge = _swapCalls;
+    process.stderr.write(`[mcp][swap-guard] freeGB=${freeGB.toFixed(1)}${low ? ' (LOW)' : ' (periodic)'} -> ${(r.result || r.outputs?.consoleOutput || '').trim()}\n`);
+  } catch (e) { process.stderr.write(`[mcp][swap-guard] purge failed: ${e.message}\n`); }
+}
+
 // Load store if base dir provided
 let store = null;
 if (storeBaseDir && fs.existsSync(storeBaseDir)) {
@@ -162,8 +185,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // Sync state to brief
   syncBriefState();
 
-  // Swap cleanup DISABLED — deleting swap files while PI is running causes crashes.
-  // periodicSwapCleanup();
+  // Swap guard: purge PI undo history (safe — never used by this pipeline) to keep swap
+  // bounded. Replaces the old file-deletion approach which crashed PI. See swapGuard().
+  await swapGuard();
 
   // === STATE MACHINE: check tool access ===
   const access = stateMachine.checkToolAccess(name);

@@ -213,7 +213,7 @@ export async function measureCoreContrast(ctx, viewId, classification, coreBurnC
     // bright core can pass the gradient/luminance relContrast yet still look
     // burnt because it is desaturated white. (This is the 0.334 false-pass fix.)
     var step = 3;
-    var cE=0, cL=0, cN=0, sE=0, sL=0, sN=0, cSat=0, cWhite=0;
+    var cE=0, cL=0, cN=0, sE=0, sL=0, sN=0, cSat=0, cWhite=0, cStruct=0, cSmoothBright=0;
     for (var y = step; y < H-step; y += step) {
       for (var x = step; x < W-step; x += step) {
         var l = L(x,y);
@@ -222,6 +222,11 @@ export async function measureCoreContrast(ctx, viewId, classification, coreBurnC
         var grad = Math.abs(l-lr) + Math.abs(l-ld);
         if (l >= coreThr) {
           cE += grad; cL += l; cN++;
+          // Structure vs halo (catches what relContrast averages away): a structured
+          // core (dust lanes/detail) has most pixels with real local gradient; a flat
+          // center has few; a smooth BRIGHT zone (>0.55, near-zero gradient) is a halo.
+          if (grad > 0.012) cStruct++;
+          if (grad < 0.004 && l > 0.55) cSmoothBright++;
           if (isColor) {
             var rr=img.sample(x,y,0), gg=img.sample(x,y,1), bb=img.sample(x,y,2);
             var mx=Math.max(rr,gg,bb), mn=Math.min(rr,gg,bb);
@@ -244,6 +249,8 @@ export async function measureCoreContrast(ctx, viewId, classification, coreBurnC
       coreLum: coreMeanLum, shellLum: shellMeanLum,
       coreSat: (isColor && cN>0) ? cSat/cN : -1,
       coreWhiteFraction: (isColor && cN>0) ? cWhite/cN : 0,
+      coreStructFrac: cN>0 ? cStruct/cN : 0,
+      haloFrac: cN>0 ? cSmoothBright/cN : 0,
       corePixels: cN, coreFraction: totalSampled>0 ? cN/totalSampled : 0,
       peak: peak, bg: bg
     });
@@ -281,8 +288,24 @@ export async function measureCoreContrast(ctx, viewId, classification, coreBurnC
   const satGateApplies = /emission|planetary|pne|hii/i.test(classification || '');
   const whiteBurnt = coreWhiteFraction > WHITE_HARD;
   const desatBurnt = satGateApplies && coreSat >= 0 && coreSat < SAT_LOW;
-  const pass = cr >= HARD && !whiteBurnt && !desatBurnt;
+  // STRUCTURE + HALO gates (opt-in per profile via core_burn.min_struct_frac /
+  // max_halo_frac). relContrast averages the whole core band, so it is BLIND to a flat
+  // blue CENTER sitting inside a structured/bright halo (it passed such a core at 0.449).
+  // coreStructFrac = fraction of core pixels with real local detail; haloFrac = fraction
+  // that are smooth AND bright (a halo/blown ring). Calibrated on NGC7023: iter03 97.5%/0.3%,
+  // best-of-both 95.7%/0.5% (PASS); flat-core 45.7%/12.3%, blown-halo graft 81.9%/6.1% (FAIL).
+  const coreStructFrac = d.coreStructFrac || 0;
+  const haloFrac = d.haloFrac || 0;
+  const structBurnt = (typeof cb.min_struct_frac === 'number') && coreStructFrac < cb.min_struct_frac;
+  const haloBurnt = (typeof cb.max_halo_frac === 'number') && haloFrac > cb.max_halo_frac;
+  const pass = cr >= HARD && !whiteBurnt && !desatBurnt && !structBurnt && !haloBurnt;
   const msgs = [];
+  if (structBurnt) {
+    msgs.push(`*** FAILS CORE GATE (FLAT CENTER) *** Only ${(coreStructFrac*100).toFixed(0)}% of the bright core has real structure (min ${(cb.min_struct_frac*100)}%) — the blue center is a flat/washed blob even if relContrast passes (relContrast averages a structured halo). Recover internal structure in the CENTER (masked LHE/HDRMT into the core, or graft a structured-core champion); do not just brighten it.`);
+  }
+  if (haloBurnt) {
+    msgs.push(`*** FAILS CORE GATE (HALO) *** ${(haloFrac*100).toFixed(1)}% of the core is a smooth bright zone (limit ${(cb.max_halo_frac*100)}%) — a halo/blown ring around the center. Compress the bright pedestal (continuous_clamp) or protect the core from over-injection; the dust-fill must not bleed a bright ring around the nebula.`);
+  }
   if (whiteBurnt) {
     msgs.push(`*** FAILS CORE GATE (WHITE BURN) *** ${(coreWhiteFraction*100).toFixed(1)}% of the bright core is white-clipped + desaturated (limit ${(WHITE_HARD*100)}%). The center reads as a blown white patch even if gradient energy passes. Compress the core pedestal (continuous_clamp) and recover color/structure so the center is not white.`);
   } else if (desatBurnt) {
@@ -300,7 +323,8 @@ export async function measureCoreContrast(ctx, viewId, classification, coreBurnC
   }
   return {
     coreRelContrast: cr, shellRelContrast: d.shellRelContrast, ratio,
-    coreLum: d.coreLum, coreSat, coreWhiteFraction, coreFraction: d.coreFraction, peak: d.peak, bg: d.bg,
+    coreLum: d.coreLum, coreSat, coreWhiteFraction, coreStructFrac, haloFrac,
+    coreFraction: d.coreFraction, peak: d.peak, bg: d.bg,
     pass, details: msgs.join(' '), raw: d
   };
 }

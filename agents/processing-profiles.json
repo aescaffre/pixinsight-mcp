@@ -323,7 +323,9 @@
     "core_burn": {
       "white_hard": 0.10,
       "rel_contrast_hard": 0.35,
-      "_calibration": "Catches the SXT-left HD200775 glow blob. iter03(good): coreWhiteFraction 0.055 / relContrast 0.452 -> PASS. giga(bad): 0.111 / 0.290 -> CAUGHT. reflection_nebula ONLY."
+      "min_struct_frac": 0.80,
+      "max_halo_frac": 0.03,
+      "_calibration": "Catches the SXT-left HD200775 glow blob AND the relContrast blind spot (flat blue center inside a structured/bright halo). iter03(good) relC 0.452/white 5.5%/struct 97.5%/halo 0.3% -> PASS. flat-core relC-passing but struct 45.7%/halo 12.3% -> CAUGHT. blown-halo graft struct 81.9%/halo 6.1% -> CAUGHT. best-of-both struct 95.7%/halo 0.5% -> PASS. reflection_nebula ONLY (struct/halo thresholds opt-in per profile)."
     },
     "ifn": {
       "min_dust_mean_sat": 0.24,
