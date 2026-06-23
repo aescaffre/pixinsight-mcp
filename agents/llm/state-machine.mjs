@@ -104,6 +104,8 @@ const STATE_TOOLS = {
   finalize: new Set([
     'finish',
     'run_pixelmath', 'run_curves', 'continuous_clamp',
+    'run_nxt', 'run_scnr', // the finish noise/green gates DEMAND these — must be runnable in finalize (was the blocked-final-denoise bug)
+    'lift_dust', 'inject_l_ifn', 'measure_dust_coverage', 'check_noise', 'measure_color_gradient', // IFN/dust + noise/color polish in finalize
     'star_protected_blend', 'stretch_stars', 'check_star_layer_integrity', // safety net: allow star blend in finalize
     'lrgb_combine', // safety net: allow LRGB if finish rejected for missing it
     'clone_image', 'restore_from_clone',

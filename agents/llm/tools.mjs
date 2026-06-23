@@ -12,12 +12,14 @@ import {
   setiStretch,
   createLumMask, applyMask, removeMask, closeMask,
   checkStarQuality, checkRinging, checkSharpness, checkCoreBurning, scanBurntRegions, checkSaturation, checkTonalPresence, checkStarLayerIntegrity, checkBrightChroma, checkHighlightTexture,
-  measureSubjectDetail, locateSubjectROI,
+  measureSubjectDetail, locateSubjectROI, measureCoreContrast, measureBackgroundNoise, measureDustCoverage, compareToReference,
   multiScaleEnhance, shellDetailEnhance,
   extractPseudoOIII, continuumSubtractHa, dynamicNarrowbandBlend, createSyntheticLuminance, createZoneMasks, createAdaptiveZoneMasks, continuousClamp,
 } from '../ops/index.mjs';
 import { checkHardConstraints, statsToScores, computeAggregate } from '../scoring.mjs';
 import { jpegToContentBlock } from './vision.mjs';
+import { critiqueAesthetic } from './aesthetic-critic.mjs';
+import { getChampions, recordChampions, scoreVariantDimensions } from '../ledger.mjs';
 
 // ============================================================================
 // Helpers
@@ -56,6 +58,30 @@ const TOOL_CATALOG = {
     handler: async (ctx, _store, _brief, input) => {
       const stats = await getStats(ctx, input.view_id);
       return { type: 'text', text: JSON.stringify(stats, null, 2) };
+    }
+  },
+
+  compare_to_reference: {
+    category: 'measurement',
+    definition: {
+      name: 'compare_to_reference',
+      description: 'Compare a view against a user-supplied reference image. Returns color_emd (CIELAB earth-mover distance on histogram-matched background cells; lower=closer color, >0.25 = strong divergence), ms_ssim (multiscale luminance structure similarity 0..1, only valid when geometry matches), and coverage_delta (reference faint-signal fraction minus yours; >0.30 = reference shows substantially MORE faint nebulosity/IFN, i.e. you are under-stretched or over-denoised). Use to steer toward the reference palette and faint-structure depth.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'View to evaluate.' },
+          reference_path: { type: 'string', description: 'Absolute path to reference image (XISF/TIFF/PNG). If omitted, uses brief.reference_path.' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, store, brief, input) => {
+      const refPath = (input.reference_path || brief?.reference_path || '').trim();
+      if (!refPath) return { type: 'text', text: 'compare_to_reference: no reference_path provided and brief.reference_path is unset.' };
+      if (!fs.existsSync(refPath)) return { type: 'text', text: `compare_to_reference: reference file not found: ${refPath}` };
+      const res = await compareToReference(ctx, input.view_id, refPath);
+      if (res.error) return { type: 'text', text: `compare_to_reference: ${res.error}` };
+      return { type: 'text', text: `Reference comparison: ${res.details}` };
     }
   },
 
@@ -245,6 +271,33 @@ const TOOL_CATALOG = {
     }
   },
 
+  // --- Vision aesthetic critic (fresh independent judge) ---
+  vision_aesthetic_critic: {
+    category: 'measurement',
+    definition: {
+      name: 'vision_aesthetic_critic',
+      description: 'Render the view to a JPEG and have a FRESH, independent Claude judge score it 0-10 on a competition rubric (natural-vs-cooked, core integrity, IFN/faint structure, stars, color) and list flaws. COST GUARD: only runs at the composition-critic stage or at finish — pass phase="composition_critic" (judging a candidate before finish) or phase="finish". Cached by rendered-image hash, so identical pixels never re-judge. Use on your best composition candidate to get an unbiased aesthetic read before committing.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'View ID to critique' },
+          phase: { type: 'string', enum: ['composition_critic', 'finish'], description: 'Critic stage. Only these phases spawn the judge (cost guard).' },
+          label: { type: 'string', description: 'Short label for the critique JPEG (e.g. "COMP_balanced")' }
+        },
+        required: ['view_id', 'phase']
+      }
+    },
+    handler: async (ctx, store, _brief, input) => {
+      if (input.phase !== 'composition_critic' && input.phase !== 'finish') {
+        return { type: 'text', text: `vision_aesthetic_critic SKIPPED: phase="${input.phase}" is not a critic phase (cost guard). Pass phase="composition_critic" or "finish".` };
+      }
+      const r = await critiqueAesthetic(ctx, input.view_id, { baseDir: store?.baseDir, label: input.label || input.view_id, maxDim: 1500, model: 'opus' });
+      if (r.error) return { type: 'text', text: `vision_aesthetic_critic ERROR: ${r.error} (advisory — does not block).` };
+      const flawText = r.flaws.length ? `\nFlaws: ${r.flaws.map(f => '• ' + f).join('  ')}` : '\nFlaws: none noted.';
+      return { type: 'text', text: `AESTHETIC SCORE: ${r.aesthetic_score.toFixed(1)}/10${r.cached ? ' (cached)' : ''}${flawText}\n` + JSON.stringify({ aesthetic_score: r.aesthetic_score, flaws: r.flaws }) };
+    }
+  },
+
   // --- Image management ---
   clone_image: {
     category: 'image_mgmt',
@@ -399,20 +452,26 @@ const TOOL_CATALOG = {
     category: 'gradient',
     definition: {
       name: 'run_scnr',
-      description: 'Run SCNR (SubtractiveChromaticNoiseReduction) to remove green cast. Apply through an INVERTED luminance mask to target background only (protects galaxies). Amount 0.30-0.50 is moderate, 0.70+ is aggressive.',
+      description: 'Run SCNR (SubtractiveChromaticNoiseReduction) to remove green cast. preserveLightness keeps brightness so it does NOT grey out warm dust/IFN. Amount 0.30-0.50 moderate, 0.70+ aggressive. For reflection nebulae / dust-heavy fields the amount is auto-capped at 0.30 to protect brown IFN color.',
       input_schema: {
         type: 'object',
         properties: {
           view_id: { type: 'string', description: 'View ID to process' },
-          amount: { type: 'number', description: 'Green removal amount (0.0-1.0, default 0.50)' }
+          amount: { type: 'number', description: 'Green removal amount (0.0-1.0, default 0.50; auto-capped to 0.30 for dust/reflection targets)' }
         },
         required: ['view_id']
       }
     },
-    handler: async (ctx, _store, _brief, input) => {
-      await runSCNR(ctx, input.view_id, { amount: input.amount ?? 0.50 });
+    handler: async (ctx, _store, brief, input) => {
+      let amount = input.amount ?? 0.50;
+      // Protect warm dust/IFN color: cap SCNR on reflection/dust-heavy targets.
+      const cls = brief?.target?.classification || '';
+      const dustHeavy = /reflection|ifn|dark_nebula|molecular/i.test(cls);
+      let note = '';
+      if (dustHeavy && amount > 0.30) { amount = 0.30; note = ' (capped 0.30 — dust/IFN color protection)'; }
+      await runSCNR(ctx, input.view_id, { amount, preserveLightness: true });
       const stats = await getStats(ctx, input.view_id);
-      return { type: 'text', text: `SCNR green removal (amount=${input.amount ?? 0.50}). Stats: median=${stats.median.toFixed(6)}` };
+      return { type: 'text', text: `SCNR green removal (amount=${amount}${note}, preserveLightness=on). Stats: median=${stats.median.toFixed(6)}` };
     }
   },
 
@@ -843,32 +902,10 @@ const TOOL_CATALOG = {
     }
   },
 
-  run_scnr: {
-    category: 'calibration',
-    definition: {
-      name: 'run_scnr',
-      description: 'Run SCNR (Subtractive Chromatic Noise Reduction) to remove green cast. Use amount=0.50-1.00.',
-      input_schema: {
-        type: 'object',
-        properties: {
-          view_id: { type: 'string', description: 'View ID to process' },
-          amount: { type: 'number', description: 'SCNR amount (0.0-1.0, default 0.80)' }
-        },
-        required: ['view_id']
-      }
-    },
-    handler: async (ctx, _store, _brief, input) => {
-      await ctx.pjsr(`
-        var P = new SCNR;
-        P.amount = ${input.amount ?? 0.80};
-        P.protectionMethod = SCNR.prototype.AverageNeutral;
-        P.colorToRemove = SCNR.prototype.Green;
-        P.preserveLightness = true;
-        P.executeOn(ImageWindow.windowById('${input.view_id}').mainView);
-      `);
-      return { type: 'text', text: `SCNR complete (amount=${input.amount ?? 0.80})` };
-    }
-  },
+  // NOTE: a duplicate `run_scnr` (category 'calibration', default 0.80, unmasked)
+  // previously lived here and SHADOWED the masked 0.50 version above (JS keeps the
+  // last key), so the agent always got the over-aggressive one that greyed out
+  // warm dust/IFN. Removed 2026-06-22. The single run_scnr is the one above.
 
   // --- Detail ---
   run_lhe: {
@@ -1279,6 +1316,123 @@ const TOOL_CATALOG = {
     }
   },
 
+  // B3b: region-graft — blend a donor (e.g. a recalled champion) into base by a mask.
+  blend_regions: {
+    category: 'stars',
+    definition: {
+      name: 'blend_regions',
+      description: 'Region-graft: blend donor_view into base_view weighted by a grayscale mask_view (mask 1 = full donor, 0 = keep base). Per-channel PixelMath; base_view is modified IN PLACE. Use to graft a recalled CHAMPION region (recall_champion donor) into your composition — e.g. donate strong IFN nebulosity or a clean core. base, donor and mask MUST be the same dimensions (champions are cross-run — this tool refuses on geometry mismatch; resample/align first).',
+      input_schema: {
+        type: 'object',
+        properties: {
+          base_view: { type: 'string', description: 'View modified in place (your composition).' },
+          donor_view: { type: 'string', description: 'Source of the grafted region (e.g. a champion).' },
+          mask_view: { type: 'string', description: 'Grayscale [0..1] weight: 1 = full donor, 0 = keep base.' },
+          strength: { type: 'number', description: 'Global donor-weight multiplier 0..1.5 (default 1.0).' }
+        },
+        required: ['base_view', 'donor_view', 'mask_view']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const b = input.base_view, d = input.donor_view, m = input.mask_view;
+      const s = Math.max(0, Math.min(1.5, input.strength == null ? 1.0 : input.strength)).toFixed(4);
+      const geomR = await ctx.pjsr(`
+        var wb = ImageWindow.windowById('${b}'); var wd = ImageWindow.windowById('${d}'); var wm = ImageWindow.windowById('${m}');
+        var out;
+        if (wb.isNull || wd.isNull || wm.isNull) { out = JSON.stringify({ ok:false, reason:'missing_view', base:null, donor:null, mask:null, mono:false }); }
+        else {
+          var ib = wb.mainView.image, id = wd.mainView.image, im = wm.mainView.image;
+          var match = (ib.width===id.width && ib.height===id.height && ib.width===im.width && ib.height===im.height);
+          out = JSON.stringify({ ok:match, reason: match?'ok':'geometry_mismatch', base:[ib.width,ib.height], donor:[id.width,id.height], mask:[im.width,im.height], mono: ib.numberOfChannels < 3 });
+        }
+        out;
+      `);
+      let geom = {};
+      try { geom = JSON.parse(geomR.outputs && geomR.outputs.consoleOutput); } catch (e) { /* */ }
+      if (!geom.ok) {
+        const dims = geom.reason === 'missing_view' ? 'one or more views not found' : `base=${JSON.stringify(geom.base)} donor=${JSON.stringify(geom.donor)} mask=${JSON.stringify(geom.mask)}`;
+        return { type: 'text', text: `REFUSED blend_regions: ${geom.reason || 'unknown'}. ${dims}. Resample/align donor and mask to base geometry before blending.` };
+      }
+      const preStat = await getStats(ctx, b);
+      // Per-channel: w = clamp(mask*strength,0,1); out = base[c]*(1-w) + donor[c]*w.
+      // Mono base → single expression on the lone channel (no [1]/[2]).
+      const chExpr = (c) => `w = max(0, min(1, ${m} * ${s})); ${b}[${c}] * (1 - w) + ${d}[${c}] * w`.replace(/"/g, '\\"');
+      if (geom.mono) {
+        const monoExpr = `w = max(0, min(1, ${m} * ${s})); ${b} * (1 - w) + ${d} * w`.replace(/"/g, '\\"');
+        await ctx.pjsr(`
+          var P = new PixelMath;
+          P.expression = "${monoExpr}";
+          P.useSingleExpression = true;
+          P.use64BitWorkingImage = true;
+          P.truncate = true; P.truncateLower = 0; P.truncateUpper = 1;
+          P.createNewImage = false;
+          P.symbols = 'w';
+          P.executeOn(ImageWindow.windowById('${b}').mainView);
+        `);
+      } else {
+        await ctx.pjsr(`
+          var P = new PixelMath;
+          P.expression = "${chExpr(0)}";
+          P.expression1 = "${chExpr(1)}";
+          P.expression2 = "${chExpr(2)}";
+          P.useSingleExpression = false;
+          P.use64BitWorkingImage = true;
+          P.truncate = true; P.truncateLower = 0; P.truncateUpper = 1;
+          P.createNewImage = false;
+          P.symbols = 'w';
+          P.executeOn(ImageWindow.windowById('${b}').mainView);
+        `);
+      }
+      const postStat = await getStats(ctx, b);
+      return { type: 'text', text: `Region-grafted ${d} into ${b} via mask ${m} (strength ${s}). Pre: median=${preStat.median.toFixed(4)}, max=${(preStat.max ?? 0).toFixed(4)} → Post: ${statsLine(postStat)}` };
+    }
+  },
+
+  // B3b: advisory Pareto signal vs recorded cross-run champions (never blocks).
+  // Uses the SAME scoreVariantDimensions scoring the champions are keyed on.
+  compare_to_champions: {
+    category: 'measurement',
+    definition: {
+      name: 'compare_to_champions',
+      description: 'PARETO SIGNAL (advisory): compares the current view against recorded cross-run CHAMPIONS for this target classification, per quality dimension (ifn_visibility, core_integrity, color_richness, detail, star_quality). Reports ahead/behind/tied per dimension and names the WEAKEST — use it to decide which recall_champion + blend_regions graft is worth attempting. Does not modify the image.',
+      input_schema: {
+        type: 'object',
+        properties: { view_id: { type: 'string', description: 'View to evaluate (your current best composition).' } },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, brief, input) => {
+      const classif = brief?.target?.classification || '';
+      const champs = getChampions(classif);
+      if (!champs || Object.keys(champs).length === 0) {
+        return { type: 'text', text: `No cross-run champions recorded for "${classif}" yet — nothing to compare against.` };
+      }
+      const v = input.view_id;
+      let detail = null, core = null, sat = null, stars = null;
+      try { detail = await measureSubjectDetail(ctx, v); } catch (e) { /* */ }
+      try { core = await measureCoreContrast(ctx, v, classif, brief?.processingProfile?.core_burn); } catch (e) { /* */ }
+      try { sat = await checkSaturation(ctx, v); } catch (e) { /* */ }
+      try { stars = await checkStarQuality(ctx, v); } catch (e) { /* */ }
+      const maxP90 = brief?.processingProfile?.saturation?.max_p90 ?? 0.65;
+      const cur = scoreVariantDimensions({ detail, core, saturation: sat, stars, maxP90 });
+      const rows = [];
+      let weakest = null, weakestGap = -Infinity;
+      for (const dim of Object.keys(champs)) {
+        const champScore = champs[dim].score;
+        const c = cur[dim];
+        if (typeof c !== 'number' || typeof champScore !== 'number') { rows.push(`  ${dim}: champion=${(champScore ?? 0).toFixed ? champScore.toFixed(4) : champScore} (current not measured)`); continue; }
+        const gap = champScore - c;
+        const verdict = gap > 0.02 ? 'BEHIND' : (gap < -0.02 ? 'AHEAD' : 'tied');
+        rows.push(`  ${dim}: current=${c.toFixed(4)} vs champion=${champScore.toFixed(4)} → ${verdict} (run ${champs[dim].run_id})`);
+        if (gap > weakestGap) { weakestGap = gap; weakest = dim; }
+      }
+      const reco = (weakest && weakestGap > 0.02)
+        ? `\nWEAKEST vs champion: ${weakest} (behind by ${weakestGap.toFixed(4)}). Consider: recall_champion("${weakest}") → build a region mask → blend_regions.`
+        : `\nCurrent view matches or beats all champions — no graft needed.`;
+      return { type: 'text', text: `Champion comparison for "${classif}":\n${rows.join('\n')}${reco}` };
+    }
+  },
+
   // Standalone color restoration tool (can be used independently after any star blend)
   restore_star_color: {
     category: 'stars',
@@ -1405,6 +1559,74 @@ const TOOL_CATALOG = {
     handler: async (ctx, store, _brief, input) => {
       const meta = await store.loadVariant(ctx, input.artifact_id);
       return { type: 'text', text: `Loaded: ${input.artifact_id} (view: ${meta.viewId})` };
+    }
+  },
+
+  load_prior_winner: {
+    category: 'artifacts',
+    definition: {
+      name: 'load_prior_winner',
+      description: 'Open the FINAL winning composition of a PREVIOUS run into PixInsight (cross-run). Use to A/B against, or graft a region from, a prior result. Returns the loaded view ID.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          run_id: { type: 'string', description: 'Run ID of the prior run (e.g. run_2026-06-20_ab12cd34)' },
+          view_id: { type: 'string', description: 'Optional ID to rename the loaded view to (default: prior_winner)' }
+        },
+        required: ['run_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const { resolveBaseWinner } = await import('./warmstart.mjs');
+      let xisfPath, selection;
+      try { ({ xisfPath, selection } = resolveBaseWinner(input.run_id)); }
+      catch (e) { return { type: 'text', text: `Cannot load prior winner: ${e.message}` }; }
+      const r = await ctx.send('open_image', '__internal__', { filePath: xisfPath });
+      if (r.status === 'error') return { type: 'text', text: `Failed to open ${xisfPath}: ${r.error?.message}` };
+      const loadedId = r.outputs?.id;
+      const targetId = input.view_id || 'prior_winner';
+      const imgs = await ctx.listImages();
+      for (const cm of imgs.filter(i => i.id.includes('crop_mask'))) {
+        await ctx.pjsr(`var w=ImageWindow.windowById('${cm.id}');if(!w.isNull)w.forceClose();`);
+      }
+      if (loadedId && loadedId !== targetId) {
+        await ctx.pjsr(`var w=ImageWindow.windowById('${loadedId}');if(!w.isNull)w.mainView.id='${targetId}';`);
+      }
+      return { type: 'text', text: `Prior winner loaded as view="${targetId}" (run ${input.run_id}, variant ${selection.variant_id}).` };
+    }
+  },
+
+  recall_champion: {
+    category: 'artifacts',
+    definition: {
+      name: 'recall_champion',
+      description: 'Open the cross-run CHAMPION image for a quality dimension and the current target classification. Dimensions: ifn_visibility, core_integrity, color_richness, star_quality, detail. The champion is a finished image from a PRIOR run that scored best on that dimension for this target class. Returns the opened view ID so you can graft its strong region into your composition (via blend_regions / star_protected_blend). NOTE: a champion may have a different crop/geometry — align/resample before per-pixel blending. Returns a "no champion" message if none recorded yet.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          dimension: { type: 'string', enum: ['ifn_visibility', 'core_integrity', 'color_richness', 'star_quality', 'detail'], description: 'Which quality dimension to recall the best prior image for.' }
+        },
+        required: ['dimension']
+      }
+    },
+    handler: async (ctx, _store, brief, input) => {
+      const classif = brief?.target?.classification || '';
+      const champs = getChampions(classif);
+      const c = champs[input.dimension];
+      if (!c) return { type: 'text', text: `No cross-run champion recorded for ${classif || 'unknown'}/${input.dimension} yet. Process this dimension from scratch.` };
+      if (!fs.existsSync(c.xisfPath)) return { type: 'text', text: `Champion XISF missing on disk: ${c.xisfPath} (run ${c.run_id} likely pruned). Process from scratch.` };
+      const r = await ctx.send('open_image', '__internal__', { filePath: c.xisfPath });
+      if (r.status === 'error') return { type: 'text', text: `Failed to open champion: ${r.error?.message}` };
+      const imgs = await ctx.listImages();
+      for (const cm of imgs.filter(i => i.id.includes('crop_mask'))) {
+        await ctx.pjsr(`var w=ImageWindow.windowById('${cm.id}');if(!w.isNull)w.forceClose();`);
+      }
+      const loadedId = r.outputs?.id;
+      const champId = `champ_${input.dimension}`;
+      if (loadedId && loadedId !== champId) {
+        await ctx.pjsr(`var w=ImageWindow.windowById('${loadedId}');if(!w.isNull)w.mainView.id='${champId}';`);
+      }
+      return { type: 'text', text: `Champion opened: view="${champId}" dimension=${input.dimension} score=${(c.score ?? 0).toFixed(4)} from run ${c.run_id} (${c.variant_id}). Graft its strong region into your composition; align/resample first if geometry differs.` };
     }
   },
 
@@ -1948,6 +2170,9 @@ const TOOL_CATALOG = {
       // Run automated quality checks — agent cannot bypass these
       const failures = [];
       const warnings = [];
+      // B3a: collect the per-dimension metric objects from the gates below so the
+      // promoted winner can be recorded as a cross-run champion at finish.
+      let champStars = null, champCore = null, champDetail = null, champSat = null, champDust = null;
       if (isEmergency) {
         warnings.push(`EMERGENCY BUDGET: ${budget.turnsRemaining} turns remaining. Non-safety gates relaxed to allow finish.`);
       }
@@ -1957,6 +2182,7 @@ const TOOL_CATALOG = {
       // Brightness is BLOCKING — dim stars are always a failure when the profile asks for prominent/balanced.
       try {
         const starResult = await checkStarQuality(ctx, viewId);
+        champStars = starResult;
         const prominence = brief?.processingProfile?.stars?.prominence || 'balanced';
         const minContrast = prominence === 'prominent' ? 4.0 : prominence === 'subdued' ? 2.0 : 3.0;
         const brightnessOk = (starResult.starBgContrast || 0) >= minContrast;
@@ -2040,9 +2266,74 @@ const TOOL_CATALOG = {
         // Non-blocking if check fails
       }
 
+      // Gate 3c: Core relative contrast — catches a PERCEPTUAL burn that the
+      // clipping gates (3/3b) miss: a bright core that is not clipped (peak < 0.85)
+      // but reads as a flat washed-out white zone because its structure is tiny
+      // relative to its brightness. Only applies when there is a real extended
+      // bright core (skips starfields and all-bright frames).
+      try {
+        const coreC = await measureCoreContrast(ctx, viewId, brief?.target?.classification, brief?.processingProfile?.core_burn);
+        champCore = coreC;
+        const frac = coreC.coreFraction || 0;
+        const isExtendedCore = frac >= 0.003 && frac <= 0.20;
+        if (isExtendedCore && !coreC.pass) {
+          const msg = `CORE PERCEPTUALLY BURNT: ${coreC.details}`;
+          if (isEmergency) {
+            warnings.push(`[RELAXED] ${msg}`);
+          } else {
+            failures.push(msg);
+          }
+        } else if (isExtendedCore && coreC.coreRelContrast < 0.30) {
+          warnings.push(`Core contrast moderate (relContrast=${coreC.coreRelContrast.toFixed(3)}, ratio=${(coreC.ratio||0).toFixed(2)}); structure could be more visible in the bright center.`);
+        }
+      } catch (e) {
+        // Non-blocking if check fails
+      }
+
+      // Gate 3e: IFN / brown-dust presence (dust-dominated fields, e.g. reflection
+      // nebulae embedded in molecular cloud). The median floor (Gate 5) is BLIND to
+      // dust distribution — the user-approved iter03 (dust fills the frame) and the
+      // regressed giga run (empty black field) had IDENTICAL median 0.0784. This gate
+      // keys on dust COLOR (dustMeanSat) + dust PEAKS (fieldP95) instead, validated
+      // on those two images. Profile-driven: only runs when the profile declares `ifn`.
+      if (brief?.processingProfile?.ifn) {
+        try {
+          const dust = await measureDustCoverage(ctx, viewId, brief.processingProfile.ifn);
+          champDust = dust;
+          if (!dust.pass) {
+            const msg = `IFN/DUST GATE: ${dust.details}`;
+            if (isEmergency) warnings.push(`[RELAXED] ${msg}`);
+            else failures.push(msg);
+          } else if (dust.details && /advisory/.test(dust.details)) {
+            warnings.push(`Dust: ${dust.details}`);
+          }
+        } catch (e) {
+          // Non-blocking if check fails
+        }
+      }
+
+      // Gate 3d: Background noise — final grain check. Aggressive LHE/stretch
+      // amplifies pixel-scale noise; this requires a light denoise if too grainy.
+      try {
+        const noiseR = await measureBackgroundNoise(ctx, viewId);
+        // measureBackgroundNoise now checks BOTH dark-sky (bgNoise) AND dust-band grain
+        // (dustNoise) — the latter catches grain on lifted IFN that the dark-sky-only
+        // metric was structurally blind to. noiseR.pass reflects both.
+        if (!noiseR.pass) {
+          const msg = `BACKGROUND TOO NOISY: ${noiseR.details}`;
+          if (isEmergency) warnings.push(`[RELAXED] ${msg}`);
+          else failures.push(msg);
+        } else if ((noiseR.bgNoise || 0) > 0.015 || (noiseR.dustNoise || 0) > 0.030) {
+          warnings.push(`Slight grain (bgNoise=${(noiseR.bgNoise||0).toFixed(4)}, dustNoise=${(noiseR.dustNoise||0).toFixed(4)}). A light final NXT pass could help.`);
+        }
+      } catch (e) {
+        // Non-blocking if check fails
+      }
+
       // Gate 4: Subject detail — HARD GATE for brightness and contrast
       try {
         const detailResult = await measureSubjectDetail(ctx, viewId);
+        champDetail = detailResult;
         if (detailResult.subjectBrightness < 0.25) {
           failures.push(`SUBJECT TOO DIM: brightness=${detailResult.subjectBrightness.toFixed(3)} (minimum: 0.25). Subjects must be clearly visible and impactful. Stretch harder, apply shadow-lifting curves, boost through masks. For PNe: outer halo must be visible.`);
         } else if (detailResult.subjectBrightness < 0.30) {
@@ -2115,6 +2406,7 @@ const TOOL_CATALOG = {
       // Gate 7: Saturation naturalness — compare against per-category limit
       try {
         const satResult = await checkSaturation(ctx, viewId);
+        champSat = satResult;
         if (satResult.subjectPixelCount > 100) {
           const maxP90 = brief?.processingProfile?.saturation?.max_p90 ?? 0.65;
           if (satResult.p90S > maxP90 + 0.10) {
@@ -2253,6 +2545,63 @@ const TOOL_CATALOG = {
         }
       }
 
+      // Gate 11: Vision aesthetic critic — a FRESH independent judge on a competition
+      // rubric. BLOCKS if score < profile.min_aesthetic (default 6.0); relaxed under
+      // emergency budget. Infra failures (no verdict/render error) are advisory only.
+      try {
+        const minAesthetic = brief?.processingProfile?.min_aesthetic ?? 6.0;
+        const crit = await critiqueAesthetic(ctx, viewId, { baseDir: store?.baseDir, label: `finish_${variantId || viewId}`, maxDim: 1500, model: 'opus' });
+        if (crit.error) {
+          warnings.push(`AESTHETIC CRITIC SKIPPED: ${crit.error} (advisory — inspect visually).`);
+        } else {
+          const flawText = crit.flaws.length ? ` Flaws: ${crit.flaws.join('; ')}.` : '';
+          if (crit.aesthetic_score < minAesthetic) {
+            const msg = `AESTHETIC TOO LOW: independent judge scored ${crit.aesthetic_score.toFixed(1)}/10 (min ${minAesthetic.toFixed(1)}).${flawText} FIX the flaws (often over-cooked/saturated look, blown core, crushed faint structure, or bloated/erased stars), re-save the variant, and finish again.`;
+            if (isEmergency) warnings.push(`[RELAXED] ${msg}`);
+            else failures.push(msg);
+          } else {
+            warnings.push(`Aesthetic critic: ${crit.aesthetic_score.toFixed(1)}/10 (min ${minAesthetic.toFixed(1)}).${flawText}`);
+          }
+        }
+      } catch (e) {
+        warnings.push(`AESTHETIC CRITIC ERROR: ${e.message} — inspect visually.`);
+      }
+
+      // Gate 12: Reference similarity — ACTIVE ONLY when brief.reference_path is set.
+      // BLOCK on color_emd > 0.25 OR coverage_delta > 0.30; else advisory. Inert
+      // (entire block skipped) when no reference file is provided.
+      {
+        const refPath = (brief?.reference_path || '').trim();
+        if (refPath && fs.existsSync(refPath)) {
+          try {
+            const refCmp = await compareToReference(ctx, viewId, refPath);
+            if (refCmp.error) {
+              warnings.push(`Reference comparison error: ${refCmp.error} — inspect manually.`);
+            } else {
+              const cEmd = refCmp.color_emd ?? 0;
+              const covD = refCmp.coverage_delta ?? 0;
+              const blockColor = cEmd > 0.25;
+              const blockCoverage = covD > 0.30;
+              if (blockColor || blockCoverage) {
+                const parts = [];
+                if (blockColor) parts.push(`color_emd=${cEmd.toFixed(3)} > 0.25 (palette diverges from reference — adjust color balance / SCNR / saturation toward the reference)`);
+                if (blockCoverage) parts.push(`coverage_delta=${covD.toFixed(3)} > 0.30 (reference shows substantially MORE faint nebulosity/IFN — stretch faint structure harder or reduce denoising)`);
+                const msg = `REFERENCE MISMATCH: ${parts.join('; ')}. (${refCmp.details})`;
+                if (isEmergency) warnings.push(`[RELAXED] ${msg}`);
+                else failures.push(msg);
+              } else {
+                if (cEmd > 0.12) warnings.push(`Color drifting from reference (color_emd=${cEmd.toFixed(3)}, blocking at 0.25). Nudge color balance toward the reference palette.`);
+                if (covD > 0.10) warnings.push(`Reference has more faint signal (coverage_delta=${covD.toFixed(3)}, blocking at 0.30). A bit more shadow-lift on faint structure would match it better.`);
+                if (refCmp.geometry_ok && refCmp.ms_ssim != null && refCmp.ms_ssim < 0.70) warnings.push(`Structural similarity to reference is low (ms_ssim=${refCmp.ms_ssim.toFixed(3)}, goal >0.70).`);
+                if (!refCmp.geometry_ok) warnings.push(`Reference geometry differs — per-pixel SSIM skipped; only color_emd and coverage_delta compared.`);
+              }
+            }
+          } catch (e) {
+            warnings.push(`Reference comparison failed: ${e.message} — inspect manually.`);
+          }
+        }
+      }
+
       if (failures.length > 0) {
         return {
           type: 'text',
@@ -2286,6 +2635,14 @@ const TOOL_CATALOG = {
           view_id: viewId, // for reference only — NOT used for export
         });
         process.stderr.write(`[finish] Committed final selection: ${variantId} → ${variantMeta.xisfPath}\n`);
+
+        // B3a: record the promoted winner as a cross-run per-dimension champion.
+        try {
+          const classif = brief?.target?.classification || '';
+          const maxP90 = brief?.processingProfile?.saturation?.max_p90 ?? 0.65;
+          const dimScores = scoreVariantDimensions({ detail: champDetail, core: champCore, saturation: champSat, stars: champStars, maxP90 });
+          recordChampions(classif, store, { [variantId]: { dimensionScores: dimScores, xisfPath: variantMeta.xisfPath } });
+        } catch (e) { /* non-fatal */ }
       }
 
       const finalStats = await getStats(ctx, viewId);
@@ -2958,6 +3315,222 @@ const TOOL_CATALOG = {
           `  Contrast ratio: ${result.contrastRatio?.toFixed(1) || 'N/A'}× (HARD GATE: 3×, goal: >5×)\n` +
           `  Subject regions: ${result.subjectCount || 0} / Background median: ${result.backgroundMedian?.toFixed(4) || 'N/A'}`
       };
+    }
+  },
+
+  check_core_contrast: {
+    category: 'measurement',
+    definition: {
+      name: 'check_core_contrast',
+      description: 'Measure RELATIVE local contrast in the BRIGHT CORE vs the surrounding shell — catches a PERCEPTUAL burn that the clipping gates miss: a bright core that is NOT clipped (peak < 0.85) but reads as a flat washed-out white blob because its structure is tiny relative to its brightness. HARD GATE (finish WILL REJECT for extended-core targets): coreRelContrast >= 0.22 (goal: >0.30). relContrast = mean|local gradient| / mean luminance, in the brightest ~top-40%-of-dynamic-range region. If it fails, recover local contrast in the center (HDRMT/LHE reaching the core — shrink the donut hole — and/or compress the core pedestal with continuous_clamp so existing structure shows). Use after core/HDR/curve steps to verify the bright center is not flat.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'View ID to measure' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, brief, input) => {
+      const cb = brief?.processingProfile?.core_burn || {};
+      const relHard = (typeof cb.rel_contrast_hard === 'number') ? cb.rel_contrast_hard : 0.22;
+      const whiteHard = (typeof cb.white_hard === 'number') ? cb.white_hard : 0.15;
+      const result = await measureCoreContrast(ctx, input.view_id, brief?.target?.classification, cb);
+      return {
+        type: 'text',
+        text: `[CORE CONTRAST] ${result.details}\n` +
+          `  Core relContrast: ${result.coreRelContrast?.toFixed(3) ?? 'N/A'} (HARD GATE: ${relHard}, goal: >0.30)\n` +
+          `  Core white-clipped fraction: ${((result.coreWhiteFraction ?? 0)*100).toFixed(1)}% (HARD GATE: <${(whiteHard*100).toFixed(0)}%) | core saturation: ${typeof result.coreSat==='number' && result.coreSat>=0 ? result.coreSat.toFixed(3)+' (min 0.10)' : 'n/a (mono)'}\n` +
+          `  Shell relContrast: ${result.shellRelContrast?.toFixed(3) ?? 'N/A'} | core/shell ratio: ${(result.ratio ?? 0).toFixed(2)} (diagnostic)\n` +
+          `  Core mean lum: ${result.coreLum?.toFixed(3) ?? 'N/A'} | core fraction: ${((result.coreFraction ?? 0)*100).toFixed(2)}%\n` +
+          `  ${result.pass ? 'PASS' : 'FAIL — bright core is perceptually flat/white-burnt/desaturated'}`
+      };
+    }
+  },
+
+  check_noise: {
+    category: 'measurement',
+    definition: {
+      name: 'check_noise',
+      description: 'Measure background high-frequency (pixel-scale) GRAIN — the noise that aggressive LHE/stretching amplifies. HARD GATE (finish WILL REJECT): bgNoise <= 0.022 (goal <= 0.015). Estimated as MAD of (pixel - mean of dist-2 neighbors) over the cleanest background patches. If it fails, apply ONE light NoiseXTerminator pass (denoise 0.20-0.30) — just enough to smooth grain without over-smoothing (the core-contrast gate still needs resolved detail). Use as a FINAL evaluation before finish.',
+      input_schema: { type: 'object', properties: { view_id: { type: 'string', description: 'View ID to measure' } }, required: ['view_id'] }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const result = await measureBackgroundNoise(ctx, input.view_id);
+      return {
+        type: 'text',
+        text: `[NOISE] ${result.details}\n  bgNoise (dark sky): ${result.bgNoise?.toFixed(4) ?? 'N/A'} (HARD GATE: 0.022) | dustNoise (lifted dust grain): ${result.dustNoise?.toFixed(4) ?? 'N/A'} (HARD GATE: 0.040)\n  ${result.pass ? 'PASS' : 'FAIL — apply a final NXT pass (denoise ~0.30, detail 0.10) AFTER lift_dust'}`
+      };
+    }
+  },
+
+  measure_dust_coverage: {
+    category: 'measurement',
+    definition: {
+      name: 'measure_dust_coverage',
+      description: 'Measure faint brown-IFN / DUST presence in the FIELD (everything below the bright core). Distinguishes a frame FILLED with dust from an EMPTY black field even when their medians are IDENTICAL — the median is blind to dust distribution. Reports dustCoverage (fraction of field that is faint dust), warmDustFraction (brown lean), dustMeanSat (dust color richness) and fieldP90/P95 (dust peak brightness). HARD GATE for reflection/dusty profiles (finish WILL REJECT): fails when the dust is BOTH greyed (dustMeanSat < min) AND crushed (fieldP95 < min). If it fails, use lift_dust (NOT a global additive lift). Calibrated on NGC 7023 iter03 (good) vs giga (bad).',
+      input_schema: { type: 'object', properties: { view_id: { type: 'string', description: 'View ID to measure' } }, required: ['view_id'] }
+    },
+    handler: async (ctx, _store, brief, input) => {
+      const result = await measureDustCoverage(ctx, input.view_id, brief?.processingProfile?.ifn);
+      return {
+        type: 'text',
+        text: `[DUST/IFN] ${result.details}\n` +
+          `  dustCoverage: ${((result.dustCoverage ?? 0)*100).toFixed(1)}% of field | warmDustFraction: ${((result.warmDustFraction ?? 0)*100).toFixed(1)}%\n` +
+          `  dustMeanSat: ${(result.dustMeanSat ?? 0).toFixed(3)} | fieldP90: ${(result.fieldP90 ?? 0).toFixed(3)} | fieldP95: ${(result.fieldP95 ?? 0).toFixed(3)}\n` +
+          `  ${result.pass ? 'PASS' : 'FAIL — dust greyed AND crushed; use lift_dust (selective), not a global lift'}`
+      };
+    }
+  },
+
+  lift_dust: {
+    category: 'detail',
+    definition: {
+      name: 'lift_dust',
+      description: 'SELECTIVE brown-IFN / dust recovery for reflection nebulae and dusty fields. Pass 1 is a hue-preserving brightness+contrast lift of the faint DUST band (just above background, below the core); pass 2 boosts its warm saturation (chroma expansion in the dust band only). Brightens the dust WITHOUT raising the background noise floor or touching the bright core. This is how you make the brown LDN-type dust fill the frame. CRITICAL: do NOT use a global additive lift ($T + k*(1-$T)) for this — it greys the whole field uniformly and FAILS the IFN/dust gate. Run measure_dust_coverage before and after to confirm dustMeanSat and fieldP95 rose. Params: lift_amount (0.3-0.9 dust brightness/contrast gain), sat_boost (0.2-0.6 dust warm color), core_taper_low/high (luminance band where the lift tapers off to protect the bright core).',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'View ID to operate on' },
+          lift_amount: { type: 'number', description: 'Dust brightness/contrast gain (default 0.6, range 0.3-1.2)' },
+          sat_boost: { type: 'number', description: 'Dust warm-saturation boost (default 0.4, range 0-1)' },
+          core_taper_low: { type: 'number', description: 'Luminance where lift begins tapering off (default 0.30)' },
+          core_taper_high: { type: 'number', description: 'Luminance where lift is fully off, protecting the core (default 0.50)' },
+          mask_view_id: { type: 'string', description: 'OPTIONAL outer-field mask (mono, same geometry): 1 = lift dust here, 0 = protect (the nebula). Confines the lift spatially so it never brightens/flattens the core. Build via create_luminance_mask(inverted) or create_zone_masks(halo).' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const amt = Math.max(0, Math.min(1.2, input.lift_amount ?? 0.6));
+      const satk = Math.max(0, Math.min(1.0, input.sat_boost ?? 0.4));
+      const cLo = input.core_taper_low ?? 0.30;
+      const cHi = input.core_taper_high ?? 0.50;
+      const mv = input.mask_view_id;
+      const maskMul = mv ? ` * ${mv}[0]` : '';   // optional outer-field mask: confine the lift spatially, protect the nebula
+      const code = `
+        var w = ImageWindow.windowById('${input.view_id}');
+        if (w.isNull) throw new Error('lift_dust: view not found: ${input.view_id}');
+        if (!w.mainView.image.isColor) throw new Error('lift_dust: requires a color image');
+        ${mv ? `var mw=ImageWindow.windowById('${mv}'); if(mw.isNull) throw new Error('lift_dust: mask ${mv} not found'); if(mw.mainView.image.width!==w.mainView.image.width||mw.mainView.image.height!==w.mainView.image.height) throw new Error('lift_dust: mask geometry mismatch');` : ''}
+        var bg = w.mainView.image.median();
+        // Pass 1: hue-preserving dust-band brightness+contrast gain. Anchored at the
+        // background median (factor=1 at L=bg) so the noise floor is NOT lifted; gain
+        // tapers to 1 above core_taper_high so the bright core is untouched.
+        // PixelMath: definitions are statements in the EXPRESSION (semicolon-separated,
+        // last statement is the output); P.symbols lists the NAMES; conditionals use iif().
+        var P = new PixelMath;
+        P.expression = [
+          'L = 0.2126*$T[0]+0.7152*$T[1]+0.0722*$T[2]',
+          'mask = (1 - max(0, min(1, (L - ${cLo})/(${cHi} - ${cLo}))))${maskMul}',
+          'Lp = ' + bg + ' + (L - ' + bg + ')*(1 + ${amt}*mask)',
+          'factor = iif(L > 0.0008, Lp/L, 1)',
+          '$T * factor'
+        ].join('; ');
+        P.symbols = 'L, mask, Lp, factor';
+        P.useSingleExpression = true;
+        P.use64BitWorkingImage = true;
+        P.truncate = true; P.truncateLower = 0; P.truncateUpper = 1;
+        P.createNewImage = false;
+        P.executeOn(w.mainView);
+        // Pass 2: warm dust saturation boost (chroma expansion, peaks in the dust band)
+        var bg2 = w.mainView.image.median();
+        var P2 = new PixelMath;
+        P2.expression = [
+          'L = 0.2126*$T[0]+0.7152*$T[1]+0.0722*$T[2]',
+          'lo = ' + bg2 + '*1.05',
+          // ramp reaches full just above background (lo + bg*0.55 ~= bg*1.6) so the
+          // FAINT dust band (L ~ bg*1.3..0.3) is fully covered, not the mid-tones.
+          'up = max(0, min(1, (L - lo)/(' + bg2 + '*0.55)))',
+          'down = 1 - max(0, min(1, (L - ${cLo})/(${cHi} - ${cLo})))',
+          'dmask = up*down${maskMul}',
+          'L + (1 + ${satk}*dmask)*($T - L)'
+        ].join('; ');
+        P2.symbols = 'L, lo, up, down, dmask';
+        P2.useSingleExpression = true;
+        P2.use64BitWorkingImage = true;
+        P2.truncate = true; P2.truncateLower = 0; P2.truncateUpper = 1;
+        P2.createNewImage = false;
+        P2.executeOn(w.mainView);
+        var s = w.mainView.image;
+        JSON.stringify({ median: s.median(), max: s.maximum() });
+      `;
+      const r = await ctx.pjsr(code);
+      if (r.status === 'error') return { type: 'text', text: `lift_dust FAILED: ${r.error?.message || r.result}` };
+      let st = {}; try { st = JSON.parse(r.result || '{}'); } catch {}
+      return { type: 'text', text: `lift_dust applied (lift=${amt}, sat=${satk}, taper ${cLo}-${cHi}). New median=${(st.median ?? 0).toFixed(4)}, max=${(st.max ?? 0).toFixed(4)}. Re-run measure_dust_coverage to confirm dustMeanSat/fieldP95 rose.` };
+    }
+  },
+
+  inject_l_ifn: {
+    category: 'detail',
+    definition: {
+      name: 'inject_l_ifn',
+      description: 'Inject the faint IFN/DUST STRUCTURE from the deep L channel into the combined RGB luminance, so the frame-filling dust that lives in L (the longest exposure) actually reaches the final. For reflection/dust targets where the IFN is in L but the shallower per-channel RGB barely shows it (lrgb_combine LinearFits L down and loses it). Adds L\'s above-background dust signal to the combined luminance through a FIELD mask (hue-preserving, tapered off in the bright core), then gently WARM-TINTS the injected dust so it reads brown. CORE PROTECTION: by default the injection tapers off above core_taper_low luminance; for a structured bright nebula whose mid-brightness parts overlap the dust luminance, ALSO pass mask_view_id = an OUTER-FIELD mask (an inverted, dilated bright-nebula/luminance mask: 1 in the dusty outskirts, 0 over the nebula) so the dust fills AROUND the nebula and never flattens its blue core. This is the lever for "brown dust filling the frame WITHOUT washing the center". Run measure_dust_coverage before and after. Params: l_view_id (default FILTER_L), strength (0.2-0.7), warm (0-0.3), core_taper_low/high, mask_view_id (optional outer-field mask).',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'Combined RGB target view to inject into' },
+          l_view_id: { type: 'string', description: 'L source view (default FILTER_L). Must match target geometry.' },
+          strength: { type: 'number', description: 'Injection strength (default 0.4, range 0.2-0.7)' },
+          warm: { type: 'number', description: 'Warm-tint amount on injected dust (default 0.12, range 0-0.3)' },
+          core_taper_low: { type: 'number', description: 'Luminance where injection begins tapering off (default 0.22 — protects the bright nebula)' },
+          core_taper_high: { type: 'number', description: 'Luminance where injection is fully off (default 0.38)' },
+          mask_view_id: { type: 'string', description: 'OPTIONAL outer-field mask (mono, same geometry): 1 = fill dust here, 0 = protect (the nebula). Multiplies the luminance taper for hard spatial core protection. Build via create_luminance_mask(inverted) or create_zone_masks(halo).' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const lView = input.l_view_id || 'FILTER_L';
+      const mv = input.mask_view_id;
+      const str = Math.max(0, Math.min(1.0, input.strength ?? 0.4));
+      const warm = Math.max(0, Math.min(0.4, input.warm ?? 0.12));
+      const cLo = input.core_taper_low ?? 0.22;
+      const cHi = input.core_taper_high ?? 0.38;
+      // Guard: target color, L view present + same geometry (and mask if provided). Return L background median.
+      const g = await ctx.pjsr(`
+        var t=ImageWindow.windowById('${input.view_id}'); var l=ImageWindow.windowById('${lView}');
+        if(t.isNull) 'ERR:target ${input.view_id} missing';
+        else if(l.isNull) 'ERR:L view ${lView} missing';
+        else if(!t.mainView.image.isColor) 'ERR:target is not a color image';
+        else { var ti=t.mainView.image, li=l.mainView.image;
+          if(ti.width!==li.width || ti.height!==li.height) 'ERR:geometry mismatch '+ti.width+'x'+ti.height+' vs '+li.width+'x'+li.height;
+          ${mv ? `else { var mw=ImageWindow.windowById('${mv}'); if(mw.isNull) 'ERR:mask ${mv} missing'; else if(mw.mainView.image.width!==ti.width||mw.mainView.image.height!==ti.height) 'ERR:mask geometry mismatch'; else 'OK:'+li.median(); }` : `else 'OK:'+li.median();`} }
+      `);
+      const gv = (g.result || g.outputs?.consoleOutput || '').trim();
+      if (gv.indexOf('ERR:') === 0) return { type: 'text', text: `inject_l_ifn FAILED: ${gv.slice(4)}` };
+      const Lbg = parseFloat(gv.split(':')[1]) || 0;
+      const maskMul = mv ? ` * ${mv}[0]` : '';   // spatial core protection (outer-field mask)
+      // Shared symbol chain (definitions live in the expression per PixelMath; symbols lists names)
+      const chain = `Lc = 0.2126*$T[0]+0.7152*$T[1]+0.0722*$T[2]; Ld = max(0, ${lView}[0] - ${Lbg}); mask = (1 - max(0, min(1, (Lc - ${cLo})/(${cHi} - ${cLo}))))${maskMul}`;
+      const code = `
+        var w=ImageWindow.windowById('${input.view_id}');
+        // Pass 1: hue-preserving luminance injection of L's faint dust structure into the field
+        var P=new PixelMath;
+        P.expression='${chain}; Lnew = Lc + ${str}*mask*Ld; factor = iif(Lc > 0.0008, Lnew/Lc, 1); $T * factor';
+        P.symbols='Lc, Ld, mask, Lnew, factor';
+        P.useSingleExpression=true; P.use64BitWorkingImage=true;
+        P.truncate=true; P.truncateLower=0; P.truncateUpper=1; P.createNewImage=false;
+        P.executeOn(w.mainView);
+        // Pass 2: warm tint on the injected dust (per-channel, ADDITIVE so it tints
+        // faint/dark dust toward brown — multiplicative does nothing to near-black dust).
+        // tint scales with injected L dust amount; the field mask keeps the bright blue
+        // core untouched. Brown = R up, G up less, B down.
+        var Q=new PixelMath;
+        Q.expression='${chain}; tint = ${warm}*mask*min(1, Ld*3); $T + tint';
+        Q.expression1='${chain}; tint = ${warm}*mask*min(1, Ld*3); $T + 0.35*tint';
+        Q.expression2='${chain}; tint = ${warm}*mask*min(1, Ld*3); $T - 0.45*tint';
+        Q.symbols='Lc, Ld, mask, tint';
+        Q.useSingleExpression=false; Q.use64BitWorkingImage=true;
+        Q.truncate=true; Q.truncateLower=0; Q.truncateUpper=1; Q.createNewImage=false;
+        Q.executeOn(w.mainView);
+        var s=w.mainView.image; JSON.stringify({median:s.median(), max:s.maximum()});
+      `;
+      const r = await ctx.pjsr(code);
+      if (r.status === 'error') return { type: 'text', text: `inject_l_ifn FAILED: ${r.error?.message || r.result}` };
+      let st = {}; try { st = JSON.parse(r.result || '{}'); } catch {}
+      return { type: 'text', text: `inject_l_ifn applied (from ${lView}, strength=${str}, warm=${warm}, Lbg=${Lbg.toFixed(4)}). New median=${(st.median ?? 0).toFixed(4)}, max=${(st.max ?? 0).toFixed(4)}. Re-run measure_dust_coverage — dustCoverage/fieldP95 should rise.` };
     }
   },
 

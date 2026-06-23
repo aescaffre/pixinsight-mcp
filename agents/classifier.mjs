@@ -185,6 +185,8 @@ export function generateBrief(config, opts = {}) {
   return {
     briefId: `brief_${crypto.randomUUID().slice(0, 8)}`,
     createdAt: new Date().toISOString(),
+    // B2b: optional user-supplied reference image for compare_to_reference / Gate 12.
+    reference_path: (config.files?.referencePath || opts.referencePath || '').trim() || undefined,
     target: {
       name: targetName,
       classification,

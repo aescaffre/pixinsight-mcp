@@ -31,6 +31,8 @@ import { generateDiagnosticViews, buildImageMessage } from './vision.mjs';
 import { buildGigaOrchestratorPrompt } from './prompts/giga-orchestrator.mjs';
 import { buildGradientAgentPrompt } from './prompts/gradient-agent.mjs';
 import { runDeterministicPrep } from './deterministic-prep.mjs';
+import { recordOutcomes, extractLedgerGuidance, getChampions } from '../ledger.mjs';
+import { loadBaseRunAsPrep, gradientHash, hasGradientSolution, saveGradientSolution, replayGradientSolution } from './warmstart.mjs';
 
 const home = os.homedir();
 
@@ -133,11 +135,12 @@ const opts = {};
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--config' && args[i + 1]) opts.configPath = args[++i];
   else if (args[i] === '--intent') opts.intent = args[++i];
+  else if (args[i] === '--base-run') opts.baseRun = args[++i];   // B1 warm-start
   else if (args[i] === '--dry-run') opts.dryRun = true;
 }
 
 if (!opts.configPath) {
-  console.error('Usage: node agents/llm/giga-run.mjs --config /path/to/config.json [--intent "..."]');
+  console.error('Usage: node agents/llm/giga-run.mjs --config /path/to/config.json [--intent "..."] [--base-run <runId>]');
   process.exit(1);
 }
 
@@ -195,19 +198,43 @@ async function main() {
   // ================================================================
   // PHASE 1: DETERMINISTIC PREP (no LLM, pure code)
   // ================================================================
+  // B1 warm-start: --base-run skips prep+gradient and loads a prior winner.
+  let prepResult;
+  let baseSelection = null;
+  if (opts.baseRun) {
+    console.log(`\n--- Phase 1 SKIPPED — warm-starting from base run ${opts.baseRun} ---`);
+    const loaded = await loadBaseRunAsPrep(ctx, opts.baseRun, config.files?.targetName || 'Target');
+    prepResult = loaded.prepResult;
+    baseSelection = loaded.selection;
+    console.log(`  Loaded base winner: ${baseSelection.variant_id} (${baseSelection.variant_path})`);
+    console.log(`  Active view: rgb  median=${prepResult.stats.rgb?.median?.toFixed(6)}`);
+  } else {
   console.log('\n--- Phase 1: Deterministic Prep (no LLM) ---');
-  const prepResult = await runDeterministicPrep(ctx, config, {
+  prepResult = await runDeterministicPrep(ctx, config, {
     outputDir: path.join(store.baseDir, 'prep'),
     runDir: store.baseDir,
     log: console.log,
     brief: brief,
     // ----------------------------------------------------------------
-    // Phase 1.5: AGENTIC GRADIENT CORRECTION (Claude Max sub-agent).
-    // Fires after open/align/combine, on the LINEAR combined RGB (+ L),
-    // before SPCC/stretch. It iterates correction scale until the
-    // background color gradient is flat without eating faint signal.
+    // Phase 1.5: AGENTIC GRADIENT CORRECTION (Claude Max sub-agent), with a
+    // snapshot-replay cache keyed by a prep-input hash (B1): identical-input
+    // reruns replay the prior post-gradient snapshot instead of re-spawning.
     // ----------------------------------------------------------------
     onAfterCombine: async ({ targetName, hasL }) => {
+      let gHash = null;
+      try {
+        const rgbStats0 = await getStats(ctx, targetName);
+        gHash = gradientHash(config.files, rgbStats0);
+        if (hasGradientSolution(gHash)) {
+          console.log(`\n--- Phase 1.5: Gradient solution CACHE HIT (${gHash.slice(0, 12)}) — replaying snapshot ---`);
+          await replayGradientSolution(ctx, gHash, targetName, hasL);
+          console.log('--- Gradient snapshot replayed — skipping sub-agent ---');
+          return;
+        }
+      } catch (e) {
+        console.log(`  Gradient cache lookup skipped: ${e.message}`);
+      }
+
       console.log('\n--- Phase 1.5: Gradient Agent via Claude Max ---');
       const gradInitial = `## LINEAR DATA READY — your turn (gradient correction).
 
@@ -228,8 +255,14 @@ The corrected views MUST stay under these exact IDs. Do NOT stretch, denoise, ru
       });
       await gradAgent.run(gradInitial);
       console.log('--- Gradient Agent done — handing flattened linear views to prep phase 2 ---');
+
+      if (gHash) {
+        try { await saveGradientSolution(ctx, gHash, targetName, hasL); console.log(`  Gradient solution cached: ${gHash.slice(0, 12)}`); }
+        catch (e) { console.log(`  Gradient cache save skipped: ${e.message}`); }
+      }
     },
   });
+  }
 
   // Generate diagnostic views for the agent to start with
   const diagDir = path.join(store.baseDir, 'diagnostics', 'prep');
@@ -287,6 +320,17 @@ ${prepResult.views.stars ? `### Stars available: \`${prepResult.views.stars}\` (
 ### Winning Parameters from Previous Runs
 ${extractWinningParams(brief.target.classification)}
 
+### Cross-Run Promotion Ledger (what wins vs what never wins for this target class)
+${(() => { try { return extractLedgerGuidance(brief.target.classification); } catch (e) { return 'LEDGER: unavailable.'; } })()}
+${(() => {
+  try {
+    const champs = getChampions(brief.target.classification);
+    const dims = Object.keys(champs);
+    if (!dims.length) return '';
+    return `\n### Cross-Run Champions Available\nPrior runs of this target class produced best-of-breed images on: ${dims.map(d => `${d} (score ${(champs[d].score ?? 0).toFixed(3)})`).join(', ')}.\nUse recall_champion(<dimension>) to open one and graft its strong region (via blend_regions / star_protected_blend) for any dimension your current best is weak on.\n`;
+  } catch (e) { return ''; }
+})()}
+
 ${brief.target.classification.includes('emission') ? `
 ### TARGET-CLASS TOOL POLICY — READ THIS FIRST
 **This is an emission nebula. The Branch A detail tool is \`shell_detail_enhance\`.**
@@ -296,9 +340,22 @@ Reason: LHE amplifies brightness in bright shells, forcing clamping that destroy
 Use \`create_adaptive_zone_masks\` for zone-based processing.
 Use \`check_highlight_texture\` with reference checkpoints to verify texture preservation.
 ` : ''}
-## SKIP Phase 0 and Phase 1 — they are done.
+${opts.baseRun ? `## WARM-START — TOUCH-UP MODE.
+The view \`rgb\` is a FINISHED, exported composition from a previous run (variant ${baseSelection?.variant_id}). You are NOT processing from scratch.
+Previous selection notes: ${baseSelection?.notes ? JSON.stringify(baseSelection.notes) : 'none'}
+
+### Touch-up request
+${opts.intent ? opts.intent : 'No explicit instruction — make a conservative, single targeted improvement only.'}
+
+RULES:
+- Apply ONLY targeted, minimal touch-ups that serve the request. Do NOT re-stretch, re-combine, or rebuild from linear.
+- Preserve existing tonal balance, star treatment, and color unless the request explicitly targets them.
+- Measure first (get_stats / measure_* on \`rgb\`), make the smallest change that satisfies the intent, then save_variant and finish.
+- Quality gates still apply — do not regress core contrast, noise, saturation, or star quality.
+## Begin directly: measure \`rgb\`, then apply the touch-up.`
+  : `## SKIP Phase 0 and Phase 1 — they are done.
 ## Begin at Phase 2: Branch Generation.
-## Call recall_memory first, then start generating bracketed candidate sets.`;
+## Call recall_memory first, then start generating bracketed candidate sets.`}`;
 
   // Create MaxAgent
   console.log('\n--- Launching GIGA Agent via Claude Max ---');
@@ -451,6 +508,14 @@ Use \`check_highlight_texture\` with reference checkpoints to verify texture pre
     updateProcessingProfile(brief.target.classification, store);
   } catch (e) {
     console.log(`  Profile learning skipped: ${e.message}`);
+  }
+
+  // P3c: Record competitive-attempt outcomes to the cross-run promotion ledger
+  // (loss-aware learning — prunes approaches that never win, fast-tracks winners)
+  try {
+    recordOutcomes(brief.target.classification, store);
+  } catch (e) {
+    console.log(`  Ledger recording skipped: ${e.message}`);
   }
 
   // Token usage summary

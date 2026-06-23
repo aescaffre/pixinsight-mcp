@@ -149,12 +149,97 @@ async function saveToCache(ctx, config, cacheKey, result, log) {
   const meta = {
     cacheKey,
     cachedAt: new Date().toISOString(),
-    config: { targetName: config.files?.targetName, workflow: Object.keys(config.files).filter(k => config.files[k]?.trim()).join('+') },
+    config: { targetName: config.files?.targetName, workflow: Object.keys(config.files).filter(k => typeof config.files[k] === 'string' && config.files[k].trim()).join('+') },
     files,
     result,
   };
   fs.writeFileSync(path.join(cacheDir, 'meta.json'), JSON.stringify(meta, null, 2));
   log(`  Cache saved: ${cacheDir}`);
+}
+
+/**
+ * AUTOCROP — trim the pure-black alignment-fill border AND the low-coverage
+ * feathered edge of full-frame stacks (noisy/bright hard-edged wedge). Measures
+ * the box on RGB+L (20th-pct interior grid reference so the subject doesn't
+ * inflate the noise floor), then DynamicCrops RGB+L to the same box.
+ * MUST run AFTER SPCC: cropping drops the astrometric solution in this PI build.
+ */
+// PJSR snippet: clear the astrometric solution on window `w` BEFORE any DynamicCrop.
+// In this PI build DynamicCrop on a WCS-bearing view pops a modal "astrometry will be
+// lost on this view" confirmation that BLOCKS the headless pipeline (looks like a 20-min
+// hang / run_script timeout until someone clicks it). SPCC has already consumed the WCS
+// by the time we crop, so dropping it here is safe and removes the prompt.
+const WCS_CLEAR = `
+  try { if (w.hasAstrometricSolution) w.clearAstrometricSolution(); } catch(_e){}
+`;
+
+async function autoCropViews(ctx, { targetName, hasL, log }) {
+  const measureIds = [targetName].concat(hasL ? ['FILTER_L'] : []);
+  const cropIds = measureIds;
+  const boxes = [];
+  for (const id of measureIds) {
+    const r = await ctx.pjsr(`
+      var w=ImageWindow.windowById('${id}'); var img=w.mainView.image;
+      var W=img.width, Hh=img.height, isC=img.isColor, thr=1e-4;
+      function L(x,y){ if(isC) return 0.3*img.sample(x,y,0)+0.59*img.sample(x,y,1)+0.11*img.sample(x,y,2); return img.sample(x,y); }
+      var top=0;        while(top<Hh){    img.selectedRect=new Rect(0,top,W,top+1);          if(img.maximum()>thr)break; top++; }
+      var bottom=Hh-1;  while(bottom>top){ img.selectedRect=new Rect(0,bottom,W,bottom+1);    if(img.maximum()>thr)break; bottom--; }
+      var left=0;       while(left<W){    img.selectedRect=new Rect(left,0,left+1,Hh);        if(img.maximum()>thr)break; left++; }
+      var right=W-1;    while(right>left){ img.selectedRect=new Rect(right,0,right+1,Hh);      if(img.maximum()>thr)break; right--; }
+      img.resetRectSelection();
+      function stats(x0,y0,x1,y1){ var v=[]; var sx=Math.max(1,Math.floor((x1-x0)/100)), sy=Math.max(1,Math.floor((y1-y0)/100)); for(var y=y0;y<y1;y+=sy){ for(var x=x0;x<x1;x+=sx){ v.push(L(x,y)); } } if(v.length<3) return {med:0,mad:0}; v.sort(function(a,b){return a-b;}); var m=v[Math.floor(v.length/2)]; var d=[]; for(var i=0;i<v.length;i++) d.push(Math.abs(v[i]-m)); d.sort(function(a,b){return a-b;}); return {med:m, mad:d[Math.floor(d.length/2)]*1.4826}; }
+      var gm=[], gd=[];
+      for(var gy=0; gy<6; gy++){ for(var gx=0; gx<6; gx++){
+        var px0=Math.floor(W*(0.20+gx*0.10)), py0=Math.floor(Hh*(0.20+gy*0.10));
+        var st=stats(px0, py0, px0+Math.floor(W*0.06), py0+Math.floor(Hh*0.06));
+        gm.push(st.med); gd.push(st.mad);
+      } }
+      gm.sort(function(a,b){return a-b;}); gd.sort(function(a,b){return a-b;});
+      var bgMed=gm[Math.floor(gm.length*0.2)], bgMad=gd[Math.floor(gd.length*0.2)];
+      var madThr=1.8*bgMad, medThr=bgMed+4*bgMad;
+      var bandV=Math.max(6,Math.floor(Hh*0.006)), bandH2=Math.max(6,Math.floor(W*0.006));
+      var capV=Math.floor(Hh*0.18), capH=Math.floor(W*0.18);
+      while(top < capV){ var s=stats(left, top, right, top+bandV); if(s.mad<=madThr && s.med<=medThr) break; top+=bandV; }
+      while((Hh-1-bottom) < capV){ var s=stats(left, bottom-bandV, right, bottom); if(s.mad<=madThr && s.med<=medThr) break; bottom-=bandV; }
+      while(left < capH){ var s=stats(left, top, left+bandH2, bottom); if(s.mad<=madThr && s.med<=medThr) break; left+=bandH2; }
+      while((W-1-right) < capH){ var s=stats(right-bandH2, top, right, bottom); if(s.mad<=madThr && s.med<=medThr) break; right-=bandH2; }
+      JSON.stringify({W:W,H:Hh,left:left,top:top,right:right,bottom:bottom,intMad:bgMad,intMed:bgMed});
+    `);
+    const b = JSON.parse(r.outputs?.consoleOutput?.trim() || '{}');
+    if (b.W) { boxes.push(b); log(`  ${id}: trim L${b.left} T${b.top} R${b.W-1-b.right} B${b.H-1-b.bottom} (intMAD=${(b.intMad||0).toFixed(4)})`); }
+  }
+  if (!boxes.length) return;
+  const W = boxes[0].W, H = boxes[0].H, margin = 3;
+  let left = Math.max(...boxes.map(b => b.left));
+  let top = Math.max(...boxes.map(b => b.top));
+  let right = Math.min(...boxes.map(b => b.right));
+  let bottom = Math.min(...boxes.map(b => b.bottom));
+  if (left > 0) left = Math.min(left + margin, W - 1);
+  if (top > 0) top = Math.min(top + margin, H - 1);
+  if (right < W - 1) right = Math.max(right - margin, 0);
+  if (bottom < H - 1) bottom = Math.max(bottom - margin, 0);
+  const cropW = right - left + 1, cropH = bottom - top + 1;
+  if (cropW > 0 && cropH > 0 && (cropW < W || cropH < H)) {
+    const cx = (left + right + 1) / 2 / W, cy = (top + bottom + 1) / 2 / H;
+    const fw = cropW / W, fh = cropH / H;
+    for (const id of cropIds) {
+      const cr = await ctx.pjsr(`
+        var w=ImageWindow.windowById('${id}');
+        ${WCS_CLEAR}
+        var _stillWcs = w.hasAstrometricSolution;
+        var P=new DynamicCrop;
+        P.centerX=${cx}; P.centerY=${cy}; P.width=${fw}; P.height=${fh};
+        P.angle=0; P.scaleX=1; P.scaleY=1;
+        P.executeOn(w.mainView);
+        _stillWcs ? 'cropped_WCS_NOT_CLEARED' : 'cropped_clean';
+      `);
+      const tag = cr.outputs?.consoleOutput?.trim();
+      if (tag === 'cropped_WCS_NOT_CLEARED') log(`  [WARN] ${id}: WCS not cleared before crop — a modal may have blocked. Check WCS_CLEAR API.`);
+    }
+    log(`  Cropped ${W}x${H} → ${cropW}x${cropH} (removed ${W-cropW}px W, ${H-cropH}px H)`);
+  } else {
+    log('  No border detected — full frame kept.');
+  }
 }
 
 /**
@@ -182,6 +267,15 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
   const lTarget = Math.min(0.30, rgbTarget * 3);  // L always brighter than RGB for LRGB
   const haTarget = rgbTarget * 1.5;
   log(`[PREP] Stretch targets from profile: RGB=${rgbTarget}, L=${lTarget.toFixed(2)}, Ha=${haTarget.toFixed(2)}, headroom=${headroom}`);
+
+  // Linear/post-stretch NXT strengths from the profile (was hardcoded 0.30/0.25, which
+  // IGNORED the profile and over-softened faint IFN before it could be stretched).
+  // reflection_nebula -> 0.15/0.20: gentle linear pass preserves faint L dust; the
+  // MANDATORY final NXT (creative agent, after lift_dust) cleans the amplified grain.
+  const profileNxt = brief?.processingProfile?.tools?.NXT || {};
+  const nxtLinear = (typeof profileNxt.denoise_linear === 'number') ? profileNxt.denoise_linear : 0.30;
+  const nxtPost = (typeof profileNxt.denoise_post_stretch === 'number') ? profileNxt.denoise_post_stretch : 0.25;
+  log(`[PREP] NXT from profile: linear=${nxtLinear}, post-stretch=${nxtPost}`);
 
   // ========================================================================
   // DISK SPACE CHECK — refuse to start if < 20 GB free
@@ -215,6 +309,37 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
   if (p1cached) {
     log('[PREP] === PHASE 1 LOADED FROM CACHE (open/align/combine skipped) ===');
     phase1FromCache = true;
+    // The phase-1 cache stores only the combined RGB + linear L. Ha (if present)
+    // is NOT cached, so on a cache hit FILTER_Ha would be missing and prep-B's Ha
+    // processing fails with "null view". Re-open Ha from source here, mirroring
+    // the Step-1 aux-window handling, and dimension-match it to the cached RGB.
+    if (hasHa && F.Ha?.trim()) {
+      log('[PREP] Cache hit: re-opening FILTER_Ha from source (not cached)...');
+      try {
+        const beforeHa = (await ctx.listImages()).map(i => i.id);
+        await ctx.send('open_image', '__internal__', { filePath: F.Ha });
+        const newHa = (await ctx.listImages()).filter(i => !beforeHa.includes(i.id));
+        const isAux = (id) => /crop_mask|rejection_low|rejection_high/i.test(id);
+        const mainHa = newHa.find(i => /integration/i.test(i.id) && !isAux(i.id)) || newHa.find(i => !isAux(i.id)) || newHa[0];
+        for (const v of newHa) {
+          if (mainHa && v.id === mainHa.id) continue;
+          await ctx.pjsr(`var w=ImageWindow.windowById('${v.id}');if(!w.isNull)w.forceClose();`);
+        }
+        if (mainHa && mainHa.id !== 'FILTER_Ha') {
+          await ctx.pjsr(`var w=ImageWindow.windowById('${mainHa.id}');if(!w.isNull)w.mainView.id='FILTER_Ha';`);
+        }
+        // Dimension-match Ha to the cached RGB (autocrop/align may have resized RGB)
+        const dimR = await ctx.pjsr(`var a=ImageWindow.windowById('${targetName}'),b=ImageWindow.windowById('FILTER_Ha');(a.isNull||b.isNull)?'missing':JSON.stringify({rw:a.mainView.image.width,rh:a.mainView.image.height,hw:b.mainView.image.width,hh:b.mainView.image.height});`);
+        const d = JSON.parse(dimR.outputs?.consoleOutput?.trim() || '{}');
+        if (d.rw && (d.rw !== d.hw || d.rh !== d.hh)) {
+          log(`  Ha ${d.hw}x${d.hh} != RGB ${d.rw}x${d.rh} — center-cropping Ha to match...`);
+          await ctx.pjsr(`var w=ImageWindow.windowById('FILTER_Ha');${WCS_CLEAR}var P=new DynamicCrop;P.centerX=0.5;P.centerY=0.5;P.width=${d.rw}/w.mainView.image.width;P.height=${d.rh}/w.mainView.image.height;P.angle=0;P.scaleX=1;P.scaleY=1;P.executeOn(w.mainView);`);
+        }
+        log('  FILTER_Ha restored.');
+      } catch (e) {
+        log(`  WARN: failed to re-open Ha from cache path: ${e.message}`);
+      }
+    }
   } else {
     log('[PREP] Phase 1 cache MISS — running open/align/combine...');
   }
@@ -282,15 +407,21 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     log(`  Opening ${m.key}: ${path.basename(m.path)} → ${m.id}`);
     const beforeOpen = (await ctx.listImages()).map(i => i.id);
     await ctx.send('open_image', '__internal__', { filePath: m.path });
-    // Close crop masks and rename immediately (before opening next file)
+    // Identify all newly-opened views. XISF masters can bring sub-windows:
+    // crop_mask (autocrop files) and/or rejection_low/rejection_high
+    // (full-frame integrations). Keep the integration, close everything else.
     const afterOpen = await ctx.listImages();
-    for (const cm of afterOpen.filter(i => i.id.includes('crop_mask'))) {
-      await ctx.pjsr(`var w=ImageWindow.windowById('${cm.id}');if(!w.isNull)w.forceClose();`);
+    const newViews = afterOpen.filter(i => !beforeOpen.includes(i.id));
+    const isAux = (id) => /crop_mask|rejection_low|rejection_high/i.test(id);
+    const mainView = newViews.find(i => /integration/i.test(i.id) && !isAux(i.id))
+      || newViews.find(i => !isAux(i.id))
+      || newViews[0];
+    for (const v of newViews) {
+      if (mainView && v.id === mainView.id) continue;
+      await ctx.pjsr(`var w=ImageWindow.windowById('${v.id}');if(!w.isNull)w.forceClose();`);
     }
-    // Find the newly opened view (wasn't in beforeOpen) and rename to target ID
-    const newView = afterOpen.find(i => !beforeOpen.includes(i.id) && !i.id.includes('crop_mask'));
-    if (newView && newView.id !== m.id) {
-      await ctx.pjsr(`var w=ImageWindow.windowById('${newView.id}');if(!w.isNull)w.mainView.id='${m.id}';`);
+    if (mainView && mainView.id !== m.id) {
+      await ctx.pjsr(`var w=ImageWindow.windowById('${mainView.id}');if(!w.isNull)w.mainView.id='${m.id}';`);
     }
   }
 
@@ -393,6 +524,48 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
   }
 
     // ====================================================================
+    // WCS copy (RELIABLE PATH) — copy R's astrometric solution onto the combined
+    // RGB NOW, while geometry still matches R (both full-frame, pre-autocrop). The
+    // subsequent DynamicCrop (Step 3b) carries the solution through the crop, and
+    // the phase-1 cache then stores a WCS-bearing image. This makes SPCC reliable
+    // instead of depending on the intermittent post-autocrop plate-solve fallback
+    // (which fails when the cropped combined no longer matches the full-frame R).
+    // ====================================================================
+    const earlyWcs = await ctx.pjsr(`
+      var srcArr = ImageWindow.open('${F.R.replace(/'/g, "\\'")}');
+      var src = null;
+      if (srcArr && srcArr.length) {
+        for (var k=0;k<srcArr.length;k++){ var sid=srcArr[k].mainView.id; if(sid.indexOf('integration')>=0 && sid.indexOf('rejection')<0 && !src) src=srcArr[k]; }
+        if(!src) src=srcArr[0];
+      }
+      var tgt=ImageWindow.windowById('${targetName}');
+      var ok=false;
+      if(src && !src.isNull && !tgt.isNull){
+        var si=src.mainView.image, ti=tgt.mainView.image;
+        if(si.width===ti.width && si.height===ti.height && src.hasAstrometricSolution){
+          tgt.mainView.beginProcess();
+          tgt.keywords=src.keywords;
+          tgt.copyAstrometricSolution(src);
+          tgt.mainView.endProcess();
+          ok = tgt.hasAstrometricSolution;
+        }
+      }
+      if (srcArr) { for (var k=0;k<srcArr.length;k++){ if(!srcArr[k].isNull) srcArr[k].forceClose(); } }
+      var ws2=ImageWindow.windows;
+      for(var j=0;j<ws2.length;j++){ if(ws2[j].mainView.id.indexOf('crop_mask')>=0) ws2[j].forceClose(); }
+      ok ? 'WCS_EARLY_OK' : 'WCS_EARLY_SKIP';
+    `);
+    log('  WCS from R → combined (pre-autocrop): ' + ((earlyWcs.outputs?.consoleOutput || '').includes('WCS_EARLY_OK') ? 'copied' : 'skipped (no WCS / geometry)'));
+
+    // AUTOCROP MOVED to AFTER SPCC (prep-B). Cropping (DynamicCrop AND Crop) DROPS
+    // the astrometric solution in this PI build (verified 2026-06-23), so SPCC must
+    // run on the full-frame combined while its WCS is still valid. The combined +
+    // L stay full-frame through gradient/BXT/SPCC; autoCropViews() trims them right
+    // after SPCC. Bonus: a full-frame combined matches R, so the prep-B WCS copy
+    // works without depending on the flaky plate-solve. (autoCropViews defined at
+    // module scope; called post-SPCC; gated on F.autoCropBorder.)
+
+    // ====================================================================
     // Save PHASE 1 cache: linear combined RGB (+ linear L). NO gradient yet.
     // ====================================================================
     const p1result = { targetName, views: { rgb: targetName } };
@@ -439,65 +612,67 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     P.executeOn(ImageWindow.windowById('${targetName}').mainView);
   `, 'BXT correct on RGB');
 
-  // Ensure WCS astrometric solution for SPCC
-  // Try: 1) copy from R master, 2) if no valid WCS, plate solve with ImageSolver
+  // Ensure WCS astrometric solution for SPCC.
+  // FAST PATH: the WCS was copied onto the combined pre-autocrop (and carried
+  // through DynamicCrop), or restored from cache — so it's usually already here.
+  // Only if absent do we 1) copy from R (works when geometry matches), 2) plate solve.
+  const preWcs = await ctx.pjsr(`var w=ImageWindow.windowById('${targetName}'); (!w.isNull && w.hasAstrometricSolution) ? 'HAS_WCS' : 'NO_WCS';`);
+  let hasWCS = (preWcs.outputs?.consoleOutput || '').includes('HAS_WCS');
+  if (hasWCS) {
+    log('  WCS already present on combined (carried through autocrop / cache) — SPCC ready.');
+  } else {
   log('  Copy WCS from R master...');
   const wcsResult = await ctx.pjsr(`
-    var src=ImageWindow.open('${F.R.replace(/'/g, "\\'")}')[0];
+    var srcArr = ImageWindow.open('${F.R.replace(/'/g, "\\'")}');   // may be [integration, rejection_low/high]
+    var src = null;
+    if (srcArr && srcArr.length) {
+      for (var k=0;k<srcArr.length;k++){ var sid=srcArr[k].mainView.id; if(sid.indexOf('integration')>=0 && sid.indexOf('rejection')<0 && !src) src=srcArr[k]; }
+      if(!src) src=srcArr[0];
+    }
     var tgt=ImageWindow.windowById('${targetName}');
     var hasWCS = false;
-    if(!src.isNull&&!tgt.isNull){
-      tgt.mainView.beginProcess();
-      tgt.keywords=src.keywords;
-      if(src.astrometricSolution){
-        tgt.copyAstrometricSolution(src,false);
-        hasWCS = true;
+    if(src && !src.isNull && !tgt.isNull){
+      var si=src.mainView.image, ti=tgt.mainView.image;
+      // Geometry must match for the astrometric solution to be valid on the target.
+      if(si.width===ti.width && si.height===ti.height){
+        tgt.mainView.beginProcess();
+        tgt.keywords=src.keywords;
+        if(src.hasAstrometricSolution){
+          tgt.copyAstrometricSolution(src);
+          hasWCS = tgt.hasAstrometricSolution;
+        }
+        tgt.mainView.endProcess();
       }
-      tgt.mainView.endProcess();
     }
-    if(!src.isNull)src.forceClose();
+    if (srcArr) { for (var k=0;k<srcArr.length;k++){ if(!srcArr[k].isNull) srcArr[k].forceClose(); } }
     var ws2=ImageWindow.windows;
-    for(var j=0;j<ws2.length;j++){
-      if(ws2[j].mainView.id.indexOf('crop_mask')>=0) ws2[j].forceClose();
-    }
+    for(var j=0;j<ws2.length;j++){ if(ws2[j].mainView.id.indexOf('crop_mask')>=0) ws2[j].forceClose(); }
     hasWCS ? 'WCS_COPIED' : 'NO_WCS';
   `);
-  const hasWCS = (wcsResult.outputs?.consoleOutput || '').includes('WCS_COPIED');
+  hasWCS = (wcsResult.outputs?.consoleOutput || '').includes('WCS_COPIED');
   log('  ' + (hasWCS ? 'WCS copied from R master' : 'No WCS in R master — will plate solve'));
+  }
 
   if (!hasWCS) {
-    // Plate solve using ImageSolver with coordinates from FITS headers
-    log('  Plate solving with ImageSolver...');
-    // Read RA/Dec from the target's keywords (copied from R master above)
+    // Fallback only when masters lack a WCS. ImageSolver is a SCRIPT object, NOT
+    // a process: must use Init()/SolveImage() (not executeOn), read pixel scale
+    // from FITS keywords (XPIXSZ — NOT a hardcoded 1.88), persist via
+    // metadata.SaveProperties/SaveKeywords, and check hasAstrometricSolution.
+    log('  No WCS in masters — plate solving with ImageSolver (script API)...');
     const solveR = await ctx.pjsr(`
       var w = ImageWindow.windowById('${targetName}');
-      // Extract RA/Dec from keywords
-      var ra = 0, dec = 0, focal = 0;
-      var kw = w.keywords;
-      for (var i = 0; i < kw.length; i++) {
-        if (kw[i].name === 'RA') ra = parseFloat(kw[i].value);
-        if (kw[i].name === 'DEC') dec = parseFloat(kw[i].value);
-        if (kw[i].name === 'FOCALLEN') focal = parseFloat(kw[i].value);
-      }
-      // Compute pixel scale: 206.265 * pixelSize(um) / focal(mm)
-      // For drizzled data, effective pixel size may be halved
-      var pixSize = 1.88; // from XPIXSZ header, but drizzle may change this
-      var pixScale = focal > 0 ? 206.265 * pixSize / focal : 0.84; // fallback
-
       var P = new ImageSolver;
-      P.centerRA = ra;
-      P.centerDec = dec;
-      P.pixelSize = pixSize;
-      P.focalLength = focal;
-      P.resolution = pixScale;
-      P.autoFlip = true;
-      P.catalogMode = 1;
-      P.catalog = 'GaiaDR3';
-      P.limitMagnitude = 14;
-      P.distortionCorrection = true;
-      P.projectionSystem = ImageSolver.prototype.Gnomonic;
-      P.executeOn(w.mainView);
-      w.astrometricSolution ? 'SOLVED' : 'SOLVE_FAILED';
+      P.Init(w);                       // reads RA/DEC/FOCALLEN/XPIXSZ into P.metadata
+      P.metadata.useFocal = true;      // seed scale from focal+pixel size, refine on stars
+      try { P.solverCfg.catalogMode = 2; } catch (e) {}   // VizieR online
+      try { P.solverCfg.autoMagnitude = true; } catch (e) {}
+      try { P.solverCfg.tryExhaustiveInitialAlignment = true; } catch (e) {}
+      try { P.solverCfg.sensitivity = 0.6; } catch (e) {}
+      try { P.solverCfg.showStars = false; P.solverCfg.generateErrorImg = false; P.solverCfg.showDistortion = false; P.solverCfg.showSimplifiedSurfaces = false; } catch (e) {}
+      var ok = false;
+      try { ok = P.SolveImage(w); } catch (e) { ok = false; }
+      if (ok) { try { P.metadata.SaveProperties(w); } catch (e) {} try { P.metadata.SaveKeywords(w); } catch (e) {} }
+      w.hasAstrometricSolution ? 'SOLVED' : 'SOLVE_FAILED';
     `);
     const solved = (solveR.outputs?.consoleOutput || '').includes('SOLVED');
     log('  Plate solve: ' + (solved ? 'SUCCESS' : 'FAILED (SPCC may not work)'));
@@ -554,11 +729,19 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     log('  The agent can run run_spcc or manual color calibration later if needed.');
   }
 
-  // NXT linear (balanced — reduce noise while preserving faint detail)
-  log('  NXT linear (0.30)...');
+  // AUTOCROP (moved here, post-SPCC): SPCC needed a valid WCS on the full-frame
+  // combined; cropping drops the solution. Now trim the black + low-coverage edges
+  // off RGB + L (both still linear, pre-NXT/SXT/stretch — keeps them aligned).
+  if (F.autoCropBorder) {
+    log('\n[PREP] Auto-trimming black + low-coverage edges (post-SPCC)...');
+    await autoCropViews(ctx, { targetName, hasL, log });
+  }
+
+  // NXT linear (from profile — gentle for dust profiles to preserve faint IFN)
+  log(`  NXT linear (${nxtLinear})...`);
   await pjsrOrDie(`
     var P=new NoiseXTerminator;
-    P.denoise=0.30;P.detail=0.15;
+    P.denoise=${nxtLinear};P.detail=0.15;
     P.executeOn(ImageWindow.windowById('${targetName}').mainView);
   `, 'NXT linear on RGB');
 
@@ -591,11 +774,11 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
   log(`  Seti stretch RGB (target=${rgbTarget}, headroom=${headroom})...`);
   await setiStretch(ctx, targetName, { targetMedian: rgbTarget, hdrAmount: 0.25, hdrKnee: 0.35, hdrHeadroom: headroom });
 
-  // NXT post-stretch
-  log('  NXT post-stretch (0.25)...');
+  // NXT post-stretch (from profile)
+  log(`  NXT post-stretch (${nxtPost})...`);
   await pjsrOrDie(`
     var P=new NoiseXTerminator;
-    P.denoise=0.25;P.detail=0.15;
+    P.denoise=${nxtPost};P.detail=0.15;
     P.executeOn(ImageWindow.windowById('${targetName}').mainView);
   `, 'NXT post-stretch on RGB');
 
@@ -628,11 +811,12 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
       P.executeOn(ImageWindow.windowById('FILTER_L').mainView);
     `, 'BXT correct on L');
 
-    // NXT linear on L (balanced)
-    log('  NXT linear on L (0.30)...');
+    // NXT linear on L (from profile — gentle to preserve the faint L IFN, which is
+    // this target's main dust signal; the final NXT cleans amplified grain later)
+    log(`  NXT linear on L (${nxtLinear})...`);
     await pjsrOrDie(`
       var P=new NoiseXTerminator;
-      P.denoise=0.30;P.detail=0.15;
+      P.denoise=${nxtLinear};P.detail=0.15;
       P.executeOn(ImageWindow.windowById('FILTER_L').mainView);
     `, 'NXT linear on L');
 
@@ -703,6 +887,7 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
           var dx = Math.floor((img.width - ${rgbW}) / 2);
           var dy = Math.floor((img.height - ${rgbH}) / 2);
           if (dx > 0 || dy > 0) {
+            ${WCS_CLEAR}
             var P = new DynamicCrop;
             P.centerX = 0.5; P.centerY = 0.5;
             P.width = ${rgbW} / img.width;

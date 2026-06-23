@@ -294,8 +294,9 @@
       "star_density": "sparse"
     },
     "stretch": {
-      "target_median": 0.16,
-      "headroom": 0.03
+      "target_median": 0.20,
+      "headroom": 0.03,
+      "reason": "Brighter background to reveal the surrounding brown IFN / dark molecular cloud (Iris sits in LDN 1174). Lift shadows; do not crush faint dust to black."
     },
     "tools": {
       "GC": { "use": true },
@@ -319,11 +320,27 @@
     "burn": {
       "max_bright_block_pct": 1.0
     },
+    "core_burn": {
+      "white_hard": 0.10,
+      "rel_contrast_hard": 0.35,
+      "_calibration": "Catches the SXT-left HD200775 glow blob. iter03(good): coreWhiteFraction 0.055 / relContrast 0.452 -> PASS. giga(bad): 0.111 / 0.290 -> CAUGHT. reflection_nebula ONLY."
+    },
+    "ifn": {
+      "min_dust_mean_sat": 0.24,
+      "min_field_p95": 0.15,
+      "min_dust_coverage": 0.24,
+      "min_warm_fraction": 0.35,
+      "_calibration": "Brown LDN1174 dust presence. iter03(good): dustMeanSat 0.300 / fieldP95 0.194 / cov 0.280 -> PASS. giga(bad): 0.179 / 0.118 / 0.209 (warm 0.41) -> CAUGHT (greyed AND crushed). Median is identical 0.0784 in both, so median is NOT the discriminator. min_warm_fraction gates the HARD-fail to brown-dust fields only (M45/blue reflection has low warm fraction -> not blocked). THRESHOLDS PROVISIONAL: calibrated on NGC7023 only; add a 2nd reflection target (IC2118/vdB) before treating as class-wide."
+    },
     "stars": {
       "screen_blend_strength": 1.00,
-      "prominence": "prominent"
+      "prominence": "prominent",
+      "core_protected_blend": true,
+      "min_strength_fraction": 0.0,
+      "core_threshold_low": 0.55,
+      "core_threshold_high": 0.70
     },
-    "notes": "Subtlety is everything. Blue reflection color must be preserved. Over-processing destroys the delicate dust structure. NXT must be very gentle. Brighter background needed to reveal faint nebulosity.",
+    "notes": "Subtlety is everything. Blue reflection color must be preserved. Over-processing destroys the delicate dust structure. NXT must be very gentle. Brighter background needed to reveal faint nebulosity. BRIGHT-CORE reflection nebulae (e.g. NGC 7023 Iris around HD 200775): SXT mis-extracts the bright central glow as a large diffuse 'star' blob — re-adding it (with star-stretch+saturation) looks strange. Use star_protected_blend with aggressive core protection (min_strength_fraction ~0.0, core_threshold_low/high ~0.55/0.70) so the blob is NOT re-added; the starless retains the core glow. SURROUNDING IFN: the Iris is embedded in a large BROWN dark molecular cloud (LDN 1174) that should be clearly visible filling the frame — warm tan dust with dark patches, NOT a black background. Lift shadows / raise background, and PRESERVE the warm brown dust color (do not let the IFN go grey/neutral or crush to black). Reference look: structured blue reflection core with brown dust lanes threading into the bright center, surrounded by brown IFN everywhere.",
     "learned_overrides": {}
   },
 

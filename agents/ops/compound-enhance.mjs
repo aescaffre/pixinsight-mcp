@@ -106,8 +106,12 @@ export async function multiScaleEnhance(ctx, viewId, opts = {}) {
       CE.channels = [[true, maskId], [false, ''], [false, '']];
       CE.executeOn(w.mainView);
     } else {
-      // Clone for mono
-      w.mainView.window.cloneView(w.mainView, maskId);
+      // Clone for mono — create a new grayscale window and assign pixels
+      var maskW0 = new ImageWindow(img.width, img.height, 1, 32, true, false, maskId);
+      maskW0.mainView.beginProcess();
+      maskW0.mainView.image.assign(img);
+      maskW0.mainView.endProcess();
+      maskW0.show();
     }
     processEvents();
 

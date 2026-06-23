@@ -132,18 +132,23 @@ export async function runPerChannelABE(ctx, viewId, opts = {}) {
 
 /**
  * Run SCNR (SubtractiveChromaticNoiseReduction) on a view — removes green cast.
- * Use through an inverted luminance mask to target background only.
+ * Unmasked; pass preserveLightness:true to keep brightness so warm dust/IFN is
+ * not greyed out. Callers cap `amount` for dust/reflection targets.
  * @param {object} ctx - Bridge context
  * @param {string} viewId - View ID
- * @param {object} opts - { amount, protection }
+ * @param {object} opts - { amount, preserveLightness }
  */
 export async function runSCNR(ctx, viewId, opts = {}) {
   const amount = opts.amount ?? 0.50;
+  // preserveLightness keeps luminance while removing green — prevents greying
+  // out warm dust/IFN (over-aggressive unmasked SCNR was greying brown dust).
+  const preserveLightness = opts.preserveLightness ? 'true' : 'false';
   const r = await ctx.pjsr(`
     var P = new SCNR;
     P.colorToRemove = SCNR.prototype.Green;
     P.amount = ${amount};
     P.protectionMethod = SCNR.prototype.AverageNeutral;
+    P.preserveLightness = ${preserveLightness};
     P.executeOn(ImageWindow.windowById('${viewId}').mainView);
     'SCNR done (amount=${amount})';
   `);
