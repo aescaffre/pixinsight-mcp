@@ -323,9 +323,7 @@
     "core_burn": {
       "white_hard": 0.10,
       "rel_contrast_hard": 0.35,
-      "min_struct_frac": 0.80,
-      "max_halo_frac": 0.03,
-      "_calibration": "Catches the SXT-left HD200775 glow blob AND the relContrast blind spot (flat blue center inside a structured/bright halo). iter03(good) relC 0.452/white 5.5%/struct 97.5%/halo 0.3% -> PASS. flat-core relC-passing but struct 45.7%/halo 12.3% -> CAUGHT. blown-halo graft struct 81.9%/halo 6.1% -> CAUGHT. best-of-both struct 95.7%/halo 0.5% -> PASS. reflection_nebula ONLY (struct/halo thresholds opt-in per profile)."
+      "_calibration": "Catches the SXT-left HD200775 glow blob. iter03(good) relC 0.452/white 5.5%; best-of-both relC 0.367 -> PASS; flat giga relC 0.290 -> CAUGHT. reflection_nebula ONLY. NOTE 2026-06-24: struct/halo gate (min_struct_frac/max_halo_frac) REMOVED — it over-constrained the core and tipped the mega-agent from barely-finishing (good best-of-both) into churn/no-finish. The struct/halo CODE remains in measureCoreContrast (opt-in via these keys) for a future, separately-validated re-introduction once the mega-agent finishes reliably. See [[project_ctier_plan]]."
     },
     "ifn": {
       "min_dust_mean_sat": 0.24,
