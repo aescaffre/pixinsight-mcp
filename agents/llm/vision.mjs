@@ -58,10 +58,10 @@ export async function generateDiagnosticViews(ctx, viewId, outputDir, opts = {})
     tmp.mainView.endProcess();
     if (scale < 1) {
       var R = new Resample;
-      R.mode = Resample.prototype.RelativeDimensions;
+      R.mode = Resample.RelativeDimensions;
       R.xSize = scale; R.ySize = scale;
-      R.absoluteMode = Resample.prototype.ForceWidthAndHeight;
-      R.interpolation = Resample.prototype.MitchellNetravaliFilter;
+      R.absoluteMode = Resample.ForceWidthAndHeight;
+      R.interpolation = Resample.MitchellNetravaliFilter;
       R.executeOn(tmp.mainView);
     }
     var p = '${overviewPath.replace(/'/g, "\\'")}';
@@ -128,10 +128,10 @@ export async function generateDiagnosticViews(ctx, viewId, outputDir, opts = {})
     tmp.mainView.endProcess();
     if (scale < 1) {
       var R = new Resample;
-      R.mode = Resample.prototype.RelativeDimensions;
+      R.mode = Resample.RelativeDimensions;
       R.xSize = scale; R.ySize = scale;
-      R.absoluteMode = Resample.prototype.ForceWidthAndHeight;
-      R.interpolation = Resample.prototype.MitchellNetravaliFilter;
+      R.absoluteMode = Resample.ForceWidthAndHeight;
+      R.interpolation = Resample.MitchellNetravaliFilter;
       R.executeOn(tmp.mainView);
     }
     var timg = tmp.mainView.image;

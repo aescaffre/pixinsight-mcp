@@ -271,7 +271,7 @@ async function run() {
     P.expression='${idR}'; P.expression1='${idG}'; P.expression2='${idB}';
     P.useSingleExpression=false; P.createNewImage=true; P.showNewImage=true;
     P.newImageId='${TARGET}'; P.newImageWidth=${rgbW}; P.newImageHeight=${rgbH};
-    P.newImageColorSpace=PixelMath.prototype.RGB; P.newImageSampleFormat=PixelMath.prototype.f32;
+    P.newImageColorSpace=PixelMath.RGB; P.newImageSampleFormat=PixelMath.f32;
     P.executeGlobal();
   `);
   if (r.status === 'error') { log('FATAL combine: ' + r.error.message); process.exit(1); }
@@ -290,7 +290,7 @@ async function run() {
     var P=new PixelMath; P.expression='${idHa}'; P.useSingleExpression=true;
     P.createNewImage=true; P.showNewImage=true; P.newImageId='Ha_work';
     P.newImageWidth=${rgbW}; P.newImageHeight=${rgbH};
-    P.newImageColorSpace=PixelMath.prototype.Gray; P.newImageSampleFormat=PixelMath.prototype.f32;
+    P.newImageColorSpace=PixelMath.Gray; P.newImageSampleFormat=PixelMath.f32;
     P.executeGlobal();
   `);
 
@@ -300,7 +300,7 @@ async function run() {
     var P=new PixelMath; P.expression='${idL}'; P.useSingleExpression=true;
     P.createNewImage=true; P.showNewImage=true; P.newImageId='L_work';
     P.newImageWidth=${rgbW}; P.newImageHeight=${rgbH};
-    P.newImageColorSpace=PixelMath.prototype.Gray; P.newImageSampleFormat=PixelMath.prototype.f32;
+    P.newImageColorSpace=PixelMath.Gray; P.newImageSampleFormat=PixelMath.f32;
     P.executeGlobal();
   `);
 

@@ -93,8 +93,8 @@ const PERMS = [
       P.newImageId = '${testId}';
       P.newImageWidth = w;
       P.newImageHeight = h;
-      P.newImageColorSpace = PixelMath.prototype.RGB;
-      P.newImageSampleFormat = PixelMath.prototype.f32;
+      P.newImageColorSpace = PixelMath.RGB;
+      P.newImageSampleFormat = PixelMath.f32;
       P.executeGlobal();
       'ok';
     `);

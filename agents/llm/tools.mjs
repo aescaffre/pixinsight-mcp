@@ -37,7 +37,7 @@ function statsLine(stats, label = 'Stats') {
 // Tool definition catalog
 // ============================================================================
 
-const TOOL_CATALOG = {
+export const TOOL_CATALOG = {
 
   // --- Measurement ---
   get_image_stats: {
@@ -171,10 +171,10 @@ const TOOL_CATALOG = {
         tmp.mainView.endProcess();
         if (scale < 1) {
           var R = new Resample;
-          R.mode = Resample.prototype.RelativeDimensions;
+          R.mode = Resample.RelativeDimensions;
           R.xSize = scale; R.ySize = scale;
-          R.absoluteMode = Resample.prototype.ForceWidthAndHeight;
-          R.interpolation = Resample.prototype.MitchellNetravaliFilter;
+          R.absoluteMode = Resample.ForceWidthAndHeight;
+          R.interpolation = Resample.MitchellNetravaliFilter;
           R.executeOn(tmp.mainView);
         }
         var p = '${previewPath.replace(/'/g, "\\'")}';
@@ -678,10 +678,10 @@ const TOOL_CATALOG = {
         ${centerRA}
         ${centerDec}
         ${pixelScale}
-        P.catalogMode = ImageSolver.prototype.DataRelease;
-        P.catalog = ImageSolver.prototype.GaiaDR3;
+        P.catalogMode = ImageSolver.DataRelease;
+        P.catalog = ImageSolver.GaiaDR3;
         P.distortionCorrection = true;
-        P.projectionSystem = ImageSolver.prototype.Gnomonic;
+        P.projectionSystem = ImageSolver.Gnomonic;
         P.executeOn(ImageWindow.windowById('${input.view_id}').mainView);
         'OK';
       `);
@@ -815,8 +815,8 @@ const TOOL_CATALOG = {
       await ctx.pjsr(`
         var P = new SCNR;
         P.amount = ${input.amount ?? 0.80};
-        P.protectionMethod = SCNR.prototype.AverageNeutral;
-        P.colorToRemove = SCNR.prototype.Green;
+        P.protectionMethod = SCNR.AverageNeutral;
+        P.colorToRemove = SCNR.Green;
         P.preserveLightness = true;
         P.executeOn(ImageWindow.windowById('${input.view_id}').mainView);
       `);
@@ -1155,8 +1155,11 @@ const TOOL_CATALOG = {
           `L = (${targetId}[0] + ${targetId}[1] + ${targetId}[2]) / 3`,
           // SL = star luminance
           `SL = (${starsId}[0] + ${starsId}[1] + ${starsId}[2]) / 3`,
-          // protection ramp
-          `prot = iif(L < ${coreStart}, 1.0, iif(L > ${coreEnd}, ${minFrac}, 1.0 - ${invRange} * (L - ${coreStart}) / ${range}))`,
+          // protection ramp — gated on the STAR's own brightness (SL), not the
+          // starless target's (L). A bright isolated star sits on dark sky, so L
+          // stays low and gating on L means protection never engages for the one
+          // case it exists to handle (bright star core -> white clip).
+          `prot = iif(SL < ${coreStart}, 1.0, iif(SL > ${coreEnd}, ${minFrac}, 1.0 - ${invRange} * (SL - ${coreStart}) / ${range}))`,
           // effective star strength
           `k = ${str} * prot`,
           // normal RGB screen blend for this channel
@@ -1165,8 +1168,8 @@ const TOOL_CATALOG = {
           `Lrgb = 1 - (1 - L) * (1 - SL * k)`,
           // color-preserving: scale original channel by lum ratio
           `cp = min(${targetId}[${c}] * Lrgb / max(L, 0.001), 0.98)`,
-          // blend weight: 0 in dark (pure screen), 1 in bright (pure color-preserving)
-          `w = iif(L < ${coreStart}, 0.0, iif(L > ${coreEnd}, 1.0, (L - ${coreStart}) / ${range}))`,
+          // blend weight: 0 in dark (pure screen), 1 in bright (pure color-preserving) — same SL gating
+          `w = iif(SL < ${coreStart}, 0.0, iif(SL > ${coreEnd}, 1.0, (SL - ${coreStart}) / ${range}))`,
           // final output
           `rgb * (1 - w) + cp * w`,
         ].join('; ');
@@ -1446,8 +1449,8 @@ const TOOL_CATALOG = {
         var CE = new ChannelExtraction;
         CE.channelEnabled = [true, true, true];
         CE.channelId = ['${tgt}_R', '${tgt}_G', '${tgt}_B'];
-        CE.colorSpace = ChannelExtraction.prototype.RGB;
-        CE.sampleFormat = ChannelExtraction.prototype.SameAsSource;
+        CE.colorSpace = ChannelExtraction.RGB;
+        CE.sampleFormat = ChannelExtraction.SameAsSource;
         CE.executeOn(ImageWindow.windowById('${tgt}').mainView);
         'channels extracted';
       `);
@@ -2423,7 +2426,7 @@ const TOOL_CATALOG = {
         P.outputPrefix = 'aligned_';
         P.outputPostfix = '';
         P.overwriteExistingFiles = true;
-        P.onError = StarAlignment.prototype.Continue;
+        P.onError = StarAlignment.Continue;
         P.useTriangles = true;
         P.polygonSides = 5;
         P.useBrightnessRelations = true;
@@ -2510,7 +2513,7 @@ const TOOL_CATALOG = {
 
       const r = await ctx.pjsr(`
         var P = new ChannelCombination;
-        P.colorSpace = ChannelCombination.prototype.RGB;
+        P.colorSpace = ChannelCombination.RGB;
         P.channels = [
           [true, '${input.r_view_id}'],
           [true, '${input.g_view_id}'],

@@ -34,7 +34,7 @@ export async function createMask(ctx, sourceViewId, maskId, blur = 5, clipLow = 
     maskW.mainView.beginProcess();
     maskW.mainView.image.assign(srcW.mainView.image);
     maskW.mainView.endProcess();
-    ${blur > 0 ? `var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = ${blur}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(maskW.mainView);` : ''}
+    ${blur > 0 ? `var C = new Convolution; C.mode = Convolution.Parametric; C.sigma = ${blur}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(maskW.mainView);` : ''}
     ${clipLow > 0 ? `var PM = new PixelMath; PM.expression = 'iif($T<${clipLow},0,($T-${clipLow})/${(1 - clipLow).toFixed(4)})'; PM.useSingleExpression = true; PM.createNewImage = false; PM.use64BitWorkingImage = true; PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1; PM.executeOn(maskW.mainView);` : ''}
     maskW.show();
     'OK';
@@ -82,7 +82,7 @@ export async function createLumMask(ctx, sourceViewId, maskId, blur = 5, clipLow
     PM.useSingleExpression = true;
     PM.createNewImage = false;
     PM.executeOn(mw.mainView);
-    ${blur > 0 ? `var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = ${blur}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(mw.mainView);` : ''}
+    ${blur > 0 ? `var C = new Convolution; C.mode = Convolution.Parametric; C.sigma = ${blur}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(mw.mainView);` : ''}
     ${clipLow > 0 || gamma !== 1.0 ? `var PM2 = new PixelMath; PM2.expression = '${gamma !== 1.0 ? `iif($T<${clipLow},0,exp(${gamma.toFixed(4)}*ln(max(($T-${clipLow})/${(1 - clipLow).toFixed(4)},0.00001))))` : `iif($T<${clipLow},0,($T-${clipLow})/${(1 - clipLow).toFixed(4)})`}'; PM2.useSingleExpression = true; PM2.createNewImage = false; PM2.use64BitWorkingImage = true; PM2.truncate = true; PM2.truncateLower = 0; PM2.truncateUpper = 1; PM2.executeOn(mw.mainView);` : ''}
     'OK';
   `);
@@ -148,7 +148,7 @@ export async function createOiiiMask(ctx, sourceViewId, maskId, blur = 15, clipL
     PM.use64BitWorkingImage = true;
     PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1;
     PM.executeOn(mw.mainView);
-    ${blur > 0 ? `var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = ${blur}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(mw.mainView);` : ''}
+    ${blur > 0 ? `var C = new Convolution; C.mode = Convolution.Parametric; C.sigma = ${blur}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(mw.mainView);` : ''}
     ${clipLow > 0 ? `var PM2 = new PixelMath; PM2.expression = 'iif($T<${clipLow},0,($T-${clipLow})/${(1 - clipLow).toFixed(6)})'; PM2.useSingleExpression = true; PM2.createNewImage = false; PM2.use64BitWorkingImage = true; PM2.truncate = true; PM2.truncateLower = 0; PM2.truncateUpper = 1; PM2.executeOn(mw.mainView);` : ''}
     var PM3 = new PixelMath;
     PM3.expression = '${maskId}/max(${maskId})';

@@ -335,7 +335,7 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
         P.referenceImage='${tmpRef.replace(/'/g, "\\'")}';P.referenceIsFile=true;
         P.targets=[[true,true,'${tmpTgt.replace(/'/g, "\\'")}']];
         P.outputDirectory='${tmpDir.replace(/'/g, "\\'")}';P.outputPrefix='aligned_';P.outputPostfix='';
-        P.overwriteExistingFiles=true;P.onError=StarAlignment.prototype.Continue;
+        P.overwriteExistingFiles=true;P.onError=StarAlignment.Continue;
         P.useTriangles=true;P.polygonSides=5;P.sensitivity=0.50;P.noGUIMessages=true;
         P.distortionCorrection=false;P.generateDrizzleData=false;
         P.executeGlobal();
@@ -345,13 +345,16 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
       const alignedPath = path.join(tmpDir, `aligned_${m.id}.xisf`);
       if (fs.existsSync(alignedPath)) {
         await ctx.pjsr(`var w=ImageWindow.windowById('${m.id}');if(!w.isNull)w.forceClose();`);
+        // Diff before/after rather than assuming the opened view's id contains
+        // "aligned" — this build assigns generic Image0N ids instead, so a
+        // substring match silently fails to find (and rename) the new window.
+        const beforeOpen2 = (await ctx.listImages()).map(i => i.id);
         await ctx.send('open_image', '__internal__', { filePath: alignedPath });
-        // Find and rename
         const imgs2 = await ctx.listImages();
         for (const cm of imgs2.filter(i => i.id.includes('crop_mask'))) {
           await ctx.pjsr(`var w=ImageWindow.windowById('${cm.id}');if(!w.isNull)w.forceClose();`);
         }
-        const aligned = imgs2.find(i => i.id.includes('aligned'));
+        const aligned = imgs2.find(i => !beforeOpen2.includes(i.id) && !i.id.includes('crop_mask'));
         if (aligned && aligned.id !== m.id) {
           await ctx.pjsr(`var w=ImageWindow.windowById('${aligned.id}');if(!w.isNull)w.mainView.id='${m.id}';`);
         }
@@ -371,7 +374,7 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
   const beforeIds = (await ctx.listImages()).map(i => i.id);
   const combineR = await ctx.pjsr(`
     var P=new ChannelCombination;
-    P.colorSpace=ChannelCombination.prototype.RGB;
+    P.colorSpace=ChannelCombination.RGB;
     P.channels=[[true,'FILTER_R'],[true,'FILTER_G'],[true,'FILTER_B']];
     P.executeGlobal();
     'CC_done';
@@ -475,7 +478,7 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
       P.catalog = 'GaiaDR3';
       P.limitMagnitude = 14;
       P.distortionCorrection = true;
-      P.projectionSystem = ImageSolver.prototype.Gnomonic;
+      P.projectionSystem = ImageSolver.Gnomonic;
       P.executeOn(w.mainView);
       w.astrometricSolution ? 'SOLVED' : 'SOLVE_FAILED';
     `);

@@ -48,7 +48,10 @@ async function getExecSync() {
 async function isAlive() {
   try {
     const execSync = await getExecSync();
-    const out = execSync("ps aux | grep '[P]ixInsight.app' | wc -l", { timeout: 5000 }).toString().trim();
+    // Generous timeout: under heavy multi-threaded PJSR processing (StarAlignment,
+    // HDRMT, etc. can peg all cores for minutes), even a plain `ps` shell-out can
+    // stall long enough to hit a short timeout, which would falsely read as "crashed".
+    const out = execSync("ps aux | grep '[P]ixInsight.app' | wc -l", { timeout: 15000 }).toString().trim();
     return parseInt(out, 10) > 0;
   } catch {
     return false;
@@ -85,6 +88,7 @@ export function createBridgeContext(opts = {}) {
       };
       fs.writeFileSync(path.join(cmdDir, id + '.json'), JSON.stringify(cmd, null, 2));
       let att = 0;
+      let consecutiveDeadChecks = 0;
       const poll = setInterval(async () => {
         const rp = path.join(resDir, id + '.json');
         if (fs.existsSync(rp)) {
@@ -101,8 +105,16 @@ export function createBridgeContext(opts = {}) {
         if (att % 20 === 0 && att > 0) {
           const alive = await isAlive();
           if (!alive) {
-            clearInterval(poll);
-            reject(new BridgeCrashError('PixInsight process not found — it may have crashed. Restart PixInsight and the watcher, then resume with --resume --run-id <runId>'));
+            consecutiveDeadChecks++;
+            // Require 2 consecutive failed checks (~10s apart) before declaring a crash —
+            // a single miss is usually just the `ps` shell-out getting starved while
+            // PixInsight's worker threads peg all cores on a heavy process.
+            if (consecutiveDeadChecks >= 2) {
+              clearInterval(poll);
+              reject(new BridgeCrashError('PixInsight process not found — it may have crashed. Restart PixInsight and the watcher, then resume with --resume --run-id <runId>'));
+            }
+          } else {
+            consecutiveDeadChecks = 0;
           }
         }
         if (att > 2400) { clearInterval(poll); reject(new Error('Timeout: ' + tool)); }

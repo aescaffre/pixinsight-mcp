@@ -231,7 +231,7 @@ async function createMask(sourceViewId, maskId, blur = 5, clipLow = 0.10) {
     maskW.mainView.beginProcess();
     maskW.mainView.image.assign(srcW.mainView.image);
     maskW.mainView.endProcess();
-    ${blur > 0 ? `var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = ${blur}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(maskW.mainView);` : ''}
+    ${blur > 0 ? `var C = new Convolution; C.mode = Convolution.Parametric; C.sigma = ${blur}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(maskW.mainView);` : ''}
     ${clipLow > 0 ? `var PM = new PixelMath; PM.expression = 'iif($T<${clipLow},0,($T-${clipLow})/${(1 - clipLow).toFixed(4)})'; PM.useSingleExpression = true; PM.createNewImage = false; PM.use64BitWorkingImage = true; PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1; PM.executeOn(maskW.mainView);` : ''}
     maskW.show();
     'OK';
@@ -279,7 +279,7 @@ async function createLumMask(sourceViewId, maskId, blur = 5, clipLow = 0.10, gam
     PM.useSingleExpression = true;
     PM.createNewImage = false;
     PM.executeOn(mw.mainView);
-    ${blur > 0 ? `var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = ${blur}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(mw.mainView);` : ''}
+    ${blur > 0 ? `var C = new Convolution; C.mode = Convolution.Parametric; C.sigma = ${blur}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(mw.mainView);` : ''}
     ${clipLow > 0 || gamma !== 1.0 ? `var PM2 = new PixelMath; PM2.expression = '${gamma !== 1.0 ? `iif($T<${clipLow},0,exp(${gamma.toFixed(4)}*ln(max(($T-${clipLow})/${(1 - clipLow).toFixed(4)},0.00001))))` : `iif($T<${clipLow},0,($T-${clipLow})/${(1 - clipLow).toFixed(4)})`}'; PM2.useSingleExpression = true; PM2.createNewImage = false; PM2.use64BitWorkingImage = true; PM2.truncate = true; PM2.truncateLower = 0; PM2.truncateUpper = 1; PM2.executeOn(mw.mainView);` : ''}
     'OK';
   `);
@@ -342,7 +342,7 @@ async function createOiiiMask(sourceViewId, maskId, blur = 15, clipLow = 0.01) {
     PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1;
     PM.executeOn(mw.mainView);
     // Gaussian blur for smooth mask edges (sigma=${blur})
-    ${blur > 0 ? `var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = ${blur}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(mw.mainView);` : ''}
+    ${blur > 0 ? `var C = new Convolution; C.mode = Convolution.Parametric; C.sigma = ${blur}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(mw.mainView);` : ''}
     // Clip low values (noise/background) and normalize
     ${clipLow > 0 ? `var PM2 = new PixelMath; PM2.expression = 'iif($T<${clipLow},0,($T-${clipLow})/${(1 - clipLow).toFixed(6)})'; PM2.useSingleExpression = true; PM2.createNewImage = false; PM2.use64BitWorkingImage = true; PM2.truncate = true; PM2.truncateLower = 0; PM2.truncateUpper = 1; PM2.executeOn(mw.mainView);` : ''}
     // Rescale to full 0-1 range for maximum mask efficiency
@@ -511,16 +511,16 @@ async function runABE(viewId, opts = {}) {
     P.polyDegree = ${polyDegree};
     P.boxSize = 5;
     P.boxSeparation = ${boxSeparation};
-    P.modelImageSampleFormat = AutomaticBackgroundExtractor.prototype.f32;
+    P.modelImageSampleFormat = AutomaticBackgroundExtractor.f32;
     P.abeDownsample = 2.00;
     P.writeSampleBoxes = false;
     P.justTrySamples = false;
-    P.targetCorrection = AutomaticBackgroundExtractor.prototype.Subtract;
+    P.targetCorrection = AutomaticBackgroundExtractor.Subtract;
     P.normalize = true;
     P.discardModel = true;
     P.replaceTarget = true;
     P.correctedImageId = '';
-    P.correctedImageSampleFormat = AutomaticBackgroundExtractor.prototype.SameAsTarget;
+    P.correctedImageSampleFormat = AutomaticBackgroundExtractor.SameAsTarget;
     P.verbosity = 0;
     P.executeOn(ImageWindow.windowById('${viewId}').mainView);
   `);
@@ -1235,7 +1235,7 @@ async function run() {
       P.outputDirectory = '${alignDir.replace(/'/g, "\\'")}';
       P.outputSuffix = '_r';
       P.overwriteExistingFiles = true;
-      P.onError = StarAlignment.prototype.Continue;
+      P.onError = StarAlignment.Continue;
       P.executeGlobal();
     `);
     if (r.status === 'error') {
@@ -1335,7 +1335,7 @@ async function run() {
       var P = new PixelMath; P.expression='${idL}'; P.useSingleExpression=true;
       P.createNewImage=true; P.showNewImage=true; P.newImageId='${targetName}';
       P.newImageWidth=${rgbW}; P.newImageHeight=${rgbH};
-      P.newImageColorSpace=PixelMath.prototype.Gray; P.newImageSampleFormat=PixelMath.prototype.f32;
+      P.newImageColorSpace=PixelMath.Gray; P.newImageSampleFormat=PixelMath.f32;
       P.executeGlobal();
     `);
     if (r.status === 'error') { log('FATAL: ' + r.error.message); process.exit(1); }
@@ -1407,7 +1407,7 @@ async function run() {
       P.expression='${idR}'; P.expression1='${idG}'; P.expression2='${idB}';
       P.useSingleExpression=false; P.createNewImage=true; P.showNewImage=true;
       P.newImageId='${targetName}'; P.newImageWidth=${rgbW}; P.newImageHeight=${rgbH};
-      P.newImageColorSpace=PixelMath.prototype.RGB; P.newImageSampleFormat=PixelMath.prototype.f32;
+      P.newImageColorSpace=PixelMath.RGB; P.newImageSampleFormat=PixelMath.f32;
       P.executeGlobal();
     `);
     if (r.status === 'error') { log('FATAL: ' + r.error.message); process.exit(1); }
@@ -1450,7 +1450,7 @@ async function run() {
         var P=new PixelMath; P.expression='${idHa}'; P.useSingleExpression=true;
         P.createNewImage=true; P.showNewImage=true; P.newImageId='Ha_work';
         P.newImageWidth=${rgbW}; P.newImageHeight=${rgbH};
-        P.newImageColorSpace=PixelMath.prototype.Gray; P.newImageSampleFormat=PixelMath.prototype.f32;
+        P.newImageColorSpace=PixelMath.Gray; P.newImageSampleFormat=PixelMath.f32;
         P.executeGlobal();
       `);
     }
@@ -1461,7 +1461,7 @@ async function run() {
         var P=new PixelMath; P.expression='${idL}'; P.useSingleExpression=true;
         P.createNewImage=true; P.showNewImage=true; P.newImageId='L_work';
         P.newImageWidth=${rgbW}; P.newImageHeight=${rgbH};
-        P.newImageColorSpace=PixelMath.prototype.Gray; P.newImageSampleFormat=PixelMath.prototype.f32;
+        P.newImageColorSpace=PixelMath.Gray; P.newImageSampleFormat=PixelMath.f32;
         P.executeGlobal();
       `);
     }
@@ -1723,7 +1723,7 @@ async function run() {
       P.saturationShrinkFactor = 0.10;
       P.psfMinSNR = 10.00;
       P.psfAllowClusteredSources = true;
-      P.psfType = SpectrophotometricColorCalibration.prototype.PSFType_Auto;
+      P.psfType = SpectrophotometricColorCalibration.PSFType_Auto;
       P.psfGrowth = 1.25;
       P.psfMaxStars = 24576;
       P.psfSearchTolerance = 4.00;
@@ -2374,7 +2374,7 @@ async function run() {
     r = await pjsr(`
       var P = new LocalHistogramEqualization;
       P.radius = ${lLheRadius};
-      P.histogramBins = LocalHistogramEqualization.prototype.Bit12;
+      P.histogramBins = LocalHistogramEqualization.Bit12;
       P.slopeLimit = ${lLheSlope};
       P.amount = ${lLheAmount};
       P.circularKernel = true;
@@ -2734,8 +2734,8 @@ async function run() {
     r = await pjsr(`
       var P = new SCNR;
       P.amount = ${scnrPostAmt};
-      P.protectionMethod = SCNR.prototype.AverageNeutral;
-      P.colorToRemove = SCNR.prototype.Green;
+      P.protectionMethod = SCNR.AverageNeutral;
+      P.colorToRemove = SCNR.Green;
       P.executeOn(ImageWindow.windowById('${targetName}').mainView);
     `);
     log('  ' + (r.status === 'error' ? 'WARN: ' + r.error.message : 'Done.'));
@@ -2807,7 +2807,7 @@ async function run() {
       var P=new PixelMath; P.expression='${targetName}'; P.useSingleExpression=true;
       P.createNewImage=true; P.showNewImage=true; P.newImageId='R_temp';
       P.newImageWidth=${rgbW}; P.newImageHeight=${rgbH};
-      P.newImageColorSpace=PixelMath.prototype.Gray; P.newImageSampleFormat=PixelMath.prototype.f32;
+      P.newImageColorSpace=PixelMath.Gray; P.newImageSampleFormat=PixelMath.f32;
       P.executeGlobal();
     `);
     r = await pjsr(`
@@ -2901,7 +2901,7 @@ async function run() {
         tmpW.mainView.endProcess();
         // Blur with large kernel to get low-frequency component
         var C = new Convolution;
-        C.mode = Convolution.prototype.Parametric;
+        C.mode = Convolution.Parametric;
         C.sigma = 15; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0;
         C.executeOn(tmpW.mainView);
         tmpW.show();
@@ -2984,8 +2984,8 @@ async function run() {
       var tgt = ImageWindow.windowById('${targetName}');
       P.newImageWidth = tgt.mainView.image.width;
       P.newImageHeight = tgt.mainView.image.height;
-      P.newImageColorSpace = PixelMath.prototype.Gray;
-      P.newImageSampleFormat = PixelMath.prototype.f32;
+      P.newImageColorSpace = PixelMath.Gray;
+      P.newImageSampleFormat = PixelMath.f32;
       P.executeGlobal();
       // LinearFit L to this reference
       var LF = new LinearFit;
@@ -3109,7 +3109,7 @@ async function run() {
     r = await pjsr(`
       var P = new LocalHistogramEqualization;
       P.radius = ${radiusLg};
-      P.histogramBins = LocalHistogramEqualization.prototype.Bit12;
+      P.histogramBins = LocalHistogramEqualization.Bit12;
       P.slopeLimit = ${slopeLimitLg};
       P.amount = ${amountLg};
       P.circularKernel = true;
@@ -3152,7 +3152,7 @@ async function run() {
     r = await pjsr(`
       var P = new LocalHistogramEqualization;
       P.radius = ${radius};
-      P.histogramBins = LocalHistogramEqualization.prototype.Bit12;
+      P.histogramBins = LocalHistogramEqualization.Bit12;
       P.slopeLimit = ${slopeLimit};
       P.amount = ${amount};
       P.circularKernel = true;
@@ -3194,7 +3194,7 @@ async function run() {
     r = await pjsr(`
       var P = new LocalHistogramEqualization;
       P.radius = ${radius2};
-      P.histogramBins = LocalHistogramEqualization.prototype.Bit12;
+      P.histogramBins = LocalHistogramEqualization.Bit12;
       P.slopeLimit = ${slopeLimit2};
       P.amount = ${amount2};
       P.circularKernel = true;
@@ -3369,7 +3369,7 @@ async function run() {
         PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1;
         PM.executeOn(mw.mainView);
         // Blur to smooth noise (coherent nebula signal survives, random noise averages to ~0)
-        ${fullMaskBlur > 0 ? `var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = ${fullMaskBlur}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(mw.mainView);` : ''}
+        ${fullMaskBlur > 0 ? `var C = new Convolution; C.mode = Convolution.Parametric; C.sigma = ${fullMaskBlur}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(mw.mainView);` : ''}
         // Binarize: fullClipLow is signal above smoothed noise floor
         var PM2 = new PixelMath;
         PM2.expression = 'iif($T > ${fullClipLow.toFixed(6)}, 1, 0)';
@@ -3397,7 +3397,7 @@ async function run() {
         PM.use64BitWorkingImage = true;
         PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1;
         PM.executeOn(mw.mainView);
-        ${coreMaskBlur > 0 ? `var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = ${coreMaskBlur}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(mw.mainView);` : ''}
+        ${coreMaskBlur > 0 ? `var C = new Convolution; C.mode = Convolution.Parametric; C.sigma = ${coreMaskBlur}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(mw.mainView);` : ''}
         var PM2 = new PixelMath;
         PM2.expression = 'iif($T > ${coreClipLow.toFixed(6)}, 1, 0)';
         PM2.useSingleExpression = true;
@@ -3431,7 +3431,7 @@ async function run() {
         r = await pjsr(`
           var fullW = ImageWindow.windowById('${fullMaskId}');
           var conv = new Convolution;
-          conv.mode = Convolution.prototype.Parametric;
+          conv.mode = Convolution.Parametric;
           conv.sigma = ${veilFinalBlur.toFixed(1)};
           conv.shape = 2.0;
           conv.aspectRatio = 1.0;
@@ -3511,7 +3511,7 @@ async function run() {
             PM2.truncate = true; PM2.truncateLower = 0; PM2.truncateUpper = 1;
             PM2.executeOn(blurW.mainView);
             var conv = new Convolution;
-            conv.mode = Convolution.prototype.Parametric;
+            conv.mode = Convolution.Parametric;
             conv.sigma = ${haBlurSigma.toFixed(1)};
             conv.shape = 2.0;
             conv.aspectRatio = 1.0;
@@ -3687,7 +3687,7 @@ async function run() {
       PM.executeOn(mw.mainView);
       // Stage 2: Large Gaussian blur — spreads seed spatially following galaxy shape
       var C = new Convolution;
-      C.mode = Convolution.prototype.Parametric;
+      C.mode = Convolution.Parametric;
       C.sigma = ${gbBlur};
       C.shape = 2;
       C.aspectRatio = 1;
@@ -3971,7 +3971,7 @@ async function run() {
     if (erosionAmount > 0) {
       r = await pjsr(`
         var P = new MorphologicalTransformation;
-        P.operator = MorphologicalTransformation.prototype.Erosion;
+        P.operator = MorphologicalTransformation.Erosion;
         P.interlacingDistance = 1;
         P.numberOfIterations = ${iterations};
         P.amount = ${erosionAmount};

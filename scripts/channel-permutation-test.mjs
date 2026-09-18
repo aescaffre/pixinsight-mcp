@@ -60,7 +60,7 @@ for (const p of perms) {
 
   await ctx.pjsr(`
     var P=new ChannelCombination;
-    P.colorSpace=ChannelCombination.prototype.RGB;
+    P.colorSpace=ChannelCombination.RGB;
     P.channels=[[true,'${p.r}'],[true,'${p.g}'],[true,'${p.b}']];
     P.executeGlobal();
   `);

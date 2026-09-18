@@ -2,49 +2,19 @@
 // Runs inside PixInsight's PJSR engine (ECMAScript 5)
 // Polls the bridge directory for commands, executes them, writes results.
 
+// Without this, "Execute Script File" (-x=auto) defaults to the legacy
+// SpiderMonkey engine, which PixInsight 1.9.4 no longer ships on arm64.
+#engine v8
+
 // ============================================================================
-// ImageSolver Library (loaded at preprocessor time for plate solving)
+// Note: this script previously #included the stock AdP/ImageSolver.js library
+// here for future plate-solving support, but no handler below actually calls
+// into it. Removed because PixInsight 1.9.4 (arm64) has no legacy 'sm' engine
+// to run those unported AdP scripts under, which aborted the whole script
+// before reaching runWatcher(). Re-add once ImageSolver ships a V8 build, or
+// port plate-solving to run_script + native ImageWindow/AstrometricSolution
+// APIs directly.
 // ============================================================================
-
-#define __PJSR_USE_STAR_DETECTOR_V2
-
-#include <pjsr/BRQuadTree.jsh>
-#include <pjsr/ColorSpace.jsh>
-#include <pjsr/DataType.jsh>
-#include <pjsr/FrameStyle.jsh>
-#include <pjsr/LinearTransformation.jsh>
-#include <pjsr/NumericControl.jsh>
-#include <pjsr/SectionBar.jsh>
-#include <pjsr/Sizer.jsh>
-#include <pjsr/StarDetector.jsh>
-#include <pjsr/StdButton.jsh>
-#include <pjsr/StdCursor.jsh>
-#include <pjsr/StdIcon.jsh>
-#include <pjsr/TextAlign.jsh>
-#include <pjsr/UndoFlag.jsh>
-#include <pjsr/PropertyType.jsh>
-#include <pjsr/PropertyAttribute.jsh>
-#include <pjsr/RBFType.jsh>
-#include <pjsr/APASSFlag.jsh>
-#include <pjsr/GaiaFlag.jsh>
-#include <pjsr/ReadTextOptions.jsh>
-
-#define TITLE           "Image Solver"
-#define SETTINGS_MODULE "SOLVER"
-#define STAR_CSV_FILE   (File.systemTempDirectory + "/stars-mcp.csv")
-
-// Include AdP dependencies then ImageSolver in library mode
-#include "/Applications/PixInsight/src/scripts/AdP/Projections.js"
-#include "/Applications/PixInsight/src/scripts/AdP/WCSmetadata.jsh"
-#include "/Applications/PixInsight/src/scripts/AdP/AstronomicalCatalogs.jsh"
-#include "/Applications/PixInsight/src/scripts/AdP/CommonUIControls.js"
-#include "/Applications/PixInsight/src/scripts/AdP/SearchCoordinatesDialog.js"
-#include "/Applications/PixInsight/src/scripts/AdP/CatalogDownloader.js"
-
-#define USE_SOLVER_LIBRARY
-#include "/Applications/PixInsight/src/scripts/AdP/ImageSolver.js"
-
-#define SETTINGS_MODULE_SCRIPT "SOLVER"
 
 // ============================================================================
 // Configuration
@@ -84,7 +54,7 @@ function ensureDirectory(path) {
 
 function listJsonFiles(dirPattern) {
    try {
-      return searchDirectory(dirPattern);
+      return File.searchDirectory(dirPattern);
    } catch (e) {
       return [];
    }
@@ -281,7 +251,7 @@ function handleColorCalibrate(command) {
 
 function handleRemoveGreenCast(command) {
    var P = new SCNR;
-   P.colorToRemove = SCNR.prototype.Green;
+   P.colorToRemove = SCNR.Green;
    P.amount = command.parameters.amount !== undefined ? command.parameters.amount : 1.0;
 
    var view = findViewById(command.targetView);
@@ -402,8 +372,8 @@ function handleSharpen(command) {
 function handleDeconvolve(command) {
    var P = new Deconvolution;
    // Use a Gaussian PSF
-   P.algorithm = Deconvolution.prototype.RichardsonLucy;
-   P.psfMode = Deconvolution.prototype.Gaussian;
+   P.algorithm = Deconvolution.RichardsonLucy;
+   P.psfMode = Deconvolution.Gaussian;
    P.psfGaussianSigma = command.parameters.psfSigma || 2.5;
    P.iterations = [
       [command.parameters.iterations || 50, false, 0, 0, 0, false, 0, 0]
@@ -651,12 +621,15 @@ function runWatcher() {
    console.noteln("  PixInsight MCP Watcher v" + WATCHER_VERSION);
    console.noteln("  Bridge: " + BRIDGE_DIR);
    console.noteln("  Polling every " + POLL_INTERVAL_MS + "ms");
-   console.noteln("  Ctrl+F11 to abort");
    console.noteln("===========================================");
 
    var commandCount = 0;
 
    console.show();
+   // Console.abortEnabled defaults to false; without setting it, the
+   // Process Console's Pause/Abort button stays disabled even though
+   // console.abortRequested is polled below.
+   console.abortEnabled = true;
 
    // Graceful shutdown: check for sentinel file
    var SHUTDOWN_FILE = BRIDGE_DIR + "/shutdown";
@@ -674,7 +647,7 @@ function runWatcher() {
    // Use short sleeps (20ms) with frequent processEvents() for UI responsiveness
    for (;;) {
       // Yield to PixInsight UI
-      processEvents();
+      CoreApplication.processEvents();
 
       // Check abort or shutdown signal
       if (shouldShutdown()) {
@@ -687,16 +660,16 @@ function runWatcher() {
          commandCount++;
          // Yield heavily after command execution so UI can catch up
          for (var y = 0; y < 20; ++y) {
-            processEvents();
-            msleep(20);
+            CoreApplication.processEvents();
+            System.msleep(20);
             if (shouldShutdown()) break;
          }
       } else {
          // No commands — yield frequently with short sleeps for UI responsiveness
          // Total idle cycle: ~500ms (25 x 20ms) before re-checking commands
          for (var i = 0; i < 25; ++i) {
-            msleep(20);
-            processEvents();
+            System.msleep(20);
+            CoreApplication.processEvents();
             if (shouldShutdown()) break;
          }
       }

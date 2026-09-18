@@ -72,10 +72,20 @@ Without these: "Cannot execute instance in the global context" error.
 - Runtime check: `try { new ProcessName; } catch(e) { /* not available */ }`
 
 ## UI Responsiveness
-- `processEvents()` is CRITICAL in any loop to prevent freeze
-- `msleep(ms)` blocks completely — no UI events during sleep
-- Pattern: alternate `msleep(50)` with `processEvents()` in idle loops
+- `CoreApplication.processEvents()` is CRITICAL in any loop to prevent freeze
+- `System.msleep(ms)` blocks completely — no UI events during sleep
+- Pattern: alternate `System.msleep(20)` with `CoreApplication.processEvents()` in idle loops
 - During `P.executeOn(view)`, UI is blocked — unavoidable
+
+## Process Console Pause/Abort Button Stays Disabled
+`console.abortRequested` is polled but the on-screen Pause/Abort button on the Process
+Console window stays greyed out (unclickable) unless the script explicitly opts in:
+```javascript
+console.abortEnabled = true;   // enables the button; defaults to false
+```
+Without it, the only way to interrupt a long-running/polling script is a workaround like
+a keyboard shortcut — the button itself never becomes clickable. Set `abortEnabled = true`
+once, early (e.g. right after `console.show()`), before entering any polling/long-running loop.
 
 ## Memory Management
 - PixInsight accumulates undo history — each operation adds ~300MB per 6000x4000 RGB image

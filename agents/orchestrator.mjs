@@ -147,7 +147,7 @@ async function orchestrate() {
   // ChannelCombination
   await ctx.pjsr(`
     var P = new ChannelCombination;
-    P.colorSpace = ChannelCombination.prototype.RGB;
+    P.colorSpace = ChannelCombination.RGB;
     P.channels = [
       [true, '${rView}'],
       [true, '${gView}'],

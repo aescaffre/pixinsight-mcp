@@ -175,7 +175,7 @@ export async function dynamicNarrowbandBlend(ctx, targetId, haId, oiiiId, opts =
 
     // Blur the mask for smooth transitions
     var C = new Convolution;
-    C.mode = Convolution.prototype.Parametric;
+    C.mode = Convolution.Parametric;
     C.sigma = 10;
     C.shape = 2;
     C.aspectRatio = 1;
@@ -364,7 +364,7 @@ export async function continuousClamp(ctx, viewId, opts = {}) {
 
     // Apply large Gaussian blur for perfectly smooth transitions
     var conv = new Convolution;
-    conv.mode = Convolution.prototype.Parametric;
+    conv.mode = Convolution.Parametric;
     conv.sigma = blurSigma;
     conv.shape = 2;
     conv.aspectRatio = 1;
@@ -511,7 +511,7 @@ export async function createZoneMasks(ctx, viewId, thresholds = {}) {
 
     // Blur masks for smooth transitions
     var conv = new Convolution;
-    conv.mode = Convolution.prototype.Parametric;
+    conv.mode = Convolution.Parametric;
     conv.shape = 2;
     conv.aspectRatio = 1;
     conv.rotationAngle = 0;
@@ -664,7 +664,7 @@ export async function createAdaptiveZoneMasks(ctx, viewId, opts = {}) {
       var ms = [mC, mS, mO];
       for (var m = 0; m < 3; m++) {
         var conv = new Convolution;
-        conv.mode = Convolution.prototype.Parametric;
+        conv.mode = Convolution.Parametric;
         conv.sigma = sigmas[m]; conv.shape = 2; conv.aspectRatio = 1; conv.rotationAngle = 0;
         conv.executeOn(ms[m].mainView);
         ms[m].show();
