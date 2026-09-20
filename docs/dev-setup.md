@@ -48,6 +48,13 @@ mkdir -p ~/.pixinsight-mcp/bridge/{commands,results,logs}
 
 ## Loading the Watcher Script
 
+**Agentic runs (`agents/ops/bridge.mjs`) need nothing here**: the bridge launches the watcher on
+demand with `PixInsight -x=pjsr/pixinsight-mcp-watcher.js` and the watcher exits after a short idle
+linger (default 8 s, `PIXINSIGHT_MCP_LINGER_MS`), because PixInsight greys out image right-click and
+STF while any script runs. Pause/Abort in the Process Console stops it at any time. Set
+`PIXINSIGHT_MCP_AUTOLAUNCH=0` to disable. The steps below are for the legacy scripts and manual use,
+where the watcher stays resident until you press Pause/Abort or run `scripts/shutdown-watcher.mjs`.
+
 1. Open PixInsight
 2. Open the Script Editor (Script > Script Editor)
 3. Open `pjsr/pixinsight-mcp-watcher.js` from this repo

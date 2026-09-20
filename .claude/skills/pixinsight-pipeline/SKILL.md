@@ -26,7 +26,7 @@ that sends PJSR commands to PixInsight via file-based IPC (`~/.pixinsight-mcp/br
    - **HaLRGB** (with luminance): enable lum branch steps + `lrgb_combine`
    - **LRGB** (no Ha): set `files.Ha` to `""`, disable `ha_sxt`, `ha_stretch`, `ha_curves`, `ha_ghs`, `ha_inject`. Pipeline auto-detects `hasHa` and skips Ha file opening/cloning.
    - **RGB only** (no Ha, no L): set `files.Ha` and `files.L` to `""`, disable Ha + lum branch steps
-5. **Open PixInsight** — Start PixInsight with the PJSR watcher script loaded.
+5. **Open PixInsight** — Just start PixInsight. Agentic runs (`agents/ops/bridge.mjs`) launch the PJSR watcher on demand (`PixInsight -x=`) and it exits after ~8 s idle, so PixInsight is only locked while commands run (any running script greys out right-click/STF; see `reference/pjsr-gotchas.md`). Pause/Abort in the Process Console always stops it, and the bridge will not relaunch it after that. Legacy scripts (`run-pipeline.mjs`, `scripts/*`) still need the watcher started by hand (Script > Execute Script File), where it stays resident. Env: `PIXINSIGHT_MCP_AUTOLAUNCH=0` disables on-demand launch, `PIXINSIGHT_MCP_LINGER_MS` sets the idle linger.
 6. **Run** — `node scripts/run-pipeline.mjs --config path/to/config.json`
 7. **Iterate** — Review JPEG previews at each step. Adjust params in config. Re-run.
 
