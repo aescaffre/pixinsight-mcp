@@ -481,6 +481,8 @@ function mcpAbortableProcessEvents() {
    if (console.abortRequested) {
       throw new Error("MCP_ABORTED: Pause/Abort was pressed");
    }
+   // PixInsight greys the button after every process, including inside one snippet.
+   if (!console.abortEnabled) console.abortEnabled = true;
 }
 
 function mcpRunSnippet(processEvents, __mcpCode) {

@@ -99,6 +99,11 @@ Without these: "Cannot execute instance in the global context" error.
   finishes executing (`PixelMath.executeOn` etc.). Setting it once at startup leaves the button
   grey after the first process. Re-arm it on every loop iteration
   (`if (!console.abortEnabled) console.abortEnabled = true;`) and after each command.
+- The same reset happens between processes inside ONE `run_script` snippet, and the native
+  `processEvents()` does not undo it (measured: after a PixelMath `executeOn` the flag is false, and
+  still false after `processEvents()`). The watcher's shadowed `processEvents` re-arms it, so in a
+  multi-process snippet call `processEvents()` before each long process (BXT, NXT, SXT) or that
+  process runs with the button grey.
 - With the button grey and no polling, a script cannot be stopped at all (force quit).
 - Clicking Pause/Abort only sets `console.abortRequested` (stays true until the script ends). Nothing
   interrupts the script by itself: `processEvents()` does NOT throw on abort. You must poll it.
