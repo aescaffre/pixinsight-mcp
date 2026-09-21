@@ -2,49 +2,19 @@
 // Runs inside PixInsight's PJSR engine (ECMAScript 5)
 // Polls the bridge directory for commands, executes them, writes results.
 
+// Without this, "Execute Script File" (-x=auto) defaults to the legacy
+// SpiderMonkey engine, which PixInsight 1.9.4 no longer ships on arm64.
+#engine v8
+
 // ============================================================================
-// ImageSolver Library (loaded at preprocessor time for plate solving)
+// Note: this script previously #included the stock AdP/ImageSolver.js library
+// here for future plate-solving support, but no handler below actually calls
+// into it. Removed because PixInsight 1.9.4 (arm64) has no legacy 'sm' engine
+// to run those unported AdP scripts under, which aborted the whole script
+// before reaching runWatcher(). Re-add once ImageSolver ships a V8 build, or
+// port plate-solving to run_script + native ImageWindow/AstrometricSolution
+// APIs directly.
 // ============================================================================
-
-#define __PJSR_USE_STAR_DETECTOR_V2
-
-#include <pjsr/BRQuadTree.jsh>
-#include <pjsr/ColorSpace.jsh>
-#include <pjsr/DataType.jsh>
-#include <pjsr/FrameStyle.jsh>
-#include <pjsr/LinearTransformation.jsh>
-#include <pjsr/NumericControl.jsh>
-#include <pjsr/SectionBar.jsh>
-#include <pjsr/Sizer.jsh>
-#include <pjsr/StarDetector.jsh>
-#include <pjsr/StdButton.jsh>
-#include <pjsr/StdCursor.jsh>
-#include <pjsr/StdIcon.jsh>
-#include <pjsr/TextAlign.jsh>
-#include <pjsr/UndoFlag.jsh>
-#include <pjsr/PropertyType.jsh>
-#include <pjsr/PropertyAttribute.jsh>
-#include <pjsr/RBFType.jsh>
-#include <pjsr/APASSFlag.jsh>
-#include <pjsr/GaiaFlag.jsh>
-#include <pjsr/ReadTextOptions.jsh>
-
-#define TITLE           "Image Solver"
-#define SETTINGS_MODULE "SOLVER"
-#define STAR_CSV_FILE   (File.systemTempDirectory + "/stars-mcp.csv")
-
-// Include AdP dependencies then ImageSolver in library mode
-#include "/Applications/PixInsight/src/scripts/AdP/Projections.js"
-#include "/Applications/PixInsight/src/scripts/AdP/WCSmetadata.jsh"
-#include "/Applications/PixInsight/src/scripts/AdP/AstronomicalCatalogs.jsh"
-#include "/Applications/PixInsight/src/scripts/AdP/CommonUIControls.js"
-#include "/Applications/PixInsight/src/scripts/AdP/SearchCoordinatesDialog.js"
-#include "/Applications/PixInsight/src/scripts/AdP/CatalogDownloader.js"
-
-#define USE_SOLVER_LIBRARY
-#include "/Applications/PixInsight/src/scripts/AdP/ImageSolver.js"
-
-#define SETTINGS_MODULE_SCRIPT "SOLVER"
 
 // ============================================================================
 // Configuration
@@ -55,7 +25,25 @@ var COMMANDS_DIR = BRIDGE_DIR + "/commands";
 var RESULTS_DIR = BRIDGE_DIR + "/results";
 var LOGS_DIR = BRIDGE_DIR + "/logs";
 var POLL_INTERVAL_MS = 1000;
-var WATCHER_VERSION = "0.1.0";
+var WATCHER_VERSION = "0.2.0";
+
+// While any script runs, PixInsight greys out view interaction (right-click,
+// STF), and a script's Timers/dialogs die when it returns, so a resident
+// watcher cannot be non-modal. Instead the bridge launches the watcher on
+// demand (PixInsight -x=) and it exits after this long with no commands.
+// 0 = stay resident (a manual launch from the Script menu). The launcher sets
+// the value for one launch by writing bridge/idle_exit_ms, which is consumed
+// at startup so it never leaks into a later manual launch.
+var IDLE_EXIT_MS = 0;
+
+// Liveness marker for on-demand launching. "idle <ms>" is refreshed while
+// polling; "busy <tool> <ms>" is written before a command starts (a running
+// command blocks the loop, so a stale "busy" still means alive).
+var HEARTBEAT_FILE = BRIDGE_DIR + "/heartbeat";
+
+function writeHeartbeat(state) {
+   try { File.writeTextFile(HEARTBEAT_FILE, state + " " + Date.now()); } catch (e) {}
+}
 
 // ============================================================================
 // File Helpers (PJSR File API)
@@ -84,7 +72,7 @@ function ensureDirectory(path) {
 
 function listJsonFiles(dirPattern) {
    try {
-      return searchDirectory(dirPattern);
+      return File.searchDirectory(dirPattern);
    } catch (e) {
       return [];
    }
@@ -281,7 +269,7 @@ function handleColorCalibrate(command) {
 
 function handleRemoveGreenCast(command) {
    var P = new SCNR;
-   P.colorToRemove = SCNR.prototype.Green;
+   P.colorToRemove = SCNR.Green;
    P.amount = command.parameters.amount !== undefined ? command.parameters.amount : 1.0;
 
    var view = findViewById(command.targetView);
@@ -402,8 +390,8 @@ function handleSharpen(command) {
 function handleDeconvolve(command) {
    var P = new Deconvolution;
    // Use a Gaussian PSF
-   P.algorithm = Deconvolution.prototype.RichardsonLucy;
-   P.psfMode = Deconvolution.prototype.Gaussian;
+   P.algorithm = Deconvolution.RichardsonLucy;
+   P.psfMode = Deconvolution.Gaussian;
    P.psfGaussianSigma = command.parameters.psfSigma || 2.5;
    P.iterations = [
       [command.parameters.iterations || 50, false, 0, 0, 0, false, 0, 0]
@@ -482,13 +470,32 @@ function handleBlendNarrowband(command) {
    };
 }
 
+// Pipeline snippets yield with the bare global processEvents(), which never
+// reacts to Pause/Abort, and the global itself is read-only on this engine.
+// So each snippet runs inside a function whose `processEvents` parameter
+// shadows the global with a version that throws once an abort is pending.
+// run_script turns the throw into an error result and the main loop then sees
+// console.abortRequested and stops the watcher.
+function mcpAbortableProcessEvents() {
+   CoreApplication.processEvents();
+   if (console.abortRequested) {
+      throw new Error("MCP_ABORTED: Pause/Abort was pressed");
+   }
+   // PixInsight greys the button after every process, including inside one snippet.
+   if (!console.abortEnabled) console.abortEnabled = true;
+}
+
+function mcpRunSnippet(processEvents, __mcpCode) {
+   return eval(__mcpCode);
+}
+
 function handleRunScript(command) {
    var code = command.parameters.code;
    // Capture console output
    var consoleOutput = "";
    try {
       // Execute the code
-      var result = eval(code);
+      var result = mcpRunSnippet(mcpAbortableProcessEvents, code);
       return {
          status: "success",
          outputs: { consoleOutput: String(result !== undefined ? result : "Script executed.") },
@@ -595,6 +602,7 @@ function processNextCommand() {
 
    var startTime = Date.now();
    var resultObj;
+   writeHeartbeat("busy " + command.tool);
 
    try {
       console.writeln("[MCP Watcher] Executing: " + command.tool + " (id: " + command.id + ")");
@@ -651,57 +659,97 @@ function runWatcher() {
    console.noteln("  PixInsight MCP Watcher v" + WATCHER_VERSION);
    console.noteln("  Bridge: " + BRIDGE_DIR);
    console.noteln("  Polling every " + POLL_INTERVAL_MS + "ms");
-   console.noteln("  Ctrl+F11 to abort");
    console.noteln("===========================================");
 
+   var idleCfg = BRIDGE_DIR + "/idle_exit_ms";
+   if (File.exists(idleCfg)) {
+      var cfgVal = parseInt(readTextFile(idleCfg), 10);
+      if (!isNaN(cfgVal) && cfgVal >= 0) IDLE_EXIT_MS = cfgVal;
+      try { File.remove(idleCfg); } catch (e) {}
+   }
+   if (IDLE_EXIT_MS > 0) {
+      console.noteln("  Exits after " + (IDLE_EXIT_MS / 1000) + "s with no commands");
+   } else {
+      console.noteln("  Stays resident until Pause/Abort or the shutdown file");
+   }
+
    var commandCount = 0;
+   var lastActivity = Date.now();
+   var lastBeat = 0;
+   var stopReason = "";
 
    console.show();
 
-   // Graceful shutdown: check for sentinel file
    var SHUTDOWN_FILE = BRIDGE_DIR + "/shutdown";
 
+   // Latching: once any check sees a stop condition every later check returns
+   // true, so a `break` out of an inner loop can no longer swallow the signal.
    function shouldShutdown() {
-      if (console.abortRequested) return true;
+      if (stopReason) return true;
+      if (console.abortRequested) {
+         stopReason = "abort requested";
+         return true;
+      }
       if (File.exists(SHUTDOWN_FILE)) {
          try { File.remove(SHUTDOWN_FILE); } catch(e) {}
+         stopReason = "shutdown file";
+         return true;
+      }
+      if (IDLE_EXIT_MS > 0 && Date.now() - lastActivity > IDLE_EXIT_MS) {
+         // Last look before leaving: don't strand a command that just arrived.
+         if (listJsonFiles(COMMANDS_DIR + "/*.json").length > 0) {
+            lastActivity = Date.now();
+            return false;
+         }
+         stopReason = "idle for " + (IDLE_EXIT_MS / 1000) + "s";
          return true;
       }
       return false;
    }
 
-   // Main loop — processEvents() keeps PixInsight UI responsive
-   // Use short sleeps (20ms) with frequent processEvents() for UI responsiveness
-   for (;;) {
-      // Yield to PixInsight UI
-      processEvents();
-
-      // Check abort or shutdown signal
-      if (shouldShutdown()) {
-         console.warningln("[MCP Watcher] Shutdown requested. Stopping.");
-         break;
+   // PixInsight resets console.abortEnabled to false every time a process
+   // finishes, so it is re-armed on every pump, not once at startup.
+   function pump() {
+      if (!console.abortEnabled) console.abortEnabled = true;
+      CoreApplication.processEvents();
+      var now = Date.now();
+      if (now - lastBeat > 500) {
+         writeHeartbeat("idle");
+         lastBeat = now;
       }
+   }
+
+   // Main loop — pump() keeps PixInsight UI responsive and the abort button armed
+   for (;;) {
+      pump();
+
+      if (shouldShutdown()) break;
 
       var processed = processNextCommand();
       if (processed) {
          commandCount++;
+         lastActivity = Date.now();
          // Yield heavily after command execution so UI can catch up
          for (var y = 0; y < 20; ++y) {
-            processEvents();
-            msleep(20);
+            pump();
+            System.msleep(20);
             if (shouldShutdown()) break;
          }
       } else {
-         // No commands — yield frequently with short sleeps for UI responsiveness
-         // Total idle cycle: ~500ms (25 x 20ms) before re-checking commands
+         // No commands — short sleeps, ~500ms idle cycle (25 x 20ms)
          for (var i = 0; i < 25; ++i) {
-            msleep(20);
-            processEvents();
+            System.msleep(20);
+            pump();
             if (shouldShutdown()) break;
          }
       }
    }
 
+   console.abortEnabled = false;
+   // last-stop is written BEFORE the heartbeat is removed, so "heartbeat gone" implies a reason is readable
+   try { File.writeTextFile(BRIDGE_DIR + "/last-stop", stopReason + " | " + Date.now()); } catch (e) {}
+   try { File.remove(HEARTBEAT_FILE); } catch (e) {}
+   console.warningln("[MCP Watcher] Stopping: " + stopReason + ".");
    console.noteln("[MCP Watcher] Stopped. Processed " + commandCount + " command(s).");
 }
 

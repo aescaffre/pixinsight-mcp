@@ -102,7 +102,7 @@ export class LuminanceDetailAgent extends BaseAgent {
       await ctx.pjsr(`
         var P = new LocalHistogramEqualization;
         P.radius = ${params.lhe_radius};
-        P.histogramBins = LocalHistogramEqualization.prototype.Bit12;
+        P.histogramBins = LocalHistogramEqualization.Bit12;
         P.slopeLimit = ${params.lhe_slopeLimit};
         P.amount = ${params.lhe_amount};
         P.circularKernel = true;
@@ -142,7 +142,7 @@ export class LuminanceDetailAgent extends BaseAgent {
         P.scalingFunctionColFilter = [0.0625,0.25,0.375,0.25,0.0625];
         P.scalingFunctionNoiseLayers = 0;
         P.scalingFunctionName = "B3 Spline (5)";
-        P.largeScaleFunction = HDRMultiscaleTransform.prototype.MultiscaleMedianTransform;
+        P.largeScaleFunction = HDRMultiscaleTransform.MultiscaleMedianTransform;
         P.curveBreakPoint = 0.75;
         P.noiseReduction = true;
         P.deringing = true;

@@ -556,7 +556,7 @@ async function runPreset(preset, tag) {
         P.amount = ${lp.amount};
         P.slopeConstraint = ${lp.slopeLimit};
         P.circularKernel = true;
-        P.histogramBins = LocalHistogramEqualization.prototype.Bit12;
+        P.histogramBins = LocalHistogramEqualization.Bit12;
         P.executeOn(w.mainView);
         w.removeMask();
         mask.forceClose();

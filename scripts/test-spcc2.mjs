@@ -111,7 +111,7 @@ async function main() {
     P.expression='${rId}'; P.expression1='${gId}'; P.expression2='${bId}';
     P.useSingleExpression=false; P.createNewImage=true; P.showNewImage=true;
     P.newImageId='${TARGET}'; P.newImageWidth=w; P.newImageHeight=h;
-    P.newImageColorSpace=PixelMath.prototype.RGB; P.newImageSampleFormat=PixelMath.prototype.f32;
+    P.newImageColorSpace=PixelMath.RGB; P.newImageSampleFormat=PixelMath.f32;
     P.executeGlobal();
     '${TARGET}: ' + w + 'x' + h;
   `);
@@ -373,7 +373,7 @@ async function main() {
     P.saturationShrinkFactor = 0.10;
     P.psfMinSNR = 5.00;  // lowered from 10
     P.psfAllowClusteredSources = true;
-    P.psfType = SpectrophotometricColorCalibration.prototype.PSFType_Auto;
+    P.psfType = SpectrophotometricColorCalibration.PSFType_Auto;
     P.psfGrowth = 1.25;
     P.psfMaxStars = 24576;
     P.psfSearchTolerance = 8.00;  // doubled from 4

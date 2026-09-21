@@ -102,7 +102,7 @@ export async function multiScaleEnhance(ctx, viewId, opts = {}) {
     // Extract luminance for mask
     if (img.isColor) {
       var CE = new ChannelExtraction;
-      CE.colorSpace = ChannelExtraction.prototype.CIELab;
+      CE.colorSpace = ChannelExtraction.CIELab;
       CE.channels = [[true, maskId], [false, ''], [false, '']];
       CE.executeOn(w.mainView);
     } else {
@@ -133,7 +133,7 @@ export async function multiScaleEnhance(ctx, viewId, opts = {}) {
 
     if (${maskBlur} > 0) {
       var blur = new Convolution;
-      blur.mode = Convolution.prototype.Parametric;
+      blur.mode = Convolution.Parametric;
       blur.sigma = ${maskBlur};
       blur.shape = 2;
       blur.executeOn(maskWin.mainView);
@@ -392,7 +392,7 @@ export async function shellDetailEnhance(ctx, viewId, opts = {}) {
 
       // Blur at medium sigma
       var conv1 = new Convolution;
-      conv1.mode = Convolution.prototype.Parametric;
+      conv1.mode = Convolution.Parametric;
       conv1.sigma = ${medSigma};
       conv1.shape = 2;
       conv1.aspectRatio = 1;
@@ -435,7 +435,7 @@ export async function shellDetailEnhance(ctx, viewId, opts = {}) {
       blurW2.show();
 
       var conv2 = new Convolution;
-      conv2.mode = Convolution.prototype.Parametric;
+      conv2.mode = Convolution.Parametric;
       conv2.sigma = ${lgSigma};
       conv2.shape = 2;
       conv2.aspectRatio = 1;

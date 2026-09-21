@@ -41,16 +41,16 @@ export async function runABE(ctx, viewId, opts = {}) {
     P.polyDegree = ${polyDegree};
     P.boxSize = 5;
     P.boxSeparation = ${boxSeparation};
-    P.modelImageSampleFormat = AutomaticBackgroundExtractor.prototype.f32;
+    P.modelImageSampleFormat = AutomaticBackgroundExtractor.f32;
     P.abeDownsample = 2.00;
     P.writeSampleBoxes = false;
     P.justTrySamples = false;
-    P.targetCorrection = AutomaticBackgroundExtractor.prototype.Subtract;
+    P.targetCorrection = AutomaticBackgroundExtractor.Subtract;
     P.normalize = true;
     P.discardModel = true;
     P.replaceTarget = true;
     P.correctedImageId = '';
-    P.correctedImageSampleFormat = AutomaticBackgroundExtractor.prototype.SameAsTarget;
+    P.correctedImageSampleFormat = AutomaticBackgroundExtractor.SameAsTarget;
     P.verbosity = 0;
     P.executeOn(ImageWindow.windowById('${viewId}').mainView);
   `);
@@ -82,8 +82,8 @@ export async function runPerChannelABE(ctx, viewId, opts = {}) {
     var CE = new ChannelExtraction;
     CE.channelEnabled = [true, true, true];
     CE.channelId = ['__pca_R', '__pca_G', '__pca_B'];
-    CE.colorSpace = ChannelExtraction.prototype.RGB;
-    CE.sampleFormat = ChannelExtraction.prototype.SameAsSource;
+    CE.colorSpace = ChannelExtraction.RGB;
+    CE.sampleFormat = ChannelExtraction.SameAsSource;
     CE.executeOn(tgt.mainView);
     processEvents();
 
@@ -98,7 +98,7 @@ export async function runPerChannelABE(ctx, viewId, opts = {}) {
       P.polyDegree = ${polyDeg};
       P.boxSize = 5;
       P.boxSeparation = 5;
-      P.targetCorrection = AutomaticBackgroundExtractor.prototype.Subtract;
+      P.targetCorrection = AutomaticBackgroundExtractor.Subtract;
       P.normalize = true;
       P.discardModel = true;
       P.replaceTarget = true;
@@ -109,7 +109,7 @@ export async function runPerChannelABE(ctx, viewId, opts = {}) {
 
     // Recombine into target
     var CC = new ChannelCombination;
-    CC.colorSpace = ChannelCombination.prototype.RGB;
+    CC.colorSpace = ChannelCombination.RGB;
     CC.channels = [[true, '__pca_R'], [true, '__pca_G'], [true, '__pca_B']];
     CC.executeOn(tgt.mainView);
     processEvents();
@@ -141,9 +141,9 @@ export async function runSCNR(ctx, viewId, opts = {}) {
   const amount = opts.amount ?? 0.50;
   const r = await ctx.pjsr(`
     var P = new SCNR;
-    P.colorToRemove = SCNR.prototype.Green;
+    P.colorToRemove = SCNR.Green;
     P.amount = ${amount};
-    P.protectionMethod = SCNR.prototype.AverageNeutral;
+    P.protectionMethod = SCNR.AverageNeutral;
     P.executeOn(ImageWindow.windowById('${viewId}').mainView);
     'SCNR done (amount=${amount})';
   `);

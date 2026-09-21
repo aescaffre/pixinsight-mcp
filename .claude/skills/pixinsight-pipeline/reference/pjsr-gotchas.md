@@ -72,10 +72,51 @@ Without these: "Cannot execute instance in the global context" error.
 - Runtime check: `try { new ProcessName; } catch(e) { /* not available */ }`
 
 ## UI Responsiveness
-- `processEvents()` is CRITICAL in any loop to prevent freeze
-- `msleep(ms)` blocks completely — no UI events during sleep
-- Pattern: alternate `msleep(50)` with `processEvents()` in idle loops
+- `CoreApplication.processEvents()` is CRITICAL in any loop to prevent freeze
+- `System.msleep(ms)` blocks completely — no UI events during sleep
+- Pattern: alternate `System.msleep(20)` with `CoreApplication.processEvents()` in idle loops
 - During `P.executeOn(view)`, UI is blocked — unavoidable
+
+## Script Lifetime and the "Modal" Lock (measured, PixInsight 1.9.4, V8 engine)
+- While ANY script is running, PixInsight greys out view interaction (image right-click menu,
+  STF button). File > Open and menus still work. This is inherent, not caused by the watcher's
+  code: a plain `processEvents()/msleep()` loop does the same.
+- A script cannot stay resident without running: Timers, non-modal `Dialog.open()/show()` and
+  everything else die the moment `main` returns. So a watcher cannot be both resident and non-modal.
+- Design that follows: the bridge launches the watcher ON DEMAND with
+  `PixInsight -x=<watcher.js>` (~1 s, IPC to the running instance) and the watcher exits after a
+  linger with no commands (`bridge/idle_exit_ms`, consumed once at startup; absent = stay resident,
+  the manual Script-menu launch). PixInsight is locked only while commands run.
+- `bridge/heartbeat` (`idle <ms>` / `busy <tool> <ms>`) and `bridge/last-stop` (`<reason> | <ms>`)
+  are how the launcher tells "alive" and "why it stopped". A "busy" heartbeat stays alive however
+  old (a running command blocks the loop) but is stale if older than the PixInsight process start.
+- After a deliberate stop (`abort requested` / `shutdown file`) the bridge must NOT relaunch
+  (`BridgeAbortError`), or Pause/Abort would be silently undone.
+- Under V8 `Dialog` is a native class: `this.__base__()` throws. Use `Reflect.construct(Dialog, [])`.
+
+## Process Console Pause/Abort (measured)
+- `console.abortEnabled = true` is NOT sticky: PixInsight resets it to `false` every time a process
+  finishes executing (`PixelMath.executeOn` etc.). Setting it once at startup leaves the button
+  grey after the first process. Re-arm it on every loop iteration
+  (`if (!console.abortEnabled) console.abortEnabled = true;`) and after each command.
+- The same reset happens between processes inside ONE `run_script` snippet, and the native
+  `processEvents()` does not undo it (measured: after a PixelMath `executeOn` the flag is false, and
+  still false after `processEvents()`). The watcher's shadowed `processEvents` re-arms it, so in a
+  multi-process snippet call `processEvents()` before each long process (BXT, NXT, SXT) or that
+  process runs with the button grey.
+- With the button grey and no polling, a script cannot be stopped at all (force quit).
+- Clicking Pause/Abort only sets `console.abortRequested` (stays true until the script ends). Nothing
+  interrupts the script by itself: `processEvents()` does NOT throw on abort. You must poll it.
+- Abort during a native process (`executeOn`/`executeGlobal`): the process throws (message
+  `undefined`), `abortRequested` and `isAborted` both stay true. The main loop sees the flag and stops.
+- The global `processEvents` is read-only (`writable=false, configurable=false`); assigning to it
+  silently does nothing. To make eval'd snippets abortable, run them in a function whose
+  `processEvents` PARAMETER shadows the global with a version that throws once
+  `console.abortRequested` is set (see `mcpRunSnippet` in the watcher).
+- Shutdown sentinel: latch the stop condition. A check that deletes the sentinel and only
+  `break`s an inner loop swallows the signal (the old watcher stopped ~1 time in 26).
+- Verify with `abort-suite`-style tests (idle click, click during a process, click during a
+  processEvents loop, sentinel x5, no relaunch after stop) rather than by eye.
 
 ## Memory Management
 - PixInsight accumulates undo history — each operation adds ~300MB per 6000x4000 RGB image
