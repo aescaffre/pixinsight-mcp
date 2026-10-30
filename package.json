@@ -1,6 +1,6 @@
 {
   "name": "pixinsight-mcp",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "MCP server bridging AI assistants with PixInsight for astrophotography processing",
   "type": "module",
   "main": "build/index.js",
@@ -9,7 +9,8 @@
     "dev": "tsc --watch",
     "start": "node build/index.js",
     "setup-bridge": "mkdir -p ~/.pixinsight-mcp/bridge/{commands,results,logs} ~/.pixinsight-mcp/catalog/recipes",
-    "editor": "node editor/server.mjs"
+    "editor": "node editor/server.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "keywords": [
     "pixinsight",
@@ -20,9 +21,6 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
-    "@google/generative-ai": "^0.24.1",
-    "@mistralai/mistralai": "^1.15.1",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "zod": "^3.25.0"
   },

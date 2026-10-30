@@ -17,21 +17,34 @@ import path from 'path';
 import os from 'os';
 import { createBridgeContext } from '../ops/bridge.mjs';
 import { ArtifactStore } from '../artifact-store.mjs';
-import { buildToolSet } from './tools.mjs';
+import { buildToolSet, isLDerived } from './tools.mjs';
 import { getStats, measureUniformity } from '../ops/index.mjs';
-import { createStateMachine, checkBranchCompleteness } from './state-machine.mjs';
-import { findRepairPolicy, checkRepairToolAccess, generateRepairGuidance } from './repair-policies.mjs';
+import { createStateMachine, createCounterBudget, checkBudgetExhausted, checkBranchCompleteness } from './state-machine.mjs';
+import { checkRepairToolAccess, createRepairTracker } from './repair-policies.mjs';
+import { FATAL_TEXT, writeCrashFile, isCrashed, countTraceLines, saveAgentState, restoreAgentState } from './agent-state.mjs';
 
 // Parse arguments
-const agentName = process.argv[2] || 'rgb_cleanliness';
+const agentName = process.argv[2] || 'giga_orchestrator';
 const storeBaseDir = process.argv[3] || null;
 const briefPath = process.argv[4] || null;
+// WI-08: argv[5]=agent maxTurns (turn gate, WI-07a), argv[6]=requested model ('' = inherit)
+export const AGENT_MAX_TURNS = parseInt(process.argv[5], 10) || null;
+export const AGENT_MODEL = process.argv[6] || 'inherit';
 
 // Build tool set for this agent
 const { definitions, handlers } = buildToolSet(agentName);
 
 // Create bridge context
-const ctx = createBridgeContext({ log: (msg) => process.stderr.write(`[mcp] ${msg}\n`) });
+// WI-07b: crash sentinel at the producer. The bridge calls onCrash when the PI process is gone; CRASH.json is
+// the cross-process signal read by every CallTool (this MCP) and by engine-max (parent) which SIGTERMs the CLI.
+let _lastTool = null, _lastSeq = null;
+const ctx = createBridgeContext({
+  log: (msg) => process.stderr.write(`[mcp] ${msg}\n`),
+  onCrash: (err) => {
+    writeCrashFile(storeBaseDir, { agent: agentName, tool: _lastTool, seq: _lastSeq, message: err.message });
+    process.stderr.write(`[mcp] PIXINSIGHT CRASH detected -> CRASH.json (${err.message})\n`);
+  },
+});
 
 // === SWAP GUARD ===
 // Zone-separated runs (core clone + dust clone + masks + many variants + undo history)
@@ -50,7 +63,7 @@ async function swapGuard() {
   const low = freeGB < SWAP_LOW_GB;
   if (!low && (_swapCalls - _lastPurge) < SWAP_PERIODIC) return;
   try {
-    const r = await ctx.pjsr(`var ws=ImageWindow.windows;var n=0;for(var i=0;i<ws.length;i++){try{ws[i].purge();n++;}catch(e){}}gc();processEvents();"purged "+n;`);
+    const r = await ctx.pjsr(`var ws=ImageWindow.windows;var n=0;for(var i=0;i<ws.length;i++){try{ws[i].purge();n++;}catch(e){}}processEvents();"purged "+n;`);
     _lastPurge = _swapCalls;
     process.stderr.write(`[mcp][swap-guard] freeGB=${freeGB.toFixed(1)}${low ? ' (LOW)' : ' (periodic)'} -> ${(r.result || r.outputs?.consoleOutput || '').trim()}\n`);
   } catch (e) { process.stderr.write(`[mcp][swap-guard] purge failed: ${e.message}\n`); }
@@ -70,33 +83,49 @@ if (storeBaseDir && fs.existsSync(storeBaseDir)) {
 let brief = null;
 if (briefPath && fs.existsSync(briefPath)) {
   brief = JSON.parse(fs.readFileSync(briefPath, 'utf-8'));
+  brief._lUsage = [];   // WI-13: Gate 10 provenance ({tool, viewId, seq}); restored by restoreAgentState on resume
+  brief._lRoots = [];   // views cloned (transitively) from FILTER_L
 }
 
 // === STATE MACHINE + TRACE + PROVENANCE ===
 const TRACE_START = Date.now();
-let traceSeq = 0;
 const traceFile = storeBaseDir ? path.join(storeBaseDir, 'trace.jsonl') : null;
+// WI-07b: seq stays monotonic across MCP restarts (trace-mermaid compares seq numerically)
+let traceSeq = countTraceLines(traceFile);
 
 // State machine governs tool access per phase — but ONLY for the giga_orchestrator,
 // which has the branch/compose/finish flow it was designed for. Focused sub-agents
 // (e.g. gradient_agent) are not part of that flow; gating them blocks their core
 // tools (per-channel ABE, save_memory) in irrelevant states. Give them a permissive
 // stub so every stateMachine.* call site keeps working without per-site guards.
+const maxTurns = parseInt(process.argv[5], 10) || 250;
 const stateMachine = (agentName === 'giga_orchestrator')
-  ? createStateMachine(250)
-  : {
-      state: 'free',
-      repairPolicy: null,
-      _branchCompletenessOverride: false,
-      checkToolAccess: () => ({ allowed: true }),
-      recordToolCall: () => {},
-      enterRepair: () => {},
-      transitionTo: () => {},
-      getBudgetStatus: () => ({ turnsRemaining: 999, maxTurns: 999, status: 'ok', guidance: [] }),
-    };
+  ? createStateMachine(maxTurns, { warmStart: !!brief?.warmStart })
+  : createCounterBudget(maxTurns);
 
-// Provenance: track last composition/processing tool per view
-const viewProvenance = new Map();
+// Provenance + repair engine state (WI-06): lastModifier per view (history of 5, lastComposition kept),
+// active repair policies per view, forbids-only enforcement in ANY state.
+const repairTracker = createRepairTracker();
+const viewProvenance = repairTracker.prov;
+
+// WI-07b: on a resumed agent (PIX_RESUME=1) restore state/provenance/starIntegrity/traceSeq (turnsUsed reset to 0)
+if (process.env.PIX_RESUME === '1' && storeBaseDir) {
+  const r = restoreAgentState(storeBaseDir, agentName, { stateMachine, provenance: viewProvenance, brief });
+  if (r.restored) {
+    traceSeq = Math.max(traceSeq, r.traceSeq || 0);
+    // 'assess' blocks load_variant/list_variants; after a restart the agent must be able to reload its work
+    if (agentName === 'giga_orchestrator' && stateMachine.state === 'assess') stateMachine.state = 'generate_candidates';
+  }
+  else if (stateMachine && 'state' in stateMachine && agentName === 'giga_orchestrator') stateMachine.state = 'compose';  // permissive when no/invalid snapshot
+  process.stderr.write(`[mcp] PIX_RESUME: ${r.restored ? 'state restored -> ' + stateMachine.state : 'not restored (' + r.reason + ') -> ' + stateMachine.state}\n`);
+}
+
+function persistAgentState() {
+  if (!storeBaseDir) return;
+  let counters = {};
+  try { counters = { [agentName]: store ? store.maxVariantOnDisk(agentName) : 0 }; } catch {}
+  saveAgentState(storeBaseDir, agentName, { stateMachine, provenance: viewProvenance, starIntegrity: brief?._starIntegrity, traceSeq, variantCounters: counters, lUsage: brief?._lUsage, lRoots: brief?._lRoots });
+}
 
 // Expose state machine + provenance to tool handlers via brief
 function syncBriefState() {
@@ -106,32 +135,20 @@ function syncBriefState() {
   brief._stateMachine = stateMachine;
 }
 
-// Periodic swap cleanup — every 20 tool calls, clean stale swap files (>5min old)
-const SWAP_DIR = '/var/folders/zs/l60syh197h32ptdrp2yfvzs00000gn/C';
-function periodicSwapCleanup() {
-  if (traceSeq % 20 !== 0 || traceSeq === 0) return;
-  try {
-    const files = fs.readdirSync(SWAP_DIR).filter(f => f.startsWith('~PI~') && f.endsWith('.swp'));
-    const now = Date.now();
-    const threshold = now - 10 * 60 * 1000; // 10 minutes — conservative to avoid hitting active files
-    let freed = 0;
-    for (const file of files) {
-      const p = path.join(SWAP_DIR, file);
-      try {
-        const stat = fs.statSync(p);
-        if (stat.mtimeMs < threshold) { fs.unlinkSync(p); freed += stat.size; }
-      } catch {}
-    }
-    if (freed > 0) {
-      process.stderr.write(`[mcp] Swap cleanup: freed ${(freed / 1024 / 1024).toFixed(0)}MB stale swap\n`);
-    }
-  } catch {}
-}
+// (WI-24: mtime-based periodicSwapCleanup removed — unsafe; orphan swap is cleaned once at giga-run startup.)
 
 function writeTraceEntry(entry) {
   if (!traceFile) return;
   try {
-    fs.appendFileSync(traceFile, JSON.stringify(entry) + '\n');
+    // WI-25: every entry carries agent/pid/model/state (seq is monotonic: traceSeq starts at the existing line count)
+    const full = {
+      ...entry,
+      agent: entry.agent || agentName,
+      pid: entry.pid || process.pid,
+      model: entry.model !== undefined ? entry.model : (process.argv[6] || null),
+      state: entry.state !== undefined ? entry.state : (stateMachine ? stateMachine.state : null),
+    };
+    fs.appendFileSync(traceFile, JSON.stringify(full) + '\n');
   } catch {}
 }
 
@@ -139,7 +156,9 @@ function summarizeArgs(args) {
   if (!args) return {};
   const out = {};
   for (const [k, v] of Object.entries(args)) {
-    if (typeof v === 'string' && v.length > 200) {
+    if (k === 'expression' && typeof v === 'string') {
+      out[k] = v.length > 400 ? v.slice(0, 400) + '...[truncated]' : v;   // WI-13: keep traces auditable
+    } else if (typeof v === 'string' && v.length > 200) {
       out[k] = v.slice(0, 100) + '...[truncated]';
     } else {
       out[k] = v;
@@ -173,6 +192,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   const seq = traceSeq++;
   const callStart = Date.now();
+  _lastTool = name; _lastSeq = seq;
+
+  // WI-07b: FATAL gate at the very top (catches crashes swallowed by swapGuard / handler try-catch blocks)
+  if (isCrashed(ctx, storeBaseDir)) {
+    writeTraceEntry({ seq, ts: callStart, relMs: callStart - TRACE_START, tool: name, args: summarizeArgs(args), error: FATAL_TEXT, resultSummary: null, state: stateMachine.state });
+    return { content: [{ type: 'text', text: FATAL_TEXT }] };
+  }
   const traceEntry = {
     seq,
     ts: callStart,
@@ -181,6 +207,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     args: summarizeArgs(args),
     viewId: args?.view_id || args?.source_id || args?.target_id || args?.rgb_id || args?.l_id || null,
   };
+
+  // WI-06: repair engine bookkeeping. Policies expire by seq (blocked calls count).
+  const modViewId = args?.view_id || args?.rgb_id || args?.target_id || null;
+  for (const ev of repairTracker.expire(seq)) {
+    writeTraceEntry({ seq, ts: Date.now(), tool: name, ...ev });
+    if (stateMachine.state === 'repair' && typeof stateMachine.exitRepair === 'function') stateMachine.exitRepair();
+  }
+  traceEntry.state = stateMachine.state;
+  traceEntry.repair_policy = repairTracker.policyIdFor(modViewId) || repairTracker.policyIdFor(traceEntry.viewId) || null;
+
+  // WI-06: forbids-only enforcement on a view with an active policy, regardless of state
+  const forbidView = repairTracker.policyIdFor(modViewId) ? modViewId : traceEntry.viewId;
+  const forbids = repairTracker.checkForbids(name, args || {}, forbidView);
+  if (!forbids.allowed) {
+    traceEntry.durationMs = 0;
+    traceEntry.error = `BLOCKED (repair policy): ${forbids.reason}`;
+    traceEntry.resultSummary = null;
+    traceEntry.repair_violation = { policy: forbids.policy, reason: forbids.reason };
+    writeTraceEntry(traceEntry);
+    writeTraceEntry({ seq, ts: Date.now(), tool: name, event: 'repair_violation', policy: forbids.policy, viewId: forbidView, reason: forbids.reason });
+    stateMachine.recordBlockedCall();
+    const budget = stateMachine.getBudgetStatus();
+    return { content: [{ type: 'text', text: `REPAIR POLICY VIOLATION (${forbids.policy}): ${forbids.reason}\n[Budget: ${budget.turnsRemaining}/${budget.maxTurns} turns \u2014 ${budget.status} | State: ${stateMachine.state}]` }] };
+  }
 
   // Sync state to brief
   syncBriefState();
@@ -200,6 +250,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         traceEntry.error = `BLOCKED (repair policy): ${repairAccess.reason}`;
         traceEntry.resultSummary = null;
         writeTraceEntry(traceEntry);
+        stateMachine.recordBlockedCall();
         const budget = stateMachine.getBudgetStatus();
         return { content: [{ type: 'text', text: `REPAIR POLICY VIOLATION: ${repairAccess.reason}\n[Budget: ${budget.turnsRemaining}/${budget.maxTurns} turns — ${budget.status} | State: ${stateMachine.state}]` }] };
       }
@@ -209,16 +260,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       traceEntry.error = `BLOCKED (state ${stateMachine.state}): ${access.reason}`;
       traceEntry.resultSummary = null;
       writeTraceEntry(traceEntry);
+      stateMachine.recordBlockedCall();
       const budget = stateMachine.getBudgetStatus();
-      return { content: [{ type: 'text', text: `STATE POLICY: ${access.reason}\n[Budget: ${budget.turnsRemaining}/${budget.maxTurns} turns — ${budget.status} | State: ${stateMachine.state}]` }] };
+      const leaveHint = `\nTo leave a state: assess -> generate_candidates: clone_image; generate_candidates -> compose: call begin_composition (or lrgb_combine / star_protected_blend); compose -> finalize: a PASSED finish.`;
+      return { content: [{ type: 'text', text: `STATE POLICY: ${access.reason}${leaveHint}\n[Budget: ${budget.turnsRemaining}/${budget.maxTurns} turns — ${budget.status} | State: ${stateMachine.state}]` }] };
     }
   }
 
-  // Track provenance for composition tools
-  const compositionTools = ['lrgb_combine', 'ha_inject_red', 'ha_inject_luminance', 'dynamic_narrowband_blend', 'star_screen_blend', 'star_protected_blend'];
-  const viewId = args?.view_id || args?.rgb_id || args?.target_id || null;
-  if (compositionTools.includes(name) && viewId) {
-    viewProvenance.set(viewId, { tool: name, params: summarizeArgs(args), seq });
+  // === BUDGET EXHAUSTION GATE (WI-07a) ===
+  const exhausted = checkBudgetExhausted(agentName, name, stateMachine.getBudgetStatus());
+  if (exhausted) {
+    traceEntry.durationMs = 0;
+    traceEntry.error = 'BLOCKED (budget exhausted)';
+    traceEntry.resultSummary = null;
+    writeTraceEntry(traceEntry);
+    stateMachine.recordBlockedCall();
+    return { content: [{ type: 'text', text: exhausted }] };
+  }
+
+  // Provenance (WI-06): every image-modifying tool records lastModifier {tool, params, seq} + history of 5;
+  // composition tools also keep lastComposition. Recorded before the handler (matches the old behaviour).
+  const viewId = modViewId;
+  repairTracker.recordModifier(name, summarizeArgs(args), seq, viewId);
+
+  // WI-13: clone chain rooted at FILTER_L (Gate 10 provenance)
+  if (name === 'clone_image' && brief && args?.source_id && args?.clone_id && isLDerived(args.source_id, brief)) {
+    if (!brief._lRoots.includes(args.clone_id)) brief._lRoots.push(args.clone_id);
   }
 
   // Invalidate star integrity when a star-modifying tool touches a tracked view
@@ -233,6 +300,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     for (const key of Object.keys(brief._starIntegrity)) {
       brief._starIntegrity[key].turnsAgo = (brief._starIntegrity[key].turnsAgo || 0) + 1;
     }
+  }
+
+  // === BRANCH COVERAGE (advisory, WI-05): computed BEFORE the composition handler runs ===
+  // Never blocks, never reverts the transition, never skipped silently except for warm starts.
+  let branchWarnings = '';
+  const isComposeSentinel = name === 'lrgb_combine' || name === 'star_screen_blend' || name === 'star_protected_blend' || name === 'begin_composition';
+  if (isComposeSentinel && store && stateMachine.state === 'generate_candidates' && !brief?.warmStart) {
+    try {
+      const variants = store.listVariants(agentName);
+      const bcResult = checkBranchCompleteness(variants, brief);
+      if (!bcResult.complete && bcResult.warnings.length > 0) {
+        branchWarnings = '\n[BRANCH COVERAGE \u2014 advisory] ' + bcResult.warnings.join(' | ');
+      }
+    } catch (_e) { /* non-blocking */ }
   }
 
   try {
@@ -250,7 +331,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     traceEntry.resultSummary = resultText.slice(0, 500);
     traceEntry.error = null;
+    if (!Array.isArray(result) && Array.isArray(result?.profileCaps)) traceEntry.profileCaps = result.profileCaps;
+
+    // === REPAIR ENGINE (WI-06): exit on verify PASS / accepted finish, engage on trigger failures ===
+    const category = brief?.target?.classification || 'unknown';
+    const rep = repairTracker.onResult({ name, args: args || {}, resultText, seq, viewId: viewId || args?.view_id || null, category });
+    if (rep.failedGates?.length) {
+      traceEntry.failedGates = rep.failedGates.map(g => ({
+        gate: g.gate, tool: g.tool, failedMetrics: g.failedMetrics || [], reason: (g.reason || '').slice(0, 200),
+        tonal_verdict: g.tonal_verdict || null, p90S: g.p90S ?? null, repairable: g.repairable !== false,
+      }));
+    }
     writeTraceEntry(traceEntry);
+    for (const ev of rep.events) writeTraceEntry({ seq, ts: Date.now(), tool: name, ...ev });
 
     // Record tool call in state machine (may trigger state transition)
     stateMachine.recordToolCall(name, args || {}, resultText);
@@ -265,56 +358,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
     }
 
-    // === REPAIR POLICY: detect gate failures that need structured repair ===
-    let repairGuidance = '';
-    if (['check_saturation', 'scan_burnt_regions', 'check_star_quality', 'check_tonal_presence', 'check_highlight_texture'].includes(name)) {
-      const isFail = resultText.includes('FAIL') || resultText.includes('REJECTED');
-      if (isFail && stateMachine.state !== 'repair') {
-        const prov = viewProvenance.get(viewId || args?.view_id);
-        const category = brief?.target?.classification || 'unknown';
-        const policy = findRepairPolicy(name, { resultText }, prov, category);
-        if (policy && !policy.advisory) {
-          // Enter repair state (only from compose)
-          if (stateMachine.state === 'compose') {
-            stateMachine.enterRepair(policy);
-            repairGuidance = '\n\n' + generateRepairGuidance(policy, prov);
-          }
-        }
-      }
+    // Repair guidance + state-machine repair state (kept for compose/finalize; enforcement does not depend on it)
+    let repairGuidance = rep.guidance || '';
+    if (rep.engaged && !String(rep.engaged.policy).startsWith('finish_') && typeof stateMachine.enterRepair === 'function' && (stateMachine.state === 'compose' || stateMachine.state === 'finalize')) {
+      try { stateMachine.enterRepair(repairTracker.active.get(rep.engaged.viewId).policy); } catch (_e) { /* non-fatal */ }
     }
-
-    // === BRANCH COMPLETENESS: blocking check on compose transition ===
-    // Detect transition into compose (previous state was generate_candidates,
-    // current state is compose — recordToolCall above may have triggered this).
-    let branchWarnings = '';
-    const justEnteredCompose = stateMachine.state === 'compose' && traceEntry.args && (
-      name === 'lrgb_combine' || name === 'star_screen_blend' || name === 'star_protected_blend'
-    );
-    if (justEnteredCompose && store) {
-      try {
-        const variants = store.listVariants(agentName);
-        const bcResult = checkBranchCompleteness(variants, brief);
-        if (!bcResult.complete && bcResult.warnings.length > 0) {
-          const budget = stateMachine.getBudgetStatus();
-          const budgetAllowsBlock = budget.status !== 'converge' && budget.status !== 'critical';
-          const overridden = stateMachine._branchCompletenessOverride;
-
-          if (budgetAllowsBlock && !overridden) {
-            // BLOCKING: force back to generate_candidates
-            stateMachine.transitionTo('generate_candidates');
-            branchWarnings = '\n[BRANCH COMPLETENESS — BLOCKED] Compose rejected: incomplete branches. ' +
-              'You MUST go back and generate more variants before composing.\n' +
-              bcResult.warnings.map(w => '  - ' + w).join('\n') +
-              '\nReturn to generate_candidates and address the gaps above, then retry composition.';
-          } else {
-            // Advisory only (budget pressure or explicit override)
-            const reason = overridden ? 'override active' : `budget ${budget.status}`;
-            branchWarnings = `\n[BRANCH COMPLETENESS — advisory, ${reason}] ` + bcResult.warnings.join(' | ');
-          }
-        }
-      } catch (_e) {
-        // Non-blocking on error
-      }
+    if (stateMachine.state === 'repair' && repairTracker.active.size === 0 && typeof stateMachine.exitRepair === 'function') {
+      stateMachine.exitRepair();
     }
 
     // Budget + state status suffix
@@ -322,6 +372,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const budgetSuffix = `\n[Budget: ${budget.turnsRemaining}/${budget.maxTurns} turns — ${budget.status} | State: ${stateMachine.state}` +
       ((budget.guidance?.length || 0) > 0 ? ` | ${budget.guidance.join('; ')}` : '') + ']' +
       repairGuidance + branchWarnings;
+
+    persistAgentState();
+    // Post-call crash check (a handler may have swallowed a BridgeCrashError)
+    const crashNote = isCrashed(ctx, storeBaseDir) ? `\n${FATAL_TEXT}` : '';
 
     // Normalize to MCP content format
     if (Array.isArray(result)) {
@@ -332,14 +386,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { type: 'text', text: r.text || String(r) };
       });
       if (items.length > 0) {
-        items[items.length - 1].text += budgetSuffix;
+        items[items.length - 1].text += budgetSuffix + crashNote;
       }
       return { content: items };
     }
     if (result?.type === 'text') {
-      return { content: [{ type: 'text', text: result.text + budgetSuffix }] };
+      return { content: [{ type: 'text', text: result.text + budgetSuffix + crashNote }] };
     }
-    return { content: [{ type: 'text', text: String(result) + budgetSuffix }] };
+    return { content: [{ type: 'text', text: String(result) + budgetSuffix + crashNote }] };
   } catch (err) {
     traceEntry.durationMs = Date.now() - callStart;
     traceEntry.resultSummary = null;
@@ -347,6 +401,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     writeTraceEntry(traceEntry);
     stateMachine.recordToolCall(name, args || {}, '');
     process.stderr.write(`[mcp] Tool error (${name}): ${err.message}\n`);
+    persistAgentState();
+    if (err.isCrash || isCrashed(ctx, storeBaseDir)) {
+      if (store) { try { store.fail(err.message); } catch {} }
+      return { content: [{ type: 'text', text: `${FATAL_TEXT}\n${err.message}` }] };
+    }
     const budget = stateMachine.getBudgetStatus();
     return { content: [{ type: 'text', text: `Error: ${err.message}\n[Budget: ${budget.turnsRemaining}/${budget.maxTurns} turns — ${budget.status} | State: ${stateMachine.state}]` }] };
   }

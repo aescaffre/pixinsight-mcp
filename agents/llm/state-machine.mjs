@@ -31,20 +31,44 @@ const INTERNAL_TOOLS = new Set([
   'run_lhe',               // use multi_scale_enhance instead
   'run_abe',               // used in prep only
   'run_per_channel_abe',   // used in prep only
+  // WI-10: hidden legacy tools (tools.mjs hidden:true) — never available to the mega-agent
+  'check_core_burning', 'compute_scores', 'check_constraints', 'submit_scores', 'auto_stretch', 'star_screen_blend',
+  'open_image', 'combine_channels',
+]);
+
+/** Compose-state tools (finalize is a strict superset of this set). */
+const COMPOSE_TOOLS = new Set([
+    'finish',
+    'lrgb_combine', 'star_protected_blend', 'restore_star_color',
+    'run_curves', 'run_pixelmath',
+    'multi_scale_enhance', 'shell_detail_enhance', 'continuous_clamp',
+    'clone_image', 'restore_from_clone', 'close_image',
+    'save_variant', 'load_variant', 'list_variants',
+    'save_and_show_preview',
+    'get_image_stats', 'measure_subject_detail',    'check_saturation', 'check_star_quality', 'check_ringing',
+    'check_sharpness', 'scan_burnt_regions', 
+    'check_tonal_presence', 'check_star_layer_integrity', 'check_bright_chroma',
+    'check_highlight_texture',
+    
+    'create_luminance_mask', 'create_adaptive_zone_masks',
+    'apply_mask', 'remove_mask', 'close_mask',
+    'rename_view', 'purge_undo',
+    // WI-05: dust/mask/detail/denoise tools stay usable after a REJECTED finish
+    'lift_dust', 'inject_l_ifn', 'run_nxt', 'run_scnr', 'run_hdrmt', 'create_zone_masks',
+    'inject_luminance', 'stretch_stars', 'check_star_layer_integrity',
 ]);
 
 /** Tools restricted to specific states.  Anything NOT here and NOT internal
  *  is treated as public (allowed in any state). */
 const STATE_TOOLS = {
   assess: new Set([
-    'recall_memory', 'list_open_images', 'get_image_stats',
-    'measure_subject_detail', 'measure_uniformity', 'check_saturation',
+    'get_image_stats',
+    'measure_subject_detail', 'check_saturation',
     'check_star_quality', 'check_ringing', 'check_sharpness',
-    'check_core_burning', 'scan_burnt_regions', 'check_constraints',
+    'scan_burnt_regions', 
     'check_tonal_presence',
-    'compute_scores', 'submit_scores',
+    
     'save_and_show_preview', 'save_variant', 'rename_view',
-    'get_image_dimensions',
     'clone_image', 'close_image', 'purge_undo',
   ]),
 
@@ -52,7 +76,7 @@ const STATE_TOOLS = {
     // Candidate generation
     'multi_scale_enhance', 'shell_detail_enhance', 'run_hdrmt', 'run_curves', 'run_pixelmath',
     'run_nxt', 'run_bxt', 'run_scnr', 'run_sxt',
-    'seti_stretch', 'stretch_stars', 'auto_stretch',
+    'seti_stretch', 'stretch_stars', 
     'run_spcc', 'run_background_neutralization',
     // Ha / narrowband
     'ha_inject_red', 'ha_inject_luminance', 'continuum_subtract_ha',
@@ -62,61 +86,45 @@ const STATE_TOOLS = {
     'create_zone_masks', 'create_adaptive_zone_masks',
     // Image management
     'clone_image', 'restore_from_clone', 'close_image', 'purge_undo',
-    'rename_view', 'open_image', 'combine_channels',
+    'rename_view',
     // Measurement
-    'get_image_stats', 'measure_subject_detail', 'measure_uniformity',
-    'check_saturation', 'check_star_quality', 'check_ringing',
-    'check_sharpness', 'check_core_burning', 'scan_burnt_regions',
-    'check_constraints', 'compute_scores',
+    'get_image_stats', 'measure_subject_detail',    'check_saturation', 'check_star_quality', 'check_ringing',
+    'check_sharpness', 'scan_burnt_regions',
+    
     'check_tonal_presence', 'check_star_layer_integrity', 'check_bright_chroma',
     'check_highlight_texture',
     // Artifacts
     'continuous_clamp',
     // Variants
     'save_variant', 'load_variant', 'list_variants',
-    'save_and_show_preview', 'submit_scores',
-    'list_open_images',
-    // Star handling (for star branch)
-    'star_screen_blend', 'star_protected_blend', 'restore_star_color',
+    'save_and_show_preview', 
+        // Star handling (for star branch)
+    'star_protected_blend', 'restore_star_color',
+    // WI-05: dust/L-IFN, LRGB, luminance injection, mask ops available while generating
+    'lift_dust', 'inject_l_ifn', 'lrgb_combine', 'inject_luminance',
+    // mask_ops is public (WI-15): not in any STATE_TOOLS set
   ]),
 
-  compose: new Set([
-    'finish',
-    'lrgb_combine', 'star_screen_blend', 'star_protected_blend', 'restore_star_color',
-    'run_curves', 'run_pixelmath',
-    'multi_scale_enhance', 'shell_detail_enhance', 'continuous_clamp',
-    'clone_image', 'restore_from_clone', 'close_image',
-    'save_variant', 'load_variant', 'list_variants',
-    'save_and_show_preview',
-    'get_image_stats', 'measure_subject_detail', 'measure_uniformity',
-    'check_saturation', 'check_star_quality', 'check_ringing',
-    'check_sharpness', 'scan_burnt_regions', 'check_constraints',
-    'check_tonal_presence', 'check_star_layer_integrity', 'check_bright_chroma',
-    'check_highlight_texture',
-    'compute_scores', 'submit_scores',
-    'create_luminance_mask', 'create_adaptive_zone_masks',
-    'apply_mask', 'remove_mask', 'close_mask',
-    'list_open_images', 'rename_view', 'purge_undo',
-  ]),
+  compose: COMPOSE_TOOLS,
 
   // repair: tools determined dynamically by repairPolicy.allowedTools
 
+  // finalize must never be more restrictive than compose (WI-05); terminal state.
   finalize: new Set([
+    ...COMPOSE_TOOLS,
     'finish',
     'run_pixelmath', 'run_curves', 'continuous_clamp',
     'run_nxt', 'run_scnr', // the finish noise/green gates DEMAND these — must be runnable in finalize (was the blocked-final-denoise bug)
-    'lift_dust', 'inject_l_ifn', 'measure_dust_coverage', 'check_noise', 'measure_color_gradient', // IFN/dust + noise/color polish in finalize
+    'lift_dust', 'inject_l_ifn', // IFN/dust + noise/color polish in finalize
     'star_protected_blend', 'stretch_stars', 'check_star_layer_integrity', // safety net: allow star blend in finalize
     'lrgb_combine', // safety net: allow LRGB if finish rejected for missing it
     'clone_image', 'restore_from_clone',
-    'save_variant', 'save_and_show_preview', 'save_memory',
-    'get_image_stats', 'measure_subject_detail', 'measure_uniformity',
-    'check_saturation', 'check_star_quality', 'check_ringing',
-    'scan_burnt_regions', 'check_constraints', 'check_sharpness',
+    'save_variant', 'save_and_show_preview',    'get_image_stats', 'measure_subject_detail',    'check_saturation', 'check_star_quality', 'check_ringing',
+    'scan_burnt_regions', 'check_sharpness',
     'check_tonal_presence', 'check_bright_chroma',
     'check_highlight_texture',
-    'compute_scores',
-    'list_open_images', 'close_image',
+    
+    'close_image',
   ]),
 };
 
@@ -137,7 +145,7 @@ class StateMachine {
   /**
    * @param {number} maxTurns - Total turn budget across all states.
    */
-  constructor(maxTurns) {
+  constructor(maxTurns, opts = {}) {
     this.state = 'assess';
     this.maxTurns = maxTurns;
     this.turnsUsed = 0;
@@ -151,15 +159,36 @@ class StateMachine {
     };
     this.repairPolicy = null;   // set when entering repair state
     this.repairAttempts = 0;
-    this._branchCompletenessOverride = false;  // when true, incomplete branches are advisory only
+    this._repairReturnState = 'compose';  // where exitRepair() goes (compose or finalize)
+    // WI-05: warm start (--base-run) has no branch phase: begin directly in compose.
+    this.warmStart = !!opts.warmStart;
+    if (this.warmStart) this.state = 'compose';
   }
 
-  /**
-   * Override branch completeness enforcement (e.g. under budget pressure).
-   * Once called, incomplete branches produce warnings instead of blocking.
-   */
-  overrideBranchCompleteness() {
-    this._branchCompletenessOverride = true;
+  /** WI-05: serialisable snapshot (used by WI-07b). */
+  toJSON() {
+    return {
+      state: this.state,
+      turnsUsed: this.turnsUsed,
+      stateTurns: { ...this.stateTurns },
+      stateStartTurn: this.stateStartTurn,
+      repairPolicyName: this.repairPolicy ? (this.repairPolicy.name || this.repairPolicy.id || null) : null,
+      _branchCompletenessOverride: false,   // retained for snapshot compatibility; branch completeness is advisory
+      _repairReturnState: this._repairReturnState,
+    };
+  }
+
+  /** WI-05: restore from a toJSON() snapshot. repairPolicy object is NOT restored (only its name is recorded). */
+  restore(snapshot) {
+    if (!snapshot) return this;
+    this.state = snapshot.state;
+    this.turnsUsed = snapshot.turnsUsed || 0;
+    this.stateTurns = { ...this.stateTurns, ...(snapshot.stateTurns || {}) };
+    this.stateStartTurn = snapshot.stateStartTurn || 0;
+    this._repairReturnState = snapshot._repairReturnState || 'compose';
+    this.repairPolicy = null;
+    if (this.state === 'repair') this.state = this._repairReturnState;  // policy object is gone; do not stay in a policy-less repair
+    return this;
   }
 
   // -----------------------------------------------------------------------
@@ -196,7 +225,7 @@ class StateMachine {
         if (allowed) return { allowed: true };
         return {
           allowed: false,
-          reason: `Tool "${toolName}" is not permitted by the active repair policy (${this.repairPolicy.name || 'unnamed'}).`,
+          reason: `Tool "${toolName}" is not permitted by the active repair policy (${this.repairPolicy.name || this.repairPolicy.id || 'unnamed'}).`,
         };
       }
       // No policy set — block everything restricted.
@@ -259,7 +288,9 @@ class StateMachine {
 
     if (this.state === 'generate_candidates') {
       // Composition tool signals generation is done.
-      if (toolName === 'lrgb_combine' || toolName === 'star_screen_blend' || toolName === 'star_protected_blend') {
+      const refusedBegin = toolName === 'begin_composition' && /^save at least 2/i.test(resultSummary || '');
+      if (toolName === 'lrgb_combine' || toolName === 'star_screen_blend' || toolName === 'star_protected_blend' ||
+          (toolName === 'begin_composition' && !refusedBegin)) {
         this.transitionTo('compose');
         return;
       }
@@ -271,12 +302,12 @@ class StateMachine {
     }
 
     if (this.state === 'compose') {
-      // finish signals we're done composing.
-      if (toolName === 'finish') {
+      // Only a PASSED finish moves to finalize; a 'FINISH REJECTED' leaves the state unchanged.
+      if (toolName === 'finish' && /^Finished \(quality gates PASSED\)/.test(resultSummary || '')) {
         this.transitionTo('finalize');
         return;
       }
-      // Budget cap — move to finalize (skip repair if budget is tight).
+      // Budget cap - move to finalize (skip repair if budget is tight).
       if (stateBudgetUsed >= STATE_BUDGET_CAPS.compose) {
         this.transitionTo('finalize');
         return;
@@ -297,6 +328,30 @@ class StateMachine {
     }
   }
 
+  /**
+   * Record a BLOCKED call (state policy / repair policy / budget exhausted).
+   * Consumes budget so a block loop is bounded, but applies ONLY the
+   * force-finalize (<=15 remaining) and per-state budget caps - never the
+   * tool-name sentinels (a blocked lrgb_combine must not advance to compose).
+   */
+  recordBlockedCall() {
+    this.turnsUsed++;
+    this.stateTurns[this.state]++;
+    const stateBudgetUsed = this.turnsUsed - this.stateStartTurn;
+    const turnsRemaining = this.maxTurns - this.turnsUsed;
+    if (turnsRemaining <= 15 && this.state !== 'finalize') {
+      this.transitionTo('finalize');
+      return;
+    }
+    const cap = STATE_BUDGET_CAPS[this.state];
+    if (cap !== undefined && stateBudgetUsed >= cap) {
+      if (this.state === 'assess') this.transitionTo('generate_candidates');
+      else if (this.state === 'generate_candidates') this.transitionTo('compose');
+      else if (this.state === 'compose') this.transitionTo('finalize');
+      else if (this.state === 'repair') this.exitRepair();
+    }
+  }
+
   // -----------------------------------------------------------------------
   // Repair state management
   // -----------------------------------------------------------------------
@@ -307,9 +362,10 @@ class StateMachine {
    *                          as a Set or Array, and optionally `name`).
    */
   enterRepair(policy) {
-    if (this.state !== 'compose') {
-      throw new Error(`Cannot enter repair from state "${this.state}" (must be in compose).`);
+    if (this.state !== 'compose' && this.state !== 'finalize') {
+      throw new Error(`Cannot enter repair from state "${this.state}" (must be in compose or finalize).`);
     }
+    this._repairReturnState = this.state;
     this.repairPolicy = policy;
     this.repairAttempts++;
     this.transitionTo('repair');
@@ -317,11 +373,11 @@ class StateMachine {
 
   /**
    * Exit repair state (success or budget exhausted).
-   * Returns to compose so the agent can re-evaluate.
+   * Returns to the state repair was entered from (compose or finalize).
    */
   exitRepair() {
     this.repairPolicy = null;
-    this.transitionTo('compose');
+    this.transitionTo(this._repairReturnState || 'compose');
   }
 
   // -----------------------------------------------------------------------
@@ -413,9 +469,8 @@ class StateMachine {
 
 /**
  * Check if enough variant branches have been explored before composition.
- * Blocks compose transition when incomplete — the caller must force the
- * state machine back to generate_candidates unless budget pressure or an
- * explicit override allows proceeding.
+ * ADVISORY ONLY (WI-05): the caller appends the warnings to the tool result;
+ * it never blocks or reverts the transition.
  *
  * @param {Array} variants - List of saved variants (from store.listVariants)
  * @param {object} brief - Processing brief (for hasL check)
@@ -427,19 +482,29 @@ export function checkBranchCompleteness(variants, brief) {
     return { complete: false, warnings: ['No variants saved — branches may not have been explored.'] };
   }
 
+  // WI-19: an explicit params.stage (branch_stars/color/detail/palette) is authoritative for that
+  // variant; only variants without a specific branch stage fall back to the notes/viewId text match.
+  const STAGE_CAT = { branch_stars: 'star', branch_color: 'color', branch_detail: 'detail', branch_palette: 'palette' };
+  const stageOf = (v) => (v && v.params && typeof v.params.stage === 'string') ? v.params.stage : null;
   const variantTexts = variants.map(v => {
+    const st = stageOf(v);
+    if (st && STAGE_CAT[st]) return STAGE_CAT[st] + ' ' + (st === 'branch_detail' ? 'l_detail ' : '') + (st === 'branch_palette' ? 'palette ' : '') + (st === 'branch_color' ? 'saturation ' : '');
+    if (st && st !== 'branch_unspecified' && st !== 'base') return ''; // ifn/core/composition/final stages are not star/color/detail/palette coverage
     const text = ((v.notes || '') + ' ' + (v.variantId || '') + ' ' + (v.viewId || '')).toLowerCase();
     return text;
   });
 
-  // Star branch: >= 2 variants with "star" in notes/viewId
+  // Star branch: >= 2 variants with "star" in notes/viewId — not for starless deliverables
+  const isStarless = !!brief?.dataDescription?.starless;
   const starCount = variantTexts.filter(t => t.includes('star')).length;
-  if (starCount < 2) {
+  if (!isStarless && starCount < 2) {
     warnings.push(`Star branch shallow: only ${starCount} star variant(s) saved (need >= 2). Explore more star processing options.`);
   }
 
-  // Color branch: >= 2 variants with "color" or "saturation"
-  const colorCount = variantTexts.filter(t => t.includes('color') || t.includes('saturation')).length;
+  // Color branch: >= 2 variants with "color" or "saturation" (narrowband: palette/hue/sho/hoo/foraxx notes count too)
+  const nbColor = !!brief?.dataDescription?.narrowband;
+  const colorCount = variantTexts.filter(t => t.includes('color') || t.includes('saturation') ||
+    (nbColor && /palette|hue|sho|hoo|foraxx/.test(t))).length;
   if (colorCount < 2) {
     warnings.push(`Color branch shallow: only ${colorCount} color variant(s) saved (need >= 2). Explore more saturation/color options.`);
   }
@@ -455,6 +520,14 @@ export function checkBranchCompleteness(variants, brief) {
     }
   }
 
+  // Palette branch (SHO/HOO): >= 2 palette variants (palette / gains / hue shift bracketed)
+  if (brief?.dataDescription?.narrowband) {
+    const palCount = variantTexts.filter(t => /palette|foraxx|hue|sho|hoo/.test(t)).length;
+    if (palCount < 2) {
+      warnings.push(`Palette branch shallow: only ${palCount} palette variant(s) saved (need >= 2). Bracket sho_combine palettes/gains and sho_hue_shift strength.`);
+    }
+  }
+
   const complete = warnings.length === 0;
   return { complete, warnings };
 }
@@ -466,11 +539,62 @@ export function checkBranchCompleteness(variants, brief) {
 /**
  * Create a new state machine instance for a GIGA run.
  * @param {number} maxTurns - Total turn budget (default 200).
+ * @param {{warmStart?: boolean}} opts - warmStart: begin in compose (no branch phase).
  * @returns {StateMachine}
  */
-export function createStateMachine(maxTurns = 200) {
-  return new StateMachine(maxTurns);
+export function createStateMachine(maxTurns = 200, opts = {}) {
+  return new StateMachine(maxTurns, opts);
 }
 
 // Also export the class for type checking / testing.
 export { StateMachine, STATE_BUDGET_CAPS, INTERNAL_TOOLS, STATE_TOOLS };
+
+
+// ---------------------------------------------------------------------------
+// WI-07a: MCP-side turn budget for non-giga agents + exhaustion gate
+// ---------------------------------------------------------------------------
+
+/** Counter-only budget object for agents that have no state machine (gradient, core). */
+export function createCounterBudget(maxTurns = 250) {
+  return {
+    state: 'free',
+    repairPolicy: null,
+    _branchCompletenessOverride: false,
+    turnsUsed: 0,
+    maxTurns,
+    recordToolCall() { this.turnsUsed++; },
+    recordBlockedCall() { this.turnsUsed++; },
+    getBudgetStatus() {
+      const turnsRemaining = this.maxTurns - this.turnsUsed;
+      const status = turnsRemaining <= 15 ? 'critical' : turnsRemaining <= 30 ? 'converge' : 'ok';
+      return { turnsUsed: this.turnsUsed, turnsRemaining, maxTurns: this.maxTurns, status, state: this.state, guidance: [] };
+    },
+    checkToolAccess: () => ({ allowed: true }),
+    enterRepair() {},
+    transitionTo() {},
+  };
+}
+
+export const EXHAUST_WHITELIST = {
+  giga_orchestrator: ['finish', 'save_variant', 'list_variants', 'load_variant', 'get_image_stats', 'save_memory', 'close_image', 'run_quality_gates'],
+  core_specialist: ['restore_from_clone', 'close_image', 'get_image_stats', 'save_memory', 'save_variant'],
+  gradient_agent: ['measure_color_gradient', 'measure_subject_detail', 'save_memory'],
+};
+
+const EXHAUST_INSTRUCTION = {
+  giga_orchestrator: 'finish is in EMERGENCY mode - call finish with your best saved variant now.',
+  core_specialist: 'restore_from_clone your best clone into CORE_WORK and stop.',
+  gradient_agent: 'stop now.',
+};
+
+/**
+ * Budget-exhaustion gate. Returns null if the call may proceed, else the
+ * refusal text for the agent.
+ */
+export function checkBudgetExhausted(agentName, toolName, budget) {
+  if (!budget || budget.turnsRemaining > 0) return null;
+  const list = EXHAUST_WHITELIST[agentName];
+  if (list && list.includes(toolName)) return null;
+  const allowed = (list || []).join(', ') || 'none';
+  return `BUDGET EXHAUSTED: only ${allowed} are allowed. ` + (EXHAUST_INSTRUCTION[agentName] || 'stop now.');
+}

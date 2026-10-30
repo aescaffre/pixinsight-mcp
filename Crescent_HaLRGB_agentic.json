@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "name": "NGC 6888 Crescent Nebula HaLRGB — LLM Agentic Pipeline",
+  "files": {
+    "sourceFolder": "/Users/aescaffre/Desktop/Lecroissant/Output/master/Claude",
+    "L": "/Users/aescaffre/Desktop/Lecroissant/Output/master/Claude/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-L_mono_(1).xisf",
+    "R": "/Users/aescaffre/Desktop/Lecroissant/Output/master/Claude/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-R_mono_(1).xisf",
+    "G": "/Users/aescaffre/Desktop/Lecroissant/Output/master/Claude/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-V_mono_(1).xisf",
+    "B": "/Users/aescaffre/Desktop/Lecroissant/Output/master/Claude/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-B_mono_(1).xisf",
+    "Ha": "/Users/aescaffre/Desktop/Lecroissant/Output/master/Claude/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-HAlpha_mono.xisf",
+    "channelSwap": "RB,GB",
+    "outputDir": "/Users/aescaffre/Desktop/Lecroissant/Output/master/Claude/agentic",
+    "targetName": "NGC6888"
+  }
+}

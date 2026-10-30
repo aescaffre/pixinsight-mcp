@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "name": "M101 Pinwheel Galaxy HaRGB — LLM Agentic Pipeline",
+  "files": {
+    "sourceFolder": "/Users/aescaffre/Downloads/terrapixa_drizzle_integration_b-fit_2026-03-30_1816",
+    "L": "/Users/aescaffre/Downloads/terrapixa_drizzle_integration_b-fit_2026-03-30_1816/drizzle_integration.xisf",
+    "R": "/Users/aescaffre/Downloads/terrapixa_drizzle_integration_b-fit_2026-03-30_1816/drizzle_integration_R.fit",
+    "G": "/Users/aescaffre/Downloads/terrapixa_drizzle_integration_b-fit_2026-03-30_1816/drizzle_integration-V.fit",
+    "B": "/Users/aescaffre/Downloads/terrapixa_drizzle_integration_b-fit_2026-03-30_1816/drizzle_integration_B.fit",
+    "Ha": "/Users/aescaffre/Downloads/terrapixa_drizzle_integration_b-fit_2026-03-30_1816/drizzle_integration-Ha.fit",
+    "outputDir": "/Users/aescaffre/Downloads/terrapixa_drizzle_integration_b-fit_2026-03-30_1816/agentic",
+    "targetName": "M101"
+  }
+}

@@ -20,7 +20,7 @@ const ANNOTATION_TOOLS = new Set([
 /** Quality gate tool names */
 const QUALITY_GATE_TOOLS = new Set([
   'check_saturation', 'check_ringing', 'check_sharpness',
-  'check_core_burning', 'scan_burnt_regions', 'check_star_quality',
+  'scan_burnt_regions', 'check_star_quality',
 ]);
 
 /** Composition-phase tools */
@@ -706,6 +706,18 @@ export function generateTraceSummary(analysis) {
     lines.push('|------|-------|-----------|');
     for (const [name, stats] of sortedTools) {
       lines.push(`| ${name} | ${stats.count || 0} | ${formatDuration(stats.totalMs)} |`);
+    }
+    lines.push('');
+  }
+
+  // ---- Per-agent (WI-25) ----
+  const perAgent = Object.entries(analysis.perAgent || {});
+  if (perAgent.length > 0) {
+    lines.push('## Per-Agent Tool Calls');
+    lines.push('| Agent | Calls | Total Time | Errors | Blocked |');
+    lines.push('|-------|-------|-----------|--------|---------|');
+    for (const [name, a] of perAgent) {
+      lines.push(`| ${name} | ${a.calls || 0} | ${formatDuration(a.totalMs)} | ${a.errors || 0} | ${a.blocked || 0} |`);
     }
     lines.push('');
   }

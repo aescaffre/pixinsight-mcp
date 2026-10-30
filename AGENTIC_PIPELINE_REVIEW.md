@@ -17,6 +17,7 @@
 ### Pipeline entry point (IMPORTANT)
 - The real pipeline is **`agents/llm/giga-run.mjs`** — a single Claude Max "giga" mega-agent (71–73 MCP tools) in 4 stages: deterministic **prep-A** (open/align/combine, cached) → **gradient sub-agent** (linear color-gradient correction) → **prep-B** (BXT/SPCC/SCNR/NXT/SXT/stretch) → **creative agent** (the long, autonomous compositing phase with quality gates).
 - `agents/orchestrator.mjs` is an **old rule-based Phase-1 MVP** (no Ha/star/LRGB, stats-only scoring). It was run by mistake first and produced junk — **do not use it.**
+- API-provider engine archived (`agents/legacy/llm/`: engine.mjs, orchestrator.mjs, 8 old stage prompts; the @anthropic-ai/sdk, @google/generative-ai and @mistralai deps were removed); per-agent model via MaxAgent `--model` only (`--model-<agent>`, `config.models`).
 
 ### Iteration log
 | Iter | Change | Result | Verdict |
@@ -102,7 +103,7 @@
 
 **(4) Best-per-dimension + compositor** — ledger records per-dimension champions pointing at durable `variant_NN/image.xisf`; `recall_champion(class,dim)` + `blend_regions(base,donor,mask)` (modeled on `star_protected_blend`); inject mandatory `COMP_champion_merge` candidate; optional `compare_to_champions` Pareto signal.
 
-**(5) Perceptual** — `vision_aesthetic_critic` (render JPEG → fresh `claude -p` judge → `{score,flaws}`) + `compare_to_reference` (CIELAB ΔE histogram-match + multiscale SSIM + IFN-coverage delta). Finish gate 11 (aesthetic) + 12 (reference, when `reference_path` set).
+**(5) Perceptual** — `vision_aesthetic_critic` (render JPEG → fresh `claude -p` judge → `{score,flaws}`) + `compare_to_reference` (background-cast ΔE on a*b* + saturation-weighted hue-family palette L1 + chroma-only sliced-Wasserstein a*b* distance + multiscale SSIM on ~1500 px resamples + IFN-coverage delta; the old residual-then-Lab `color_emd` was ~0 by construction and is retired). Finish gate 11 (aesthetic) + 12 (reference, when `reference_path` set).
 
 **(6) Warm-start** — `--base-run <id>` guards prep/gradient; `load_prior_winner(class)`; persist+replay gradient solution by prep-input hash.
 
@@ -142,13 +143,13 @@ All five B-tier features integrated; a 5-agent adversarial review found **zero b
 
 - **B1 warm-start** — `agents/llm/warmstart.mjs` (new) + `giga-run.mjs` `--base-run <runId>` (skips prep+gradient, loads a prior winner for touch-up) + **gradient-solution snapshot cache** (identical-input reruns replay instead of re-spawning the sub-agent) + `load_prior_winner` tool. → cheap iteration.
 - **B2a vision-aesthetic critic** — `agents/llm/aesthetic-critic.mjs` (new): spawns a fresh `claude -p` competition judge over a rendered JPEG (OAuth/Max, zero $), cached by image hash. `vision_aesthetic_critic` tool + **finish Gate 11** (BLOCK if score < `min_aesthetic` default 6.0). *Verified: judge returns clean JSON; its read of the validation image matched the human critique.* → first metric of "better/cooked", not just "not broken".
-- **B2b reference similarity** — `compareToReference` (CIELAB color-EMD + multiscale luminance SSIM + faint-coverage delta) in `subject-metrics.mjs`; `compare_to_reference` tool + **finish Gate 12** (active only when `brief.reference_path` set; BLOCK color_emd>0.25 OR coverage_delta>0.30). `referencePath` flows config.files → brief. → judge vs a user reference image.
+- **B2b reference similarity** — `compareToReference` (bg_cast_delta, palette_l1, lab_emd [chroma-only sliced-Wasserstein], lum_cdf_dist, multiscale luminance SSIM at ~1500 px, faint-coverage delta) in `subject-metrics.mjs`; `compare_to_reference` tool + **finish Gate 12** (active only when `brief.reference_path` set; BLOCK coverage_delta>0.30; palette_l1>0.35 / lab_emd>12 are ADVISORY warnings pending back-test; color_emd no longer blocks). `referencePath` flows config.files → brief. → judge vs a user reference image.
 - **B3a per-dimension champions** — `ledger.mjs` `recordChampions`/`getChampions`/`scoreVariantDimensions`/`CHAMPION_DIMENSIONS`; finish records the promoted winner's per-dimension champions (ifn_visibility, core_integrity, color_richness, star_quality, detail) pointing at durable variant XISFs; `recall_champion` tool + prompt visibility. → best-of-breed memory across runs.
 - **B3b region compositor** — `blend_regions` tool (geometry-guarded per-channel PixelMath; mono-base guarded) + `compare_to_champions` (Pareto signal using the SAME `scoreVariantDimensions`) + `giga-orchestrator` **COMP_champion_merge** mandatory candidate. *Verified: PixelMath blend = exactly base*(1-w)+donor*w (0.5000), RGB + mono.* → the whack-a-mole killer: graft iter-04's IFN + iter-05's core into one frame.
 
 **Minor fixes applied:** mono-base blend guard, reference-window leak close-all, spurious-run-dir guard on bad `--base-run` id, `loadLedger` `.classes` normalization, REFUSED-message + quote-escape cosmetics, gradient-hash L-presence comment.
 
-**Files:** `agents/llm/{warmstart,aesthetic-critic}.mjs` (new), `agents/llm/{giga-run,tools}.mjs`, `agents/llm/prompts/giga-orchestrator.mjs`, `agents/{ledger,classifier}.mjs`, `agents/ops/{subject-metrics,index}.mjs`. **Not committed** — validate on a live run before committing. `buildToolSet('giga_orchestrator')` now returns 79 tools (6 new).
+**Files:** `agents/llm/{warmstart,aesthetic-critic}.mjs` (new), `agents/llm/{giga-run,tools}.mjs`, `agents/llm/prompts/giga-orchestrator.mjs`, `agents/{ledger,classifier}.mjs`, `agents/ops/{subject-metrics,index}.mjs`. **Not committed** — validate on a live run before committing. `buildToolSet('giga_orchestrator')` returned 79 tools when written; since WI-10 it is an explicit category list (all except `readiness`, `scoring`) with hidden legacy tools removed: 82 tools.
 
 **To use B-tier on a run:** add `"referencePath": "/abs/ref.xisf"` under `files` to activate Gate 12; pass `--base-run <runId>` to warm-start a touch-up; the ledger/champions/aesthetic-critic engage automatically. Each completed run now records champions + ledger outcomes for cross-run learning.
 

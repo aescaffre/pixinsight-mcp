@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "name": "IC 5146 Cocoon Nebula HaLRGB — LLM Agentic Pipeline",
+  "files": {
+    "sourceFolder": "/Users/aescaffre/Downloads/terrapixa_r-fit_2026-03-30_1811",
+    "L": "/Users/aescaffre/Downloads/terrapixa_r-fit_2026-03-30_1811/L.fit",
+    "R": "/Users/aescaffre/Downloads/terrapixa_r-fit_2026-03-30_1811/R.fit",
+    "G": "/Users/aescaffre/Downloads/terrapixa_r-fit_2026-03-30_1811/G.fit",
+    "B": "/Users/aescaffre/Downloads/terrapixa_r-fit_2026-03-30_1811/B.fit",
+    "Ha": "/Users/aescaffre/Downloads/terrapixa_r-fit_2026-03-30_1811/H.fit",
+    "outputDir": "/Users/aescaffre/Downloads/terrapixa_r-fit_2026-03-30_1811/agentic",
+    "targetName": "IC5146"
+  }
+}

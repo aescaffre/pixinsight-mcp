@@ -41,20 +41,21 @@ export async function runABE(ctx, viewId, opts = {}) {
     P.polyDegree = ${polyDegree};
     P.boxSize = 5;
     P.boxSeparation = ${boxSeparation};
-    P.modelImageSampleFormat = AutomaticBackgroundExtractor.prototype.f32;
     P.abeDownsample = 2.00;
     P.writeSampleBoxes = false;
     P.justTrySamples = false;
-    P.targetCorrection = AutomaticBackgroundExtractor.prototype.Subtract;
+    P.targetCorrection = 1; // 1 = Subtract(ion): numeric, because the prototype constant is named .Subtract or .Subtraction depending on the PI version (1.9.5 rejected .Subtract on 2026-10-29)
     P.normalize = true;
     P.discardModel = true;
     P.replaceTarget = true;
     P.correctedImageId = '';
-    P.correctedImageSampleFormat = AutomaticBackgroundExtractor.prototype.SameAsTarget;
     P.verbosity = 0;
     P.executeOn(ImageWindow.windowById('${viewId}').mainView);
   `);
-  if (r.status === 'error') ctx.log('  [ABE] WARN: ' + r.error?.message);
+  // PI 1.9.x renamed/removed several ABE prototype enum constants (.Subtract, .f32, .SameAsTarget
+  // -> 'unsigned integer value expected'). A failed ABE must surface, not log a WARN: a silent
+  // no-op left the gradient agent believing degree-1 ABE 'converged' (2026-10-29).
+  if (r.status === 'error') throw new Error('ABE failed: ' + (r.error?.message || JSON.stringify(r.error)));
   // Close any residual model images
   const newImgs = await ctx.detectNewImages(beforeIds);
   if (newImgs.length > 0) {
@@ -68,27 +69,43 @@ export async function runABE(ctx, viewId, opts = {}) {
  * Fixes color-specific gradients that emerge during non-linear processing.
  * @param {object} ctx - Bridge context
  * @param {string} viewId - RGB view ID (must be non-linear/stretched)
- * @param {object} opts - { polyDegree, tolerance }
+ * @param {object} opts - { polyDegree, tolerance, maskViewId }
  */
 export async function runPerChannelABE(ctx, viewId, opts = {}) {
   const polyDeg = opts.polyDegree ?? 1;
   const tol = opts.tolerance ?? 1.2;
+  // Explicit mask: ABE does not honour an applied mask reliably, so the corrected
+  // result is blended back through mask_view_id with PixelMath (orig + M*(corrected-orig)).
+  const maskId = opts.maskViewId || null;
   const beforeIds = (await ctx.listImages()).map(i => i.id);
   const r = await ctx.pjsr(`
     var tgt = ImageWindow.windowById('${viewId}');
     if (tgt.isNull) throw new Error('View not found: ${viewId}');
+    var maskId = ${maskId ? `'${maskId}'` : 'null'};
+    var origCopy = null;
+    var chans = ['__pca_R', '__pca_G', '__pca_B'];
+    try {
+    if (maskId) {
+      var mw0 = ImageWindow.windowById(maskId);
+      if (mw0.isNull) throw new Error('mask_view_id not found: ' + maskId);
+      var ti = tgt.mainView.image;
+      if (mw0.mainView.image.width !== ti.width || mw0.mainView.image.height !== ti.height)
+        throw new Error('mask_view_id geometry differs from target');
+      origCopy = new ImageWindow(ti.width, ti.height, ti.numberOfChannels, 32, true, ti.isColor, '__pca_orig');
+      origCopy.mainView.beginProcess(); origCopy.mainView.image.assign(ti); origCopy.mainView.endProcess();
+    }
 
     // Extract channels
     var CE = new ChannelExtraction;
-    CE.channelEnabled = [true, true, true];
-    CE.channelId = ['__pca_R', '__pca_G', '__pca_B'];
+    // PI 1.9.x: channels = [[enabled, id], ...]. The old channelEnabled/channelId
+    // names are silently ignored (default <view>_R/_G/_B ids → ABE found nothing).
+    CE.channels = [[true, '__pca_R'], [true, '__pca_G'], [true, '__pca_B']];
     CE.colorSpace = ChannelExtraction.prototype.RGB;
     CE.sampleFormat = ChannelExtraction.prototype.SameAsSource;
     CE.executeOn(tgt.mainView);
     processEvents();
 
     // ABE each channel
-    var chans = ['__pca_R', '__pca_G', '__pca_B'];
     for (var i = 0; i < chans.length; i++) {
       var cw = ImageWindow.windowById(chans[i]);
       if (cw.isNull) continue;
@@ -98,7 +115,7 @@ export async function runPerChannelABE(ctx, viewId, opts = {}) {
       P.polyDegree = ${polyDeg};
       P.boxSize = 5;
       P.boxSeparation = 5;
-      P.targetCorrection = AutomaticBackgroundExtractor.prototype.Subtract;
+      P.targetCorrection = 1; // 1 = Subtract(ion): numeric, because the prototype constant is named .Subtract or .Subtraction depending on the PI version (1.9.5 rejected .Subtract on 2026-10-29)
       P.normalize = true;
       P.discardModel = true;
       P.replaceTarget = true;
@@ -114,12 +131,28 @@ export async function runPerChannelABE(ctx, viewId, opts = {}) {
     CC.executeOn(tgt.mainView);
     processEvents();
 
-    // Cleanup
-    for (var i = 0; i < chans.length; i++) {
-      var w = ImageWindow.windowById(chans[i]);
-      if (!w.isNull) w.forceClose();
+    if (maskId) {
+      var PMm = new PixelMath;
+      PMm.expression = '__pca_orig + ' + maskId + ' * ($T - __pca_orig)';
+      PMm.useSingleExpression = true;
+      PMm.createNewImage = false;
+      PMm.rescale = false;
+      PMm.truncate = true; PMm.truncateLower = 0; PMm.truncateUpper = 1;
+      PMm.executeOn(tgt.mainView);
+      processEvents();
+      var oc = ImageWindow.windowById('__pca_orig');
+      if (!oc.isNull) oc.forceClose();
     }
-    'Per-channel ABE done (polyDeg=${polyDeg}, tol=${tol})';
+
+    } finally {
+      // Cleanup always runs: close temp channel windows and the masked-blend original copy
+      var cl = chans.concat(['__pca_orig']);
+      for (var ci = 0; ci < cl.length; ci++) {
+        var cwin = ImageWindow.windowById(cl[ci]);
+        if (!cwin.isNull) cwin.forceClose();
+      }
+    }
+    'Per-channel ABE done (polyDeg=${polyDeg}, tol=${tol}${maskId ? ', masked by ' + maskId : ''})';
   `);
   if (r.status === 'error') ctx.log('  [PCA-ABE] WARN: ' + r.error?.message);
   // Close any leftover model images

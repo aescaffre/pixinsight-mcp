@@ -1,0 +1,151 @@
+{
+  "_doc": "Gate calibration registry (WI-01). verdict: approved | rejected | superseded | candidate. 'approved' images MUST pass every blocking gate (scripts/backtest-gates.mjs exits 1 otherwise); 'rejected' images should be caught by at least one blocking gate (exit 2 if they pass all). 'superseded' and 'candidate' are informational only. Append new approved entries with giga-run export --approve <runId>. | USER NOTE 2026-10-29: approved entries are 'the best results we could have, not perfect things' -> they are FLOORS for blocking gates (calibrated hard values keep a small margin below them); stricter 'goal' values stay as warnings the agent is pushed toward. Never loosen a gate below what a REJECTED entry needs to fail.",
+  "entries": [
+    {
+      "id": "pacman_lift5",
+      "path": "/Volumes/Extension/PACMAN/output/claude/final/NGC281_SHO_starless_iteration_01_haloLift5.xisf",
+      "classification": "emission_nebula",
+      "narrowband": true,
+      "starless": true,
+      "verdict": "approved",
+      "source": "user feedback 'really perfect' (PACMAN LIFT5)",
+      "notes": "narrowband_palette; sat P90 0.785 — rich palette is correct. See feedback_sho_approved_look."
+    },
+    {
+      "id": "pacman_iter01",
+      "path": "/Volumes/Extension/PACMAN/output/claude/final/NGC281_SHO_starless_iteration_01.xisf",
+      "classification": "emission_nebula",
+      "narrowband": true,
+      "starless": true,
+      "verdict": "superseded",
+      "source": "earlier PACMAN iteration (green-Ha)",
+      "notes": "Negative control for palette/reference metrics only; not a blocking-gate rejection target."
+    },
+    {
+      "id": "ngc7023_iter03",
+      "path": "/Volumes/Extension/NGC 7023/masters/agentic/NGC7023_iter03.xisf",
+      "classification": "reflection_nebula",
+      "narrowband": false,
+      "starless": false,
+      "verdict": "approved",
+      "source": "user-approved ungated iter03",
+      "notes": "dust coverage 28%, FWHM ~13 px, stars 'outstanding'. NOTE the space in the path."
+    },
+    {
+      "id": "ngc7023_best_of_both",
+      "path": "~/.pixinsight-mcp/approved/reflection_nebula/NGC7023_efe2138e_v08.xisf",
+      "classification": "reflection_nebula",
+      "narrowband": false,
+      "starless": false,
+      "verdict": "approved",
+      "source": "run_2026-06-23_efe2138e giga_orchestrator/variant_08 (accepted milestone)",
+      "notes": "Faint green band at left (user saw it) — must still PASS blocking gates. Durable copy of ~/.pixinsight-mcp/runs/run_2026-06-23_efe2138e/giga_orchestrator/variant_08/image.xisf."
+    },
+    {
+      "id": "ngc3628_candidate",
+      "path": "/Volumes/Extension/NGC3628/agentic/output/NGC3628_giga_v3.xisf",
+      "alternatePaths": [
+        "/Volumes/Extension/NGC3628/agentic/output/NGC3628_giga_keep.xisf"
+      ],
+      "classification": "galaxy_edge_on",
+      "narrowband": false,
+      "starless": false,
+      "verdict": "approved",
+      "source": "user confirmed 2026-10-29: NGC3628_giga_v3.xisf is the approved variant_16",
+      "notes": "sat P90 0.372, critic 7.0, all blocking gates pass (back-test 2026-10-28)."
+    },
+    {
+      "id": "ngc4490_giga_rejected",
+      "path": "/Users/aescaffre/agentic ngc4490/agentic/NGC4490_giga.xisf",
+      "classification": "galaxy_spiral",
+      "narrowband": false,
+      "starless": false,
+      "verdict": "rejected",
+      "source": "rejected run (white-blob core)",
+      "notes": "Negative control."
+    },
+    {
+      "id": "m97_giga_approved",
+      "path": "/Users/aescaffre/M97_2nd/master/claude/agentic/M97_giga.xisf",
+      "classification": "planetary_nebula",
+      "narrowband": false,
+      "starless": false,
+      "verdict": "superseded",
+      "source": "user 2026-10-29: 'result was ok for me' (M97_giga.png preview)",
+      "notes": "First planetary-nebula reference. Owl nebula: pale blue-lavender disk with pink rim, dark background, neutral stars. PNe gates were uncalibrated before this entry. | 2026-10-29: superseded by m97_v8_approved (user: 'M97 is much much better with the new pipeline')."
+    },
+    {
+      "id": "ngc4490_rgb_accepted",
+      "path": "/Users/aescaffre/agentic ngc4490/RGB.xisf",
+      "classification": "galaxy_spiral",
+      "narrowband": false,
+      "starless": false,
+      "verdict": "approved",
+      "source": "user 2026-10-29: 'an accepted galaxy' (RGB_Before_crop.png, 2026-05-30 processing)",
+      "notes": "Different, later processing than the REJECTED NGC4490_giga.xisf (2026-05-19 white-blob core) which stays as the negative control. Muted blue-grey galaxy, pink HII knots, dark sky."
+    },
+    {
+      "id": "m97_v8_approved",
+      "path": "/Users/aescaffre/.pixinsight-mcp/approved/planetary_nebula/M97_f543876a_v8.xisf",
+      "classification": "planetary_nebula",
+      "narrowband": false,
+      "starless": false,
+      "verdict": "approved",
+      "source": "user 2026-10-29: 'M97 is much much better with the new pipeline !' (run f543876a, V8 watcher, SPCC via regeneration retry, core-specialist merge A/B win)",
+      "notes": "Owl nebula with visible eyes and textured inner shell; OIII teal/blue disk with Ha red rim (bolder palette than the superseded lilac version). Critic 6.6 (old 5.6). Original export: /Users/aescaffre/M97_2nd/master/claude/agentic/2026-10-29_v8/M97_giga.xisf. BACKTEST PENDING: run scripts/backtest-gates.mjs --id m97_v8_approved when PixInsight is idle; if a blocking gate rejects it, recalibrate the gate (approved = floor)."
+    },
+    {
+      "id": "ngc4490_v8_candidate",
+      "path": "/Users/aescaffre/agentic ngc4490/agentic/2026-10-29_v8/NGC4490_giga.xisf",
+      "classification": "galaxy_spiral",
+      "narrowband": false,
+      "starless": false,
+      "verdict": "candidate",
+      "source": "Claude 2026-10-29 (informational: measured by the harness, never affects exit codes)",
+      "notes": "run 44011ead 2026-10-29 (V8 pipeline): critic 5.7; Claude: crushed background, faint stars lost, flat galaxy. User has NOT judged it."
+    },
+    {
+      "id": "ngc3628_v8_candidate",
+      "path": "/Volumes/Extension/NGC3628/agentic/output/2026-10-29_v8/NGC3628_giga.xisf",
+      "classification": "galaxy_spiral",
+      "narrowband": false,
+      "starless": false,
+      "verdict": "candidate",
+      "source": "Claude 2026-10-29 (informational: measured by the harness, never affects exit codes)",
+      "notes": "run 66ec33db 2026-10-29: critic 6.7; more saturated/colder than approved v3 (palette_l1 0.72). User has NOT judged it."
+    },
+    {
+      "id": "pacman_v8_candidate",
+      "path": "/Volumes/Extension/PACMAN/output/claude/agentic/2026-10-29_v8/NGC281_giga.xisf",
+      "classification": "emission_nebula",
+      "narrowband": true,
+      "starless": true,
+      "verdict": "candidate",
+      "source": "Claude 2026-10-29 (informational: measured by the harness, never affects exit codes)",
+      "notes": "run b1d4cf9b 2026-10-29: critic 6.0; lost the revealed gold halo of LIFT5, dark corners. User has NOT judged it."
+    },
+    {
+      "id": "ngc7023_v8_candidate",
+      "path": "/Volumes/Extension/NGC7023/masters/agentic/NGC7023_giga.xisf",
+      "classification": "reflection_nebula",
+      "narrowband": false,
+      "starless": false,
+      "verdict": "candidate",
+      "source": "Claude 2026-10-29 (informational: measured by the harness, never affects exit codes)",
+      "notes": "run fed7b3ff 2026-10-29: critic 6.4; star gate waived under emergency budget (FWHM 16.5). User has NOT judged it."
+    }
+  ],
+  "uncalibrated": [],
+  "excluded": [
+    {
+      "id": "ngc7023_giga_rejected",
+      "path": "/Volumes/Extension/NGC 7023/masters/agentic/NGC7023_giga.xisf",
+      "classification": "reflection_nebula",
+      "narrowband": false,
+      "starless": false,
+      "verdict": "invalid",
+      "source": "regressed gated giga run",
+      "notes": "EXCLUDED 2026-10-28: cmp shows only 2 header bytes differ from ngc7023_best_of_both (pixel-identical; NGC7023_giga.xisf was overwritten on 2026-06-23 by the best-of-both export). The original rejected run_2026-06-22_17fadb7f output is lost (runs pruned). Do not use as a negative control; find/re-export a real rejected reflection image."
+    }
+  ]
+}

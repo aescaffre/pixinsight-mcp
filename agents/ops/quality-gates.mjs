@@ -3,6 +3,12 @@
 // These gates are code-based and cannot be bypassed by the agent.
 // ============================================================================
 
+import { measureSubjectDetail, locateSubjectROI } from './subject-metrics.mjs';
+import fs from 'fs';
+import path from 'path';
+import { BURN_CLIP, BRIGHT_BLOCK_LEVEL, STAR_CONTRAST, FWHM_HARD, STAR_COUNT_WARN,
+  STAR_ELLIPTICITY_WARN, STAR_DARK_RING_WARN, STAR_FWHM_ADVISORY, STAR_CENTER_RADIUS_FRAC, STAR_KNOT_RATIO, STAR_SATURATED } from '../llm/gate-contract.mjs';
+
 /**
  * Check star quality: FWHM and color diversity.
  * Uses StarDetector to find bright stars, samples 21x21 boxes,
@@ -12,7 +18,7 @@
  * @param {string} viewId - View ID (should be the final composite with stars)
  * @returns {object} { pass, medianFWHM, colorDiversity, details, stars }
  */
-export async function checkStarQuality(ctx, viewId) {
+export async function checkStarQuality(ctx, viewId, opts = {}) {
   const r = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}');
     if (w.isNull) throw new Error('checkStarQuality: view not found: ${viewId}');
@@ -67,6 +73,13 @@ export async function checkStarQuality(ctx, viewId) {
 
     // Deduplicate: merge candidates within 20px of each other
     candidates.sort(function(a, b) { return b.peak - a.peak; });
+    // Uncapped unique count (grid-bucket dedupe, 20 px) for the star-retention gate:
+    // the quality list below is capped at 100, which made density meaningless.
+    var seenCell = {}, starsDetected = 0, faintStars = 0;
+    for (var ci = 0; ci < candidates.length; ci++) {
+      var ck = Math.floor(candidates[ci].x / 20) + '_' + Math.floor(candidates[ci].y / 20);
+      if (!seenCell[ck]) { seenCell[ck] = 1; starsDetected++; if (candidates[ci].peak < 0.25) faintStars++; }
+    }
     var stars = [];
     for (var i = 0; i < candidates.length; i++) {
       var c = candidates[i];
@@ -150,7 +163,11 @@ export async function checkStarQuality(ctx, viewId) {
       p25Peak: p25Peak,
       bgMedian: bgMedian,
       starBgContrast: starBgContrast,
-      starPeaks: starPeaks.slice(0, 10)
+      starPeaks: starPeaks.slice(0, 10),
+      starsDetected: starsDetected,
+      faintStars: faintStars,
+      width: img.width,
+      height: img.height
     });
   `);
 
@@ -167,28 +184,43 @@ export async function checkStarQuality(ctx, viewId) {
     return { pass: false, error: 'Failed to parse PJSR output', medianFWHM: 999, colorDiversity: 0 };
   }
 
-  const fwhmPass = data.medianFWHM <= 8.0;
+  // Thresholds come from gate-contract (single source); callers may pass profile-resolved values.
+  const minContrast = opts.minContrast ?? STAR_CONTRAST.balanced;
+  const fwhmLimit = opts.fwhmHard ?? FWHM_HARD;
+  const fwhmPass = data.medianFWHM <= fwhmLimit;
   const colorPass = data.colorDiversity > 0.05;
-  const countPass = data.starsFound >= 50; // minimum star presence
+  const countPass = data.starsFound >= STAR_COUNT_WARN; // minimum star presence (finish only warns below this)
 
   // Star brightness: star-to-background contrast ratio
-  // Prominent: ≥ 4.0, Balanced: ≥ 3.0, Subdued: ≥ 2.0
-  const brightnessPass = data.starBgContrast >= 3.0;
+  // Prominent/Balanced/Subdued minimums: STAR_CONTRAST in gate-contract.mjs
+  const brightnessPass = data.starBgContrast >= minContrast;
 
   const pass = fwhmPass && colorPass && countPass && brightnessPass;
 
   const details = [];
-  if (!fwhmPass) details.push(`Stars bloated: median FWHM=${data.medianFWHM.toFixed(2)}px (limit: 8.0px)`);
+  if (!fwhmPass) details.push(`Stars bloated: median FWHM=${data.medianFWHM.toFixed(2)}px (limit: ${fwhmLimit}px)`);
   if (!colorPass) details.push(`Stars colorless: diversity=${data.colorDiversity.toFixed(3)} (limit: 0.05)`);
-  if (!countPass) details.push(`Too few stars: ${data.starsFound} found (minimum: 50) — stars may be missing or over-reduced`);
-  if (!brightnessPass) details.push(`Stars too dim: contrast=${data.starBgContrast.toFixed(1)}× vs background (limit: 3.0×), median peak=${data.medianPeak.toFixed(3)}, bg=${data.bgMedian.toFixed(4)}`);
+  if (!countPass) details.push(`Too few stars: ${data.starsFound} found (minimum: ${STAR_COUNT_WARN}) — stars may be missing or over-reduced`);
+  if (!brightnessPass) details.push(`Stars too dim: contrast=${data.starBgContrast.toFixed(1)}× vs background (limit: ${minContrast}×), median peak=${data.medianPeak.toFixed(3)}, bg=${data.bgMedian.toFixed(4)}`);
   if (pass) details.push(`Stars OK: FWHM=${data.medianFWHM.toFixed(2)}px, color=${data.colorDiversity.toFixed(3)}, count=${data.starsFound}, brightness=${data.starBgContrast.toFixed(1)}× bg`);
+
+  // WI-16: advisory star-field metric (never throws, never changes pass)
+  let starField = null;
+  if (opts.starField !== false) {
+    try { starField = await measureStarField(ctx, viewId, { centerRadiusPx: opts.centerRadiusPx, peaks: opts.peaks }); }
+    catch (e) { starField = { error: String(e.message || e) }; }
+  }
 
   return {
     pass,
+    starField,
     medianFWHM: data.medianFWHM,
     colorDiversity: data.colorDiversity,
     starsFound: data.starsFound,
+    starsDetected: data.starsDetected ?? null,
+    faintStars: data.faintStars ?? null,
+    faintFraction: data.starsDetected ? data.faintStars / data.starsDetected : null,
+    starsPerMpx: (data.width && data.height && data.starsDetected != null) ? data.starsDetected / (data.width * data.height / 1e6) : null,   // 2026-10-29 star-retention gate (uncapped unique count)
     starsMeasured: data.starsMeasured,
     medianPeak: data.medianPeak,
     p25Peak: data.p25Peak,
@@ -199,6 +231,306 @@ export async function checkStarQuality(ctx, viewId) {
     colorSamples: data.colorDivs,
     peakSamples: data.starPeaks
   };
+}
+
+/**
+ * WI-16: build the ES5 PJSR for the star-field metric (pure string builder, unit-testable).
+ * opts: { centerRadiusPx, centerRadiusFrac, peaks:[{x,y}], maxStars=60, knotRatio, saturated }
+ * No StarDetector (it crashes). Compact-peak detection with knot rejection, local-background
+ * FWHM (annulus 6-8 FWHM), half-max walk up to 31 px, second-moment ellipticity, centre/edge split.
+ */
+export function buildStarFieldPjsr(viewId, opts = {}) {
+  const peaks = Array.isArray(opts.peaks)
+    ? opts.peaks.filter(p => p && isFinite(p.x) && isFinite(p.y)).slice(0, 200).map(p => ({ x: Math.round(p.x), y: Math.round(p.y) }))
+    : [];
+  const cfg = {
+    centerRadiusPx: Number.isFinite(opts.centerRadiusPx) && opts.centerRadiusPx > 0 ? opts.centerRadiusPx : 0,
+    centerFrac: opts.centerRadiusFrac ?? STAR_CENTER_RADIUS_FRAC,
+    maxStars: opts.maxStars || 60,
+    knotRatio: opts.knotRatio ?? STAR_KNOT_RATIO,
+    saturated: opts.saturated ?? STAR_SATURATED,
+    peaks
+  };
+  return `
+    var CFG = ${JSON.stringify(cfg)};
+    var w = ImageWindow.windowById('${viewId}');
+    if (w.isNull) throw new Error('measureStarField: view not found: ${viewId}');
+    var img = w.mainView.image;
+    var isColor = img.isColor;
+    var W = img.width, H = img.height;
+    function getLum(x, y) {
+      if (x < 0 || y < 0 || x >= W || y >= H) return NaN;
+      if (isColor) return 0.2126 * img.sample(x, y, 0) + 0.7152 * img.sample(x, y, 1) + 0.0722 * img.sample(x, y, 2);
+      return img.sample(x, y);
+    }
+    function median(a) {
+      if (a.length === 0) return 0;
+      var b = a.slice(0).sort(function(p, q) { return p - q; });
+      return b[Math.floor(b.length / 2)];
+    }
+    function ringValues(cx, cy, r0, r1) {
+      var vals = [];
+      var nA = 48, nR = 3;
+      for (var ri = 0; ri < nR; ri++) {
+        var rr = r0 + (r1 - r0) * ri / (nR - 1);
+        for (var ai = 0; ai < nA; ai++) {
+          var ang = 2 * Math.PI * (ai + 0.5 * (ri % 2)) / nA;
+          var v = getLum(Math.round(cx + rr * Math.cos(ang)), Math.round(cy + rr * Math.sin(ang)));
+          if (!isNaN(v)) vals.push(v);
+        }
+      }
+      return vals;
+    }
+    // Half-max walk up to 31 px (NOT capped at 10): FWHM = 2 * mean half-max radius, linear interpolation.
+    function walkFwhm(cx, cy, peak, bg) {
+      var halfMax = bg + (peak - bg) / 2;
+      var dirs = [[1,0],[0,1],[-1,0],[0,-1],[0.7071,0.7071],[-0.7071,0.7071],[0.7071,-0.7071],[-0.7071,-0.7071]];
+      var radii = [], capped = 0;
+      for (var d = 0; d < dirs.length; d++) {
+        var found = -1;
+        var prevV = peak;
+        for (var r = 1; r <= 31; r++) {
+          var v = getLum(Math.round(cx + dirs[d][0] * r), Math.round(cy + dirs[d][1] * r));
+          if (isNaN(v)) break;
+          if (v < halfMax) {
+            found = (r - 1) + (prevV - halfMax) / Math.max(1e-9, (prevV - v));
+            break;
+          }
+          prevV = v;
+        }
+        if (found < 0) {
+          var vEnd = getLum(Math.round(cx + dirs[d][0] * 31), Math.round(cy + dirs[d][1] * 31));
+          if (!isNaN(vEnd)) { radii.push(31); capped++; }
+        } else radii.push(found);
+      }
+      if (radii.length < 4) return null;
+      var s = 0;
+      for (var i = 0; i < radii.length; i++) s += radii[i];
+      return { fwhm: 2 * s / radii.length, capped: capped };
+    }
+
+    var bgMedian = img.median();
+    var bgMAD = img.MAD();
+    var threshold = bgMedian + 5 * bgMAD;
+    var candidates = [];
+    if (CFG.peaks.length > 0) {
+      for (var pi = 0; pi < CFG.peaks.length; pi++) {
+        var px0 = CFG.peaks[pi].x, py0 = CFG.peaks[pi].y;
+        var bx = px0, by = py0, bl = getLum(px0, py0);
+        if (isNaN(bl)) continue;
+        for (var dy = -3; dy <= 3; dy++) for (var dx = -3; dx <= 3; dx++) {
+          var l2 = getLum(px0 + dx, py0 + dy);
+          if (!isNaN(l2) && l2 > bl) { bl = l2; bx = px0 + dx; by = py0 + dy; }
+        }
+        candidates.push({ x: bx, y: by, peak: bl });
+      }
+    } else {
+      var step = 16, margin = 12;
+      for (var y = margin; y < H - margin; y += step) {
+        for (var x = margin; x < W - margin; x += step) {
+          var lum = getLum(x, y);
+          if (lum > threshold) {
+            var bestX = x, bestY = y, bestLum = lum;
+            // hill-climb (5x5 steps, up to 25 iterations) so bloated stars sampled on their slope reach the peak
+            for (var it = 0; it < 25; it++) {
+              var mvX = bestX, mvY = bestY, mvL = bestLum;
+              for (var dy = -2; dy <= 2; dy++) for (var dx = -2; dx <= 2; dx++) {
+                var l = getLum(bestX + dx, bestY + dy);
+                if (!isNaN(l) && l > mvL) { mvL = l; mvX = bestX + dx; mvY = bestY + dy; }
+              }
+              if (mvX === bestX && mvY === bestY) break;
+              bestX = mvX; bestY = mvY; bestLum = mvL;
+            }
+            var isMax = true;
+            for (var dy = -1; dy <= 1 && isMax; dy++) for (var dx = -1; dx <= 1; dx++) {
+              if (dx === 0 && dy === 0) continue;
+              if (getLum(bestX + dx, bestY + dy) > bestLum) { isMax = false; break; }
+            }
+            if (isMax && bestLum > threshold) candidates.push({ x: bestX, y: bestY, peak: bestLum });
+          }
+        }
+      }
+    }
+    var rawCandidates = candidates.length;
+    candidates.sort(function(a, b) { return b.peak - a.peak; });
+    var stars = [];
+    for (var i = 0; i < candidates.length; i++) {
+      var c = candidates[i];
+      var isDupe = false;
+      for (var j = 0; j < stars.length; j++) {
+        var ddx = c.x - stars[j].x, ddy = c.y - stars[j].y;
+        if (ddx * ddx + ddy * ddy < 400) { isDupe = true; break; }
+      }
+      if (!isDupe) stars.push(c);
+      if (stars.length >= 400) break;
+    }
+
+    var satSkipped = 0, knotRejected = 0, noWalk = 0, snrRejected = 0, blendRejected = 0;
+    var cxImg = W / 2, cyImg = H / 2;
+    var halfDiag = Math.sqrt(W * W + H * H) / 2;
+    var centerR = CFG.centerRadiusPx > 0 ? CFG.centerRadiusPx : CFG.centerFrac * halfDiag;
+    var measured = [];
+    var compactPeaks = [];
+    for (var si = 0; si < stars.length && measured.length < CFG.maxStars; si++) {
+      var s = stars[si];
+      if (s.peak > CFG.saturated) { satSkipped++; continue; }
+      // provisional local background (near ring) and FWHM
+      var bg0 = median(ringValues(s.x, s.y, 20, 26));
+      var prom0 = s.peak - bg0;
+      if (prom0 <= 5 * bgMAD) { snrRejected++; continue; }
+      var wk0 = walkFwhm(s.x, s.y, s.peak, bg0);
+      if (!wk0) { noWalk++; continue; }
+      // final local background: median of the 6-8 FWHM annulus
+      var rA = Math.max(14, Math.min(200, 6 * wk0.fwhm)), rB = Math.max(rA + 4, Math.min(240, 8 * wk0.fwhm));
+      var ring = ringValues(s.x, s.y, rA, rB);
+      if (ring.length < 24) { noWalk++; continue; }
+      var localBg = median(ring);
+      var devs = [];
+      for (var q = 0; q < ring.length; q++) devs.push(Math.abs(ring[q] - localBg));
+      var sigma = Math.max(1e-6, 1.4826 * median(devs));
+      var prom = s.peak - localBg;
+      if (prom <= 0) { snrRejected++; continue; }
+      // compactness (vs the 6-8 FWHM annulus background): 4 neighbours at +/- offset (8 px, or the provisional FWHM for bloated stars)
+      var off = Math.max(8, Math.min(31, Math.round(wk0.fwhm)));
+      var nb = [getLum(s.x + off, s.y), getLum(s.x - off, s.y), getLum(s.x, s.y + off), getLum(s.x, s.y - off)];
+      var knot = false;
+      for (var ni = 0; ni < 4; ni++) {
+        if (isNaN(nb[ni])) continue;
+        if ((nb[ni] - localBg) >= CFG.knotRatio * prom) knot = true;
+      }
+      if (knot) { knotRejected++; continue; }
+      var wk = walkFwhm(s.x, s.y, s.peak, localBg);
+      if (!wk) { noWalk++; continue; }
+      // dark ring: ring at 1.5-2.5 FWHM below the local background
+      var dr0 = Math.max(10, Math.min(60, 1.5 * wk.fwhm)), dr1 = Math.max(dr0 + 4, Math.min(80, 2.5 * wk.fwhm));
+      var darkMed = median(ringValues(s.x, s.y, dr0, dr1));
+      var darkDepth = Math.max(0, (localBg - darkMed) / prom);
+      // colour diversity from the 3x3 mean around the peak
+      var cdiv = -1;
+      if (isColor) {
+        var mR = 0, mG = 0, mB = 0, mN = 0;
+        for (var ey = -1; ey <= 1; ey++) for (var ex = -1; ex <= 1; ex++) {
+          var qx = s.x + ex, qy = s.y + ey;
+          if (qx < 0 || qy < 0 || qx >= W || qy >= H) continue;
+          mR += img.sample(qx, qy, 0); mG += img.sample(qx, qy, 1); mB += img.sample(qx, qy, 2); mN++;
+        }
+        if (mN > 0) {
+          mR /= mN; mG /= mN; mB /= mN;
+          var mxc = Math.max(mR, mG, mB);
+          if (mxc > 0.01) cdiv = (mxc - Math.min(mR, mG, mB)) / mxc;
+        }
+      }
+      // second moments: bg-subtracted 31x31 box thresholded at 10% of prominence; SNR > 20; reject blends
+      var ell = -1, snr = prom / sigma;
+      var thr = 0.10 * prom;
+      var sw = 0, sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, blend = false;
+      var vals = [];
+      for (var by2 = -15; by2 <= 15; by2++) {
+        var row = [];
+        for (var bx2 = -15; bx2 <= 15; bx2++) {
+          var vv = getLum(s.x + bx2, s.y + by2);
+          row.push(isNaN(vv) ? 0 : vv - localBg);
+        }
+        vals.push(row);
+      }
+      for (var by3 = 1; by3 < 30 && !blend; by3++) for (var bx3 = 1; bx3 < 30; bx3++) {
+        var dxs = bx3 - 15, dys = by3 - 15;
+        if (dxs * dxs + dys * dys < 36) continue;
+        var vc = vals[by3][bx3];
+        if (vc < 0.30 * prom) continue;
+        var isLM = true;
+        for (var ky = -1; ky <= 1 && isLM; ky++) for (var kx = -1; kx <= 1; kx++) {
+          if ((kx !== 0 || ky !== 0) && vals[by3 + ky][bx3 + kx] > vc) { isLM = false; break; }
+        }
+        if (isLM) { blend = true; break; }
+      }
+      if (snr > 20 && !blend) {
+        for (var my = 0; my < 31; my++) for (var mx2 = 0; mx2 < 31; mx2++) {
+          var vm = vals[my][mx2];
+          if (vm < thr) continue;
+          sw += vm; sx += vm * (mx2 - 15); sy += vm * (my - 15);
+        }
+        if (sw > 0) {
+          var mux = sx / sw, muy = sy / sw;
+          for (var my2 = 0; my2 < 31; my2++) for (var mx3 = 0; mx3 < 31; mx3++) {
+            var vm2 = vals[my2][mx3];
+            if (vm2 < thr) continue;
+            var ux = (mx3 - 15) - mux, uy = (my2 - 15) - muy;
+            sxx += vm2 * ux * ux; syy += vm2 * uy * uy; sxy += vm2 * ux * uy;
+          }
+          sxx /= sw; syy /= sw; sxy /= sw;
+          var tr = sxx + syy, det = sxx * syy - sxy * sxy;
+          var disc = Math.sqrt(Math.max(0, tr * tr / 4 - det));
+          var e1 = tr / 2 + disc, e2 = tr / 2 - disc;
+          if (e1 > 1e-9 && e2 >= 0) ell = 1 - Math.sqrt(e2 / e1);
+        }
+      } else if (blend) blendRejected++;
+      else snrRejected++;
+      var dcx = s.x - cxImg, dcy = s.y - cyImg;
+      var dist = Math.sqrt(dcx * dcx + dcy * dcy);
+      measured.push({ x: s.x, y: s.y, peak: s.peak, localBg: localBg, prom: prom, ratio: s.peak / Math.max(1e-6, localBg),
+                      fwhm: wk.fwhm, capped: wk.capped, ell: ell, cdiv: cdiv, dark: darkDepth, center: dist <= centerR });
+      compactPeaks.push({ x: s.x, y: s.y });
+    }
+
+    function col(arr, key, okFn) {
+      var o = [];
+      for (var i2 = 0; i2 < arr.length; i2++) { var v2 = arr[i2][key]; if (okFn ? okFn(v2) : true) o.push(v2); }
+      return o;
+    }
+    function nonneg(v) { return v >= 0; }
+    function positive(v) { return v > 0; }
+    var ctr = [], edg = [];
+    for (var mi = 0; mi < measured.length; mi++) { if (measured[mi].center) ctr.push(measured[mi]); else edg.push(measured[mi]); }
+    JSON.stringify({
+      starsFound: stars.length, rawCandidates: rawCandidates, starsMeasured: measured.length,
+      rejected: { saturated: satSkipped, knots: knotRejected, noWalk: noWalk, lowSNR: snrRejected, blends: blendRejected },
+      centerRadiusPx: centerR,
+      medianFWHM: median(col(measured, 'fwhm')),
+      centerFWHM: median(col(ctr, 'fwhm')), edgeFWHM: median(col(edg, 'fwhm')),
+      centerCount: ctr.length, edgeCount: edg.length,
+      cappedFraction: measured.length ? col(measured, 'capped', positive).length / measured.length : 0,
+      medianEllipticity: median(col(measured, 'ell', nonneg)), centerEllipticity: median(col(ctr, 'ell', nonneg)), edgeEllipticity: median(col(edg, 'ell', nonneg)),
+      ellipticityCount: col(measured, 'ell', nonneg).length,
+      medianDarkRing: median(col(measured, 'dark')),
+      colorDiversity: median(col(measured, 'cdiv', nonneg)),
+      prominenceAbs: median(col(measured, 'prom')), localRatio: median(col(measured, 'ratio')),
+      medianPeak: median(col(measured, 'peak')), bgMedian: bgMedian,
+      compactPeaks: compactPeaks.slice(0, 120),
+      sample: measured.slice(0, 12)
+    });
+  `;
+}
+
+/**
+ * WI-16: measure the star field (compact peaks, local-bg FWHM, ellipticity, centre/edge, absolute prominence).
+ * ADVISORY metric: does not replace the blocking checkStarQuality brightness/FWHM values.
+ * opts: { centerRadiusPx, peaks:[{x,y}] (re-measure known star coordinates), maxStars }
+ */
+export async function measureStarField(ctx, viewId, opts = {}) {
+  const r = await ctx.pjsr(buildStarFieldPjsr(viewId, opts));
+  if (r.status === 'error') throw new Error('measureStarField failed: ' + (r.error?.message || 'PJSR error'));
+  let d;
+  try { d = JSON.parse(r.outputs?.consoleOutput || '{}'); } catch { throw new Error('measureStarField: unparseable PJSR output'); }
+  return summarizeStarField(d, opts.thresholds);
+}
+
+/** Add advisory flags/text to raw measureStarField data (pure; unit-testable). */
+export function summarizeStarField(d, thresholds = {}) {
+  const ellWarn = thresholds.ellipticity ?? STAR_ELLIPTICITY_WARN;
+  const ringWarn = thresholds.darkRing ?? STAR_DARK_RING_WARN;
+  const fwhmAdv = thresholds.fwhmAdvisory ?? STAR_FWHM_ADVISORY;
+  const advisories = [];
+  if ((d.centerCount || 0) > 0 && d.centerFWHM > fwhmAdv) advisories.push(`centre FWHM ${d.centerFWHM.toFixed(1)}px > ${fwhmAdv}px`);
+  if ((d.ellipticityCount || 0) >= 5 && d.centerEllipticity > ellWarn) advisories.push(`centre ellipticity ${d.centerEllipticity.toFixed(2)} > ${ellWarn}`);
+  if ((d.starsMeasured || 0) >= 5 && d.medianDarkRing > ringWarn) advisories.push(`dark rings ${(d.medianDarkRing * 100).toFixed(1)}% of prominence > ${(ringWarn * 100).toFixed(0)}%`);
+  const f = (v, n = 1) => (typeof v === 'number' && isFinite(v) && v > 0) ? v.toFixed(n) : 'n/a';
+  const text = `star field: ${d.starsMeasured || 0} compact stars (rejected: ${d.rejected?.knots || 0} knots, ${d.rejected?.saturated || 0} saturated, ${d.rejected?.blends || 0} blends); ` +
+    `FWHM centre ${f(d.centerFWHM)}px (n=${d.centerCount || 0}) / edge ${f(d.edgeFWHM)}px (n=${d.edgeCount || 0}); ` +
+    `ellipticity centre ${f(d.centerEllipticity, 2)} / edge ${f(d.edgeEllipticity, 2)}; ` +
+    `abs prominence ${f(d.prominenceAbs, 3)}, local ratio ${f(d.localRatio)}x` +
+    (advisories.length ? ` [ADVISORY: ${advisories.join('; ')}]` : '');
+  return { ...d, advisories, text };
 }
 
 /**
@@ -364,347 +696,177 @@ export async function checkRinging(ctx, viewId) {
 }
 
 /**
- * Check image sharpness via Sobel gradient energy in the subject ROI.
+ * Check image sharpness. Delegates to measureSubjectDetail (credible, star-rejected Sobel energy).
  * Returns a numeric score (higher = sharper). Comparative metric only.
  *
  * @param {object} ctx - Bridge context
  * @param {string} viewId - View ID to check
- * @param {object} roi - Optional ROI { x, y, w, h }. If omitted, uses central 50%.
+ * @param {object} roi - Optional ROI { x, y, w, h }. If omitted, all subject blocks are used.
  * @returns {object} { sharpness, details }
  */
 export async function checkSharpness(ctx, viewId, roi) {
-  const roiSpec = roi
-    ? `var rx=${roi.x},ry=${roi.y},rw=${roi.w},rh=${roi.h};`
-    : `var rw=Math.floor(img.width*0.5);var rh=Math.floor(img.height*0.5);var rx=Math.floor((img.width-rw)/2);var ry=Math.floor((img.height-rh)/2);`;
-
-  const r = await ctx.pjsr(`
-    var w = ImageWindow.windowById('${viewId}');
-    if (w.isNull) throw new Error('checkSharpness: view not found: ${viewId}');
-    var img = w.mainView.image;
-
-    ${roiSpec}
-
-    // Compute Sobel gradient energy on luminance
-    // Sample every 4th pixel for speed
-    var step = 4;
-    var totalEnergy = 0;
-    var count = 0;
-
-    function getLum(px, py) {
-      if (img.isColor) {
-        var r = img.sample(px, py, 0);
-        var g = img.sample(px, py, 1);
-        var b = img.sample(px, py, 2);
-        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-      }
-      return img.sample(px, py);
-    }
-
-    for (var y = ry + 1; y < ry + rh - 1; y += step) {
-      for (var x = rx + 1; x < rx + rw - 1; x += step) {
-        // Sobel 3x3
-        var tl = getLum(x-1, y-1), tc = getLum(x, y-1), tr = getLum(x+1, y-1);
-        var ml = getLum(x-1, y),                          mr = getLum(x+1, y);
-        var bl = getLum(x-1, y+1), bc = getLum(x, y+1), br = getLum(x+1, y+1);
-
-        var gx = -tl + tr - 2*ml + 2*mr - bl + br;
-        var gy = -tl - 2*tc - tr + bl + 2*bc + br;
-        totalEnergy += gx * gx + gy * gy;
-        count++;
-      }
-    }
-
-    var avgEnergy = count > 0 ? totalEnergy / count : 0;
-
-    JSON.stringify({
-      sharpness: avgEnergy,
-      samplesUsed: count,
-      roi: { x: rx, y: ry, w: rw, h: rh }
-    });
-  `);
-
-  if (r.status === 'error') {
-    return {
-      sharpness: 0,
-      error: r.error?.message || 'PJSR error',
-      details: 'Sharpness check failed to execute'
-    };
+  // Delegates to the credible detail measurement (star-rejected, noise-floor corrected).
+  const d = await measureSubjectDetail(ctx, viewId, { roi });
+  if (d.error) {
+    return { sharpness: 0, error: d.error, details: 'Sharpness check failed to execute' };
   }
-
-  let data;
-  try {
-    data = JSON.parse(r.outputs?.consoleOutput || '{}');
-  } catch {
-    return { sharpness: 0, error: 'Failed to parse PJSR output' };
-  }
-
+  const f = (v) => (typeof v === 'number' && isFinite(v) ? v.toFixed(6) : 'n/a');
   return {
-    sharpness: data.sharpness,
-    samplesUsed: data.samplesUsed,
-    roi: data.roi,
-    details: `Sharpness score: ${data.sharpness.toFixed(6)} (${data.samplesUsed} samples in ROI ${data.roi.w}x${data.roi.h})`
+    sharpness: d.detailCredible,
+    detailCredible: d.detailCredible,
+    detailRaw: d.detailRaw,
+    detailWeber: d.detailWeber,
+    noiseDominated: d.noiseDominated,
+    samplesUsed: d.raw?.blocksUsed,
+    roi: roi || null,
+    details: `Sharpness (credible detail): ${f(d.detailCredible)} | raw=${f(d.detailRaw)} weber=${f(d.detailWeber)}` +
+      `${d.noiseDominated ? ' | NOISE-DOMINATED (raw/credible > 2.5)' : ''} (${d.raw?.blocksUsed ?? 0} star-rejected blocks${roi ? ` in ROI ${roi.w}x${roi.h}` : ''})`
   };
 }
 
 /**
- * Check if the brightest region (galaxy core) is burnt/clipped.
- * Finds the brightest 64x64 block, then measures what fraction of pixels
- * in a 128x128 region around it exceed 0.98 (burnt).
+ * Single-pass burn assessment (WI-10). One PJSR scan of the image feeds BOTH
+ * the clip gate (blocks with > blockBurntPct % of sampled pixels above `clip`,
+ * default BURN_CLIP) and the bright-block fraction gate (same test at `bright`,
+ * default BRIGHT_BLOCK_LEVEL) — it replaces the former two full scans.
  *
- * PASS: < 2% of core pixels burnt
- * FAIL: >= 5% burnt (core is clipped, detail lost)
- *
- * @param {object} ctx - Bridge context
- * @param {string} viewId - View ID to check
- * @returns {object} { pass, burntFraction, peakValue, details }
- */
-export async function checkCoreBurning(ctx, viewId) {
-  const r = await ctx.pjsr(`
-    var w = ImageWindow.windowById('${viewId}');
-    if (w.isNull) throw new Error('checkCoreBurning: view not found: ${viewId}');
-    var img = w.mainView.image;
-
-    // Find brightest 64x64 block
-    var blockSize = 64;
-    var bestMean = 0;
-    var bestX = 0, bestY = 0;
-    for (var by = 0; by < img.height - blockSize; by += blockSize) {
-      for (var bx = 0; bx < img.width - blockSize; bx += blockSize) {
-        img.selectedRect = new Rect(bx, by, bx + blockSize, by + blockSize);
-        if (img.isColor) {
-          var chMeans = [];
-          for (var c = 0; c < 3; c++) {
-            img.selectedChannel = c;
-            chMeans.push(img.mean());
-          }
-          img.resetChannelSelection();
-          var lum = 0.2126 * chMeans[0] + 0.7152 * chMeans[1] + 0.0722 * chMeans[2];
-          if (lum > bestMean) { bestMean = lum; bestX = bx; bestY = by; }
-        } else {
-          var m = img.mean();
-          if (m > bestMean) { bestMean = m; bestX = bx; bestY = by; }
-        }
-      }
-    }
-    img.resetSelections();
-
-    // Measure 128x128 region around brightest block
-    var coreSize = 128;
-    var cx = Math.max(0, Math.min(bestX + blockSize / 2 - coreSize / 2, img.width - coreSize));
-    var cy = Math.max(0, Math.min(bestY + blockSize / 2 - coreSize / 2, img.height - coreSize));
-
-    var burntCount = 0;
-    var totalCount = 0;
-    var peakVal = 0;
-    var step = 2; // sample every 2nd pixel for speed
-
-    for (var y = cy; y < cy + coreSize; y += step) {
-      for (var x = cx; x < cx + coreSize; x += step) {
-        var lum;
-        if (img.isColor) {
-          var r = img.sample(x, y, 0);
-          var g = img.sample(x, y, 1);
-          var b = img.sample(x, y, 2);
-          lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-          // Also check individual channels — any channel > 0.93 is burnt
-          if (r > 0.93 || g > 0.93 || b > 0.93) burntCount++;
-        } else {
-          lum = img.sample(x, y);
-          if (lum > 0.93) burntCount++;
-        }
-        if (lum > peakVal) peakVal = lum;
-        totalCount++;
-      }
-    }
-
-    var fraction = totalCount > 0 ? burntCount / totalCount : 0;
-
-    // Also check a tighter 32x32 inner core (catches small PN cores)
-    var innerSize = 32;
-    var icx = Math.max(0, Math.min(bestX + blockSize / 2 - innerSize / 2, img.width - innerSize));
-    var icy = Math.max(0, Math.min(bestY + blockSize / 2 - innerSize / 2, img.height - innerSize));
-    var innerBurnt = 0;
-    var innerTotal = 0;
-    for (var y = icy; y < icy + innerSize; y++) {
-      for (var x = icx; x < icx + innerSize; x++) {
-        if (img.isColor) {
-          if (img.sample(x, y, 0) > 0.93 || img.sample(x, y, 1) > 0.93 || img.sample(x, y, 2) > 0.93) innerBurnt++;
-        } else {
-          if (img.sample(x, y) > 0.93) innerBurnt++;
-        }
-        innerTotal++;
-      }
-    }
-    var innerFraction = innerTotal > 0 ? innerBurnt / innerTotal : 0;
-
-    JSON.stringify({
-      burntFraction: fraction,
-      innerBurntFraction: innerFraction,
-      burntPixels: burntCount,
-      totalSampled: totalCount,
-      peakValue: peakVal,
-      coreCenter: [Math.round(cx + coreSize / 2), Math.round(cy + coreSize / 2)],
-      coreMean: bestMean
-    });
-  `);
-
-  if (r.status === 'error') {
-    return {
-      pass: false,
-      error: r.error?.message || 'PJSR error',
-      burntFraction: 999,
-      details: 'Core burning check failed to execute'
-    };
-  }
-
-  let data;
-  try {
-    data = JSON.parse(r.outputs?.consoleOutput || '{}');
-  } catch {
-    return { pass: false, error: 'Failed to parse PJSR output', burntFraction: 999 };
-  }
-
-  // Check both wide (128×128) and tight (32×32) core regions
-  const widePass = data.burntFraction < 0.02;  // < 2% in 128×128 region
-  const innerPass = (data.innerBurntFraction || 0) < 0.10;  // < 10% in tight 32×32 inner core
-  const pass = widePass && innerPass;
-
-  const details = [];
-  if (!widePass) {
-    details.push(`CORE BURNT (wide): ${(data.burntFraction * 100).toFixed(1)}% of 128×128 core > 0.93 (limit: 2%).`);
-  }
-  if (!innerPass) {
-    details.push(`CORE BURNT (inner): ${((data.innerBurntFraction || 0) * 100).toFixed(1)}% of 32×32 inner core > 0.93 (limit: 10%). Compact core is clipped.`);
-  }
-  if (pass) {
-    details.push(`Core OK: wide=${(data.burntFraction * 100).toFixed(1)}%, inner=${((data.innerBurntFraction || 0) * 100).toFixed(1)}%, peak=${data.peakValue.toFixed(4)}`);
-  }
-  details.push(`Peak=${data.peakValue.toFixed(4)} at [${data.coreCenter}]`);
-
-  return {
-    pass,
-    burntFraction: data.burntFraction,
-    peakValue: data.peakValue,
-    coreCenter: data.coreCenter,
-    details: details.join('; ')
-  };
-}
-
-/**
- * Global burn scanner — ZERO TOLERANCE design.
- *
- * Tiles the image in large blocks (100×100 = 10,000 pixels).
- * Large blocks ensure stars (PSF < 10px) can't false-positive — even a bright
- * star is < 1% of a 100×100 block. Only EXTENDED burnt regions trigger this.
- *
- * A block is "burnt" if > 3% of its pixels (luminance) exceed 0.93.
- * PASS: ZERO burnt blocks. Not 1%, not 0.1% — ZERO.
- * FAIL: ANY burnt block found (even one).
- *
- * This catches burning regardless of subject size or position.
- * Works for PNe (5% of image), galaxies (30%), multi-subject fields (M81+M82).
+ * Blocks are blockSize x blockSize px (default 50), sampled every 3rd pixel.
+ * A pixel counts as exceeding a level when its luminance OR any channel is above it.
  *
  * @param {object} ctx - Bridge context
  * @param {string} viewId - View ID to scan
- * @param {object} opts - { blockSize: 100, threshold: 0.93, blockBurntPct: 3 }
- * @returns {object} { pass, burntBlockCount, totalBlocks, burntLocations, details }
+ * @param {object} opts - { clip=BURN_CLIP, bright=BRIGHT_BLOCK_LEVEL, blockSize=50, blockBurntPct=3 }
+ * @returns {Promise<{error?:string, totalBlocks:number, blockSize:number, clip:number, bright:number,
+ *   clipBlocks:number, brightBlocks:number, brightFraction:number, worstClipBlocks:Array,
+ *   perChannelExceedance:{R:number,G:number,B:number}, coreWhiteFraction:number}>}
+ *   perChannelExceedance = fraction of sampled pixels with that channel above `clip`;
+ *   coreWhiteFraction = fraction of sampled pixels inside bright blocks whose three
+ *   channels are all above 0.90 (a white blob, not a coloured bright region).
  */
-export async function scanBurntRegions(ctx, viewId, opts = {}) {
+export async function assessBurn(ctx, viewId, opts = {}) {
+  const clip = opts.clip ?? BURN_CLIP;
+  const bright = opts.bright ?? BRIGHT_BLOCK_LEVEL;
   const blockSize = opts.blockSize ?? 50;
-  const threshold = opts.threshold ?? 0.95;
-  const blockBurntPct = opts.blockBurntPct ?? 3; // % of pixels in block above threshold to consider it burnt
+  const blockBurntPct = opts.blockBurntPct ?? 3;
 
   const r = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}');
-    if (w.isNull) throw new Error('scanBurntRegions: view not found: ${viewId}');
+    if (w.isNull) throw new Error('assessBurn: view not found: ${viewId}');
     var img = w.mainView.image;
-
     var blockSize = ${blockSize};
-    var burntBlocks = [];
-    var totalBlocks = 0;
-    var threshold = ${threshold};
-    var blockBurntThreshold = ${blockBurntPct / 100}; // fraction
-
+    var clip = ${clip};
+    var bright = ${bright};
+    var frac = ${blockBurntPct / 100};
+    var totalBlocks = 0, clipBlocks = 0, brightBlocks = 0;
+    var worst = [];
+    var chN = [0, 0, 0], chTotal = 0;
+    var whiteN = 0, brightSamples = 0;
     for (var by = 0; by < img.height - blockSize; by += blockSize) {
       for (var bx = 0; bx < img.width - blockSize; bx += blockSize) {
         totalBlocks++;
-        var burntInBlock = 0;
-        var pixelsInBlock = 0;
-
-        // Sample every 3rd pixel for speed (100x100 / 9 ≈ 1100 samples per block — plenty)
+        var nClip = 0, nBright = 0, nWhite = 0, n = 0;
         for (var y = by; y < by + blockSize; y += 3) {
           for (var x = bx; x < bx + blockSize; x += 3) {
-            pixelsInBlock++;
-            // Check luminance for color images (any single channel > threshold also counts)
+            n++;
+            var m;
             if (img.isColor) {
-              var lum = 0.2126 * img.sample(x, y, 0) + 0.7152 * img.sample(x, y, 1) + 0.0722 * img.sample(x, y, 2);
-              if (lum > threshold || img.sample(x, y, 0) > threshold || img.sample(x, y, 1) > threshold || img.sample(x, y, 2) > threshold) {
-                burntInBlock++;
-              }
+              var r0 = img.sample(x, y, 0), g0 = img.sample(x, y, 1), b0 = img.sample(x, y, 2);
+              var lum = 0.2126 * r0 + 0.7152 * g0 + 0.0722 * b0;
+              m = Math.max(lum, r0, g0, b0);
+              if (r0 > clip) chN[0]++;
+              if (g0 > clip) chN[1]++;
+              if (b0 > clip) chN[2]++;
+              if (Math.min(r0, g0, b0) > 0.90) nWhite++;
             } else {
-              if (img.sample(x, y) > threshold) burntInBlock++;
+              m = img.sample(x, y);
             }
+            if (m > clip) nClip++;
+            if (m > bright) nBright++;
           }
         }
-
-        var blockFraction = pixelsInBlock > 0 ? burntInBlock / pixelsInBlock : 0;
-        if (blockFraction > blockBurntThreshold) {
-          burntBlocks.push({
-            x: bx, y: by,
-            fraction: blockFraction
-          });
+        chTotal += n;
+        if (n > 0 && nClip / n > frac) {
+          clipBlocks++;
+          worst.push({ x: bx, y: by, fraction: nClip / n });
+        }
+        if (n > 0 && nBright / n > frac) {
+          brightBlocks++;
+          whiteN += nWhite;
+          brightSamples += n;
         }
       }
     }
-
-    // Sort by severity
-    burntBlocks.sort(function(a, b) { return b.fraction - a.fraction; });
-
+    worst.sort(function(a, b) { return b.fraction - a.fraction; });
     JSON.stringify({
-      burntBlockCount: burntBlocks.length,
-      totalBlocks: totalBlocks,
-      blockSize: blockSize,
-      threshold: threshold,
-      worstBlocks: burntBlocks.slice(0, 10).map(function(b) {
-        return { x: b.x, y: b.y, pctBurnt: Math.round(b.fraction * 100) };
-      })
+      totalBlocks: totalBlocks, blockSize: blockSize, clipBlocks: clipBlocks, brightBlocks: brightBlocks,
+      worst: worst.slice(0, 10).map(function(b) { return { x: b.x, y: b.y, pctBurnt: Math.round(b.fraction * 100) }; }),
+      perChannel: { R: chTotal ? chN[0] / chTotal : 0, G: chTotal ? chN[1] / chTotal : 0, B: chTotal ? chN[2] / chTotal : 0 },
+      coreWhiteFraction: brightSamples ? whiteN / brightSamples : 0
     });
   `);
 
   if (r.status === 'error') {
-    return {
-      pass: false,
-      error: r.error?.message || 'PJSR error',
-      details: 'Burn scan failed'
-    };
+    return { error: r.error?.message || 'PJSR error', totalBlocks: 0, blockSize, clip, bright, clipBlocks: 0, brightBlocks: 0,
+      brightFraction: 0, worstClipBlocks: [], perChannelExceedance: { R: 0, G: 0, B: 0 }, coreWhiteFraction: 0 };
   }
-
   let data;
   try {
     data = JSON.parse(r.outputs?.consoleOutput || '{}');
   } catch {
-    return { pass: false, error: 'Failed to parse output' };
+    return { error: 'Failed to parse output', totalBlocks: 0, blockSize, clip, bright, clipBlocks: 0, brightBlocks: 0,
+      brightFraction: 0, worstClipBlocks: [], perChannelExceedance: { R: 0, G: 0, B: 0 }, coreWhiteFraction: 0 };
   }
+  const totalBlocks = data.totalBlocks || 0;
+  return {
+    totalBlocks, blockSize, clip, bright,
+    clipBlocks: data.clipBlocks || 0,
+    brightBlocks: data.brightBlocks || 0,
+    brightFraction: totalBlocks ? (data.brightBlocks || 0) / totalBlocks : 0,
+    worstClipBlocks: data.worst || [],
+    perChannelExceedance: data.perChannel || { R: 0, G: 0, B: 0 },
+    coreWhiteFraction: data.coreWhiteFraction || 0,
+  };
+}
 
-  // ZERO TOLERANCE: any burnt block = FAIL
-  const pass = data.burntBlockCount === 0;
-
+/**
+ * Global burn scanner (standalone tool + back-compat wrapper over assessBurn).
+ *
+ * Tiles the image in blockSize x blockSize blocks (default 50x50, every 3rd pixel
+ * sampled). A block is "burnt" if more than blockBurntPct % (default 3) of its
+ * sampled pixels (luminance or any channel) exceed BURN_CLIP (0.95). Large blocks keep
+ * stars (PSF < 10 px) from false-positiving; only EXTENDED burnt regions trigger.
+ * PASS: ZERO burnt blocks. The result also carries the BRIGHT_BLOCK_LEVEL (0.80)
+ * fraction pass (brightBlocks / brightFraction) so the agent can preview Gate 3b.
+ *
+ * @param {object} ctx - Bridge context
+ * @param {string} viewId - View ID to scan
+ * @param {object} opts - { blockSize, clip, bright, blockBurntPct } (legacy `threshold` = clip)
+ * @returns {object} { pass, burntBlockCount, totalBlocks, worstBlocks, brightBlocks, brightFraction,
+ *   perChannelExceedance, coreWhiteFraction, details }
+ */
+export async function scanBurntRegions(ctx, viewId, opts = {}) {
+  const a = await assessBurn(ctx, viewId, { ...opts, clip: opts.clip ?? opts.threshold });
+  if (a.error) return { pass: false, error: a.error, details: 'Burn scan failed' };
+  const pass = a.clipBlocks === 0;
+  const pct = opts.blockBurntPct ?? 3;
   const details = [];
   if (!pass) {
-    details.push(`BURNT REGIONS: ${data.burntBlockCount} block(s) of ${blockSize}×${blockSize}px have >${blockBurntPct}% pixels above ${threshold}. ZERO burnt blocks allowed.`);
-    if (data.worstBlocks.length > 0) {
-      details.push(`Locations: ${data.worstBlocks.map(b => `[${b.x},${b.y}] ${b.pctBurnt}%`).join(', ')}`);
-    }
+    details.push(`BURNT REGIONS: ${a.clipBlocks} block(s) of ${a.blockSize}×${a.blockSize}px have >${pct}% pixels above ${a.clip}. ZERO burnt blocks allowed.`);
+    if (a.worstClipBlocks.length > 0) details.push(`Locations: ${a.worstClipBlocks.map(b => `[${b.x},${b.y}] ${b.pctBurnt}%`).join(', ')}`);
     details.push('Apply min($T, 0.80) through core mask, or reduce stretch/LHE/curves strength.');
   } else {
-    details.push(`Clean: 0/${data.totalBlocks} blocks burnt (${blockSize}×${blockSize}px, threshold ${threshold})`);
+    details.push(`Clean: 0/${a.totalBlocks} blocks burnt (${a.blockSize}×${a.blockSize}px, threshold ${a.clip})`);
   }
-
+  details.push(`Bright blocks (>${a.bright}): ${a.brightBlocks}/${a.totalBlocks} (${(a.brightFraction * 100).toFixed(1)}%)`);
   return {
     pass,
-    burntBlockCount: data.burntBlockCount,
-    totalBlocks: data.totalBlocks,
-    worstBlocks: data.worstBlocks,
+    burntBlockCount: a.clipBlocks,
+    totalBlocks: a.totalBlocks,
+    worstBlocks: a.worstClipBlocks,
+    brightBlocks: a.brightBlocks,
+    brightFraction: a.brightFraction,
+    perChannelExceedance: a.perChannelExceedance,
+    coreWhiteFraction: a.coreWhiteFraction,
     details: details.join(' ')
   };
 }
@@ -1064,24 +1226,13 @@ export async function checkTonalPresence(ctx, viewId, category) {
 }
 
 /**
- * Check highlight texture: detects perceptual burn — bright subject zones
- * where internal tonal variation has collapsed into a featureless plateau.
- *
- * Primary signal: RELATIVE texture retention vs a reference checkpoint.
- * Secondary: absolute heuristics (advisory only, never blocking alone).
- *
- * @param {object} ctx - Bridge context
- * @param {string} viewId - Current image to assess
- * @param {object} opts
- * @param {string} opts.referenceId - Pre-operation clone/view for comparison (required for blocking)
- * @param {object} opts.roi - { cx, cy, radius } from locateSubjectROI (computed internally if omitted)
- * @returns {object} { pass, verdict, textureRetention, spanRetention, gradientRetention, current, reference, roi, details }
+ * Shell-texture metrics (local stddev, tonal span, Sobel energy) on a view within the subject ROI.
+ * Exported so prep can store a deterministic baseline (brief._baselineTexture) and the star
+ * blend can stash the starless input (brief._preBlendTexture) without opening any window.
+ * @param {object} opts.roi - { cx, cy, radius } (computed internally if omitted)
+ * @returns {object} metrics incl. roi, or { error }
  */
-export async function checkHighlightTexture(ctx, viewId, opts = {}) {
-  const refId = opts.referenceId || null;
-
-  // Measure function that runs on a single view within an ROI
-  async function measureShellTexture(vid) {
+export async function measureShellTexture(ctx, vid, opts = {}) {
     const r = await ctx.pjsr(`
       var w = ImageWindow.windowById('${vid}');
       if (w.isNull) throw new Error('checkHighlightTexture: view not found: ${vid}');
@@ -1268,10 +1419,31 @@ export async function checkHighlightTexture(ctx, viewId, opts = {}) {
     } catch {
       return { error: 'Parse failed' };
     }
-  }
+}
 
+/**
+ * Check highlight texture: detects perceptual burn — bright subject zones
+ * where internal tonal variation has collapsed into a featureless plateau.
+ *
+ * Primary signal: RELATIVE texture retention vs a reference checkpoint.
+ * Secondary: absolute heuristics (advisory only, never blocking alone).
+ *
+ * @param {object} ctx - Bridge context
+ * @param {string} viewId - Current image to assess
+ * @param {object} opts
+ * @param {string} opts.referenceId - Pre-operation clone/view for comparison (required for blocking)
+ * @param {object} opts.roi - { cx, cy, radius } from locateSubjectROI (computed internally if omitted)
+ * @param {object} opts.referenceMetrics - precomputed measureShellTexture() of the reference (no window needed)
+ * @param {object} opts.currentMetrics - precomputed measureShellTexture() of the current view
+ * @param {number} opts.minRetention / opts.warnRetention - profile highlight_texture thresholds (default 0.40/0.60)
+ * @returns {object} { pass, verdict, textureRetention, spanRetention, gradientRetention, current, reference, roi, details }
+ */
+export async function checkHighlightTexture(ctx, viewId, opts = {}) {
+  const refId = opts.referenceId || null;
+
+  const measureShellTexture_ = (vid) => measureShellTexture(ctx, vid, opts);
   // Measure current view
-  const current = await measureShellTexture(viewId);
+  const current = opts.currentMetrics || await measureShellTexture_(viewId);
   if (current.error) {
     const isTooFew = current.error === 'too_few_subject_pixels';
     return {
@@ -1290,8 +1462,10 @@ export async function checkHighlightTexture(ctx, viewId, opts = {}) {
   // Measure reference if provided
   let reference = null;
   let retention = {};
-  if (refId) {
-    reference = await measureShellTexture(refId);
+  if (opts.referenceMetrics && !opts.referenceMetrics.error) {
+    reference = opts.referenceMetrics;
+  } else if (refId) {
+    reference = await measureShellTexture_(refId);
     if (reference.error) {
       reference = null;
     }
@@ -1314,16 +1488,18 @@ export async function checkHighlightTexture(ctx, viewId, opts = {}) {
   if (reference && !reference.error) {
     // RELATIVE mode (primary, can be blocking)
     const worstRetention = Math.min(retention.texture ?? 1.0, retention.span ?? 1.0);
-    if (worstRetention < 0.40) {
+    const minRet = typeof opts.minRetention === 'number' ? opts.minRetention : 0.40;
+    const warnRet = typeof opts.warnRetention === 'number' ? opts.warnRetention : 0.60;
+    if (worstRetention < minRet) {
       pass = false;
       verdict = 'collapsed';
-      details.push(`HIGHLIGHT TEXTURE COLLAPSED: worst retention=${(worstRetention * 100).toFixed(0)}% (limit: 40%). ` +
+      details.push(`HIGHLIGHT TEXTURE COLLAPSED: worst retention=${(worstRetention * 100).toFixed(0)}% (limit: ${(minRet * 100).toFixed(0)}%). ` +
         `texture=${(retention.texture * 100).toFixed(0)}%, span=${(retention.span * 100).toFixed(0)}%, gradient=${((retention.gradient ?? 1) * 100).toFixed(0)}%. ` +
         `Restore pre-operation checkpoint and use less destructive processing.`);
-    } else if (worstRetention < 0.60) {
+    } else if (worstRetention < warnRet) {
       pass = true; // Warning, not blocking
       verdict = 'degraded';
-      details.push(`Highlight texture degraded: retention=${(worstRetention * 100).toFixed(0)}% (warning at 60%). ` +
+      details.push(`Highlight texture degraded: retention=${(worstRetention * 100).toFixed(0)}% (warning at ${(warnRet * 100).toFixed(0)}%). ` +
         `Consider gentler processing.`);
     } else {
       pass = true;
@@ -1622,4 +1798,253 @@ export async function checkBrightChroma(ctx, viewId, brightnessThreshold = 0.50)
     p75Chroma: data.p75Chroma,
     details,
   };
+}
+
+// ============================================================================
+// WI-26 D: Field-dependent PSF map (ported from the validated PACMAN psf_study/psfmap.js)
+// ----------------------------------------------------------------------------
+// Detection on a 2x IntegerResample-binned temp copy (closed in finally), moments on the
+// full-resolution view. Run on LINEAR data. Not a gate: informs BXT/crop decisions. The
+// crop_box is a RECOMMENDATION for the user's crop only - never crop the starless deliverable.
+// ============================================================================
+
+function _med(a) {
+  if (!a.length) return NaN;
+  const b = a.slice().sort((p, q) => p - q);
+  return b[Math.floor(b.length / 2)];
+}
+
+/**
+ * Largest-area axis-aligned rectangle of contiguous GOOD cells.
+ * @param {boolean[][]} good - good[row][col]
+ * @returns {{c0:number,r0:number,c1:number,r1:number,cells:number}|null} inclusive cell indices
+ */
+export function largestGoodRect(good) {
+  const rows = good.length, cols = rows ? good[0].length : 0;
+  let best = null;
+  for (let r0 = 0; r0 < rows; r0++) {
+    for (let c0 = 0; c0 < cols; c0++) {
+      for (let r1 = r0; r1 < rows; r1++) {
+        for (let c1 = c0; c1 < cols; c1++) {
+          let ok = true;
+          for (let r = r0; r <= r1 && ok; r++) for (let c = c0; c <= c1; c++) if (!good[r][c]) { ok = false; break; }
+          if (!ok) continue;
+          const cells = (r1 - r0 + 1) * (c1 - c0 + 1);
+          if (!best || cells > best.cells) best = { c0, r0, c1, r1, cells };
+        }
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * Summarise a PSF grid.
+ * @param {object} raw - { W, H, nStars, grid: [row][col] -> {n, fwhm, e, rel, skew} }
+ * @param {object} [opts] - { minStarsPerCell=3, fwhmFactor=1.5, maxEllipticity=0.3, asymmetryRatio=1.5 }
+ */
+export function summarizePsfField(raw, opts = {}) {
+  const minN = opts.minStarsPerCell ?? 3;
+  const fwhmFactor = opts.fwhmFactor ?? 1.5;
+  const maxE = opts.maxEllipticity ?? 0.3;
+  const asymR = opts.asymmetryRatio ?? 1.5;
+  const rows = raw.grid.length, cols = rows ? raw.grid[0].length : 0;
+  const cells = raw.grid.map((row, j) => row.map((c, i) => ({
+    col: i, row: j, n: c.n,
+    fwhm_med: c.n ? c.fwhm : null, ellipticity_med: c.n ? c.e : null,
+    orient_vs_radial_deg: c.n ? c.rel : null, radial_skew: c.n ? c.skew : null,
+  })));
+  const valid = [];
+  cells.forEach(row => row.forEach(c => { if (c.n >= minN && Number.isFinite(c.fwhm_med)) valid.push(c); }));
+  if (valid.length < 4) return { ok: false, verdict: 'insufficient stars', nStars: raw.nStars, cells, details: `PSF map: only ${valid.length} cells with >= ${minN} stars.` };
+  let best = valid[0], worst = valid[0];
+  valid.forEach(c => { if (c.fwhm_med < best.fwhm_med) best = c; if (c.fwhm_med > worst.fwhm_med) worst = c; });
+  // Centre = the middle 2x2 (or nearest) cells
+  const cc = [Math.floor((cols - 1) / 2), Math.ceil((cols - 1) / 2)], cr = [Math.floor((rows - 1) / 2), Math.ceil((rows - 1) / 2)];
+  const centreVals = [];
+  cr.forEach(j => cc.forEach(i => { const c = cells[j][i]; if (c.n >= minN) centreVals.push(c.fwhm_med); }));
+  const centerFwhm = centreVals.length ? _med(centreVals) : null;
+  const side = (cs, rs) => {
+    const v = [];
+    rs.forEach(j => cs.forEach(i => { const c = cells[j][i]; if (c.n >= minN) v.push(c.fwhm_med); }));
+    return v.length ? _med(v) : null;
+  };
+  const allRows = cells.map((_, j) => j);
+  const allCols = cells[0].map((_, i) => i);
+  const w = Math.min(2, Math.floor(cols / 2)), h = Math.min(2, Math.floor(rows / 2));
+  const L = side(allCols.slice(0, w), allRows), R = side(allCols.slice(cols - w), allRows);
+  const T = side(allCols, allRows.slice(0, h)), B = side(allCols, allRows.slice(rows - h));
+  const ratio = (a, b) => (a && b) ? Math.max(a, b) / Math.min(a, b) : null;
+  const lrRatio = ratio(L, R), tbRatio = ratio(T, B);
+  const edgeRows = new Set([0, rows - 1]), edgeCols = new Set([0, cols - 1]);
+  const edge = valid.filter(c => edgeRows.has(c.row) || edgeCols.has(c.col));
+  const edgeFwhm = edge.length ? _med(edge.map(c => c.fwhm_med)) : null;
+  const edgeRel = edge.length ? _med(edge.map(c => c.orient_vs_radial_deg)) : null;
+  const edgeE = edge.length ? _med(edge.map(c => c.ellipticity_med)) : null;
+  let verdict = 'uniform';
+  if ((lrRatio && lrRatio >= asymR) || (tbRatio && tbRatio >= asymR)) verdict = 'asymmetric — check tilt/backfocus';
+  else if (centerFwhm && edgeFwhm && edgeFwhm / centerFwhm >= 1.3 && edgeRel !== null && edgeRel < 35 && edgeE > 0.15) verdict = 'radial coma';
+  // crop box: contiguous cells with fwhm <= factor*best and ellipticity <= maxE
+  const good = cells.map(row => row.map(c => c.n >= minN && c.fwhm_med <= fwhmFactor * best.fwhm_med && c.ellipticity_med <= maxE));
+  const rect = largestGoodRect(good);
+  const cw = raw.W / cols, ch = raw.H / rows;
+  const crop_box = rect ? {
+    x0: Math.round(rect.c0 * cw), y0: Math.round(rect.r0 * ch), x1: Math.round((rect.c1 + 1) * cw), y1: Math.round((rect.r1 + 1) * ch),
+    cells: rect.cells, fractionOfFrame: rect.cells / (cols * rows),
+  } : null;
+  const f = (x) => (x == null ? 'n/a' : x.toFixed(2));
+  const details = `PSF field: verdict=${verdict}. FWHM best=${f(best.fwhm_med)}px (cell ${best.col},${best.row}) worst=${f(worst.fwhm_med)}px (cell ${worst.col},${worst.row}) centre=${f(centerFwhm)}px; ` +
+    `L/R=${f(lrRatio)}x (L=${f(L)} R=${f(R)}), T/B=${f(tbRatio)}x. ` +
+    (crop_box ? `Suggested crop box (for the user's crop; never crop the starless deliverable): x ${crop_box.x0}-${crop_box.x1}, y ${crop_box.y0}-${crop_box.y1} (${(crop_box.fractionOfFrame * 100).toFixed(0)}% of frame).` : 'No contiguous good-PSF region found.');
+  return {
+    ok: true, verdict, nStars: raw.nStars, W: raw.W, H: raw.H,
+    best: { col: best.col, row: best.row, fwhm: best.fwhm_med }, worst: { col: worst.col, row: worst.row, fwhm: worst.fwhm_med },
+    center_fwhm: centerFwhm, lr_ratio: lrRatio, tb_ratio: tbRatio, left_fwhm: L, right_fwhm: R, top_fwhm: T, bottom_fwhm: B,
+    crop_box, cells, details,
+  };
+}
+
+/** Pure builder of the PJSR scan (ES5). Returns a script that prints JSON {W,H,nStars,nCands,grid}. */
+export function buildPsfFieldPjsr(viewId, o = {}) {
+  const cols = o.cols ?? 8, rows = o.rows ?? 6, maxStars = o.maxStars ?? 1500, satLimit = o.satLimit ?? 0.45;
+  return `
+    var VID='${viewId}', NX=${cols}, NY=${rows}, MAXSTARS=${maxStars}, SAT=${satLimit};
+    var w=ImageWindow.windowById(VID); if (w.isNull) throw new Error('measurePsfField: view not found: '+VID);
+    var img=w.mainView.image; var W=img.width, H=img.height;
+    var CH = img.isColor ? 1 : 0;
+    var med=img.median(), sig=img.MAD()*1.4826;
+    var b=null, out=null;
+    try {
+      b=new ImageWindow(W,H,img.numberOfChannels,32,true,img.isColor,'__psf_bin');
+      b.mainView.beginProcess(); b.mainView.image.assign(img); b.mainView.endProcess();
+      var IR=new IntegerResample; IR.zoomFactor=-2; IR.downsamplingMode=IntegerResample.prototype.Average; IR.executeOn(b.mainView);
+      var bi=b.mainView.image, bw=bi.width, bh=bi.height;
+      var thr=med+40*sig/2, cands=[];
+      // Stride on large frames: a JS loop over every binned pixel of a 60 MP image
+      // (15 M sample() calls) triggered a fatal automatic GC on 2026-10-29.
+      var STEP = (W*H > 30000000) ? 2 : 1;
+      for(var y=12;y<bh-12;y+=STEP){ for(var x=12;x<bw-12;x+=STEP){ var v=bi.sample(x,y,CH); if(v<thr) continue;
+        var isMax=true; for(var dy=-2;dy<=2&&isMax;dy++)for(var dx=-2;dx<=2;dx++){ if((dx||dy)&&bi.sample(x+dx,y+dy,CH)>v){isMax=false;break;} }
+        if(isMax) cands.push([x*2,y*2,v]); } }
+      cands.sort(function(p,q){return q[2]-p[2];});
+      var cx0=W/2, cy0=H/2, R=24, stars=[], cellCount={};
+      for(var i=0;i<cands.length && stars.length<MAXSTARS;i++){
+        var sx=cands[i][0], sy=cands[i][1]; if(sx<R+2||sy<R+2||sx>W-R-3||sy>H-R-3) continue;
+        var pk=0,px=sx,py=sy; for(var dy=-2;dy<=2;dy++)for(var dx=-2;dx<=2;dx++){var v=img.sample(sx+dx,sy+dy,CH); if(v>pk){pk=v;px=sx+dx;py=sy+dy;}}
+        if(pk>SAT) continue;
+        var ci=Math.min(NX-1,Math.floor(px/W*NX)), cj=Math.min(NY-1,Math.floor(py/H*NY)), key=ci+','+cj;
+        if((cellCount[key]||0)>=Math.ceil(MAXSTARS/(NX*NY))*2) continue;
+        var ring=[]; for(var a=0;a<64;a++){var t=a/64*2*Math.PI; ring.push(img.sample(Math.round(px+R*Math.cos(t)),Math.round(py+R*Math.sin(t)),CH));}
+        ring.sort(function(p,q){return p-q;}); var lb=ring[32];
+        var amp=pk-lb; if(amp<20*sig) continue;
+        var s0=0,sx1=0,sy1=0; var win=[];
+        for(var dy=-R;dy<=R;dy++)for(var dx=-R;dx<=R;dx++){ var v=img.sample(px+dx,py+dy,CH)-lb; if(v<0.08*amp) continue; s0+=v; sx1+=v*dx; sy1+=v*dy; win.push([dx,dy,v]); }
+        if(s0<=0||win.length<6) continue;
+        var mx=sx1/s0, my=sy1/s0, ixx=0,iyy=0,ixy=0;
+        for(var k=0;k<win.length;k++){var d=win[k]; var ex=d[0]-mx, ey=d[1]-my; ixx+=d[2]*ex*ex; iyy+=d[2]*ey*ey; ixy+=d[2]*ex*ey;}
+        ixx/=s0; iyy/=s0; ixy/=s0;
+        var tr=(ixx+iyy)/2, dd=Math.sqrt(Math.max(0,(ixx-iyy)*(ixx-iyy)/4+ixy*ixy)); var l1=tr+dd, l2=Math.max(1e-6,tr-dd);
+        var aAx=Math.sqrt(l1), bAx=Math.sqrt(l2); var theta=0.5*Math.atan2(2*ixy,ixx-iyy);
+        var rx=px+mx-cx0, ry=py+my-cy0, rr=Math.sqrt(rx*rx+ry*ry)||1, ux=rx/rr, uy=ry/rr, phi=Math.atan2(ry,rx);
+        var m3=0, m2=0; for(var k=0;k<win.length;k++){var d=win[k]; var t=(d[0]-mx)*ux+(d[1]-my)*uy; m2+=d[2]*t*t; m3+=d[2]*t*t*t;} m2/=s0; m3/=s0;
+        var skew=m3/Math.pow(Math.max(m2,1e-6),1.5);
+        var rel=Math.abs(((theta-phi)*180/Math.PI)%180); if(rel>90) rel=180-rel;
+        stars.push({fwhm:2.3548*Math.sqrt((l1+l2)/2),e:1-bAx/aAx,rel:rel,skew:skew,cell:key});
+        cellCount[key]=(cellCount[key]||0)+1;
+      }
+      function medv(a){ if(!a.length) return NaN; a=a.slice().sort(function(p,q){return p-q;}); return a[Math.floor(a.length/2)]; }
+      var cells={};
+      for(var i=0;i<stars.length;i++){ var s=stars[i]; (cells[s.cell]=cells[s.cell]||[]).push(s); }
+      out={W:W,H:H,nStars:stars.length,nCands:cands.length,grid:[]};
+      for(var j=0;j<NY;j++){ var row=[]; for(var i=0;i<NX;i++){ var c=cells[i+','+j]||[];
+        row.push({n:c.length, fwhm:medv(c.map(function(s){return s.fwhm;})), e:medv(c.map(function(s){return s.e;})), rel:medv(c.map(function(s){return s.rel;})), skew:medv(c.map(function(s){return s.skew;}))}); }
+        out.grid.push(row); }
+    } finally {
+      if (b !== null) { try { b.forceClose(); } catch (e1) {} }
+    }
+    JSON.stringify(out);
+  `;
+}
+
+/**
+ * Measure the field-dependent PSF on a LINEAR view. Opens exactly one temporary binned window
+ * (closed in finally). Read-only on the source.
+ * @returns {object} summarizePsfField result, or { ok:false, error }
+ */
+export async function measurePsfField(ctx, viewId, opts = {}) {
+  const r = await ctx.pjsr(buildPsfFieldPjsr(viewId, opts));
+  if (r.status === 'error') return { ok: false, error: r.error?.message || 'PJSR error' };
+  let raw;
+  try {
+    // NaN is not valid JSON: PJSR prints NaN for empty cells
+    raw = JSON.parse((r.outputs?.consoleOutput || '{}').replace(/\bNaN\b/g, 'null'));
+  } catch { return { ok: false, error: 'Parse failed' }; }
+  if (!raw.grid) return { ok: false, error: 'no grid returned' };
+  raw.grid = raw.grid.map(row => row.map(c => ({ ...c, fwhm: c.fwhm ?? NaN, e: c.e ?? NaN, rel: c.rel ?? NaN, skew: c.skew ?? NaN })));
+  return summarizePsfField(raw, opts.thresholds || {});
+}
+
+/**
+ * Prep helper: measure the PSF field on a linear view and record it on brief._psf[viewId]
+ * (latest) and brief._psfPrep[label]. Never throws; failure is logged and skipped.
+ */
+export async function recordPsfField(ctx, viewId, brief, label, log = () => {}) {
+  try {
+    // 2026-10-29: the PSF scan is a JS pixel loop; on a 60 MP channel it triggered an
+    // automatic GC that aborted PixInsight (8th crash, in a warmed session). The
+    // automatic prep diagnostic is skipped above AUTO_PSF_MAX_MP; the agent can still
+    // call measure_psf_field on demand (it uses a stride there).
+    const AUTO_PSF_MAX_MP = 30;
+    const dim = await ctx.pjsr(`var w=ImageWindow.windowById('${viewId}'); w.isNull ? '0' : String(w.mainView.image.width*w.mainView.image.height)`);
+    const mp = (parseInt(dim.result, 10) || 0) / 1e6;
+    if (mp > AUTO_PSF_MAX_MP) {
+      log(`  [psf ${label}] skipped: ${mp.toFixed(0)} MP > ${AUTO_PSF_MAX_MP} MP (JS pixel loop is unsafe on this size; run measure_psf_field on demand)`);
+      if (brief) { brief._psfPrep = brief._psfPrep || {}; brief._psfPrep[label] = { view: viewId, skipped: `${mp.toFixed(0)} MP > ${AUTO_PSF_MAX_MP} MP` }; }
+      return { ok: false, skipped: true, error: 'too large for the automatic scan' };
+    }
+    const res = await measurePsfField(ctx, viewId, {});
+    if (brief) {
+      brief._psf = brief._psf || {};
+      brief._psf[viewId] = res;
+      brief._psfPrep = brief._psfPrep || {};
+      brief._psfPrep[label] = { view: viewId, verdict: res.verdict ?? null, crop_box: res.crop_box ?? null, center_fwhm: res.center_fwhm ?? null, lr_ratio: res.lr_ratio ?? null, tb_ratio: res.tb_ratio ?? null, error: res.error ?? null };
+    }
+    log(`  [psf ${label}] ${res.ok ? res.details : (res.error || res.verdict || 'unavailable')}`);
+    return res;
+  } catch (e) {
+    log(`  [psf ${label}] skipped: ${e.message}`);
+    return { ok: false, error: e.message };
+  }
+}
+
+/**
+ * WI-26 C: deterministic highlight-texture baseline, run once at the end of prep.
+ * Locates the subject ROI once, measures shell texture on each given view with that ROI,
+ * stores brief._roi and brief._baselineTexture ({rgb,l,ha,roi}) and writes baseline-texture.json.
+ * No window is opened. Never throws.
+ * @param {object} views - { rgb, l?, ha? } view ids (stretched, starless where applicable)
+ */
+export async function measureBaselineTexture(ctx, views, opts = {}) {
+  const log = opts.log || (() => {});
+  const out = {};
+  try {
+    const roi = await locateSubjectROI(ctx, views.rgb);
+    if (roi.error) throw new Error(roi.error);
+    const roiBox = { cx: roi.cx, cy: roi.cy, radius: roi.radius };
+    out.roi = roiBox;
+    for (const key of ['rgb', 'l', 'ha']) {
+      if (!views[key]) continue;
+      try { out[key] = await measureShellTexture(ctx, views[key], { roi: roiBox }); }
+      catch (e) { out[key] = { error: e.message }; }
+    }
+    if (opts.brief) { opts.brief._roi = roiBox; opts.brief._baselineTexture = out; }
+    if (opts.runDir) {
+      try { fs.writeFileSync(path.join(opts.runDir, 'baseline-texture.json'), JSON.stringify(out, null, 2)); } catch { /* */ }
+    }
+    log(`  [baseline texture] ROI=(${roiBox.cx},${roiBox.cy}) r=${roiBox.radius}; ` +
+      ['rgb', 'l', 'ha'].filter(k => out[k]).map(k => `${k}: ${out[k].error ? 'err ' + out[k].error : 'stdDev=' + out[k].shellLocalStdDev.toFixed(4)}`).join(', '));
+  } catch (e) {
+    log(`  [baseline texture] skipped: ${e.message}`);
+  }
+  return out;
 }

@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "name": "NGC 891 Edge-on Galaxy LRGB — LLM Agentic Pipeline",
+  "files": {
+    "sourceFolder": "/Users/aescaffre/OutputNGC891/SynologyDrive/output/master/claude",
+    "L": "/Users/aescaffre/OutputNGC891/SynologyDrive/output/master/claude/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-L_mono_autocrop.xisf",
+    "R": "/Users/aescaffre/OutputNGC891/SynologyDrive/output/master/claude/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-R_mono_autocrop.xisf",
+    "G": "/Users/aescaffre/OutputNGC891/SynologyDrive/output/master/claude/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-V_mono_autocrop.xisf",
+    "B": "/Users/aescaffre/OutputNGC891/SynologyDrive/output/master/claude/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-B_mono_autocrop.xisf",
+    "Ha": "",
+    "outputDir": "/Users/aescaffre/OutputNGC891/SynologyDrive/output/master/claude/agentic",
+    "targetName": "NGC891"
+  }
+}

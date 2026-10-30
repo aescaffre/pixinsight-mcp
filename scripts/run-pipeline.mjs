@@ -515,7 +515,7 @@ async function runABE(viewId, opts = {}) {
     P.abeDownsample = 2.00;
     P.writeSampleBoxes = false;
     P.justTrySamples = false;
-    P.targetCorrection = AutomaticBackgroundExtractor.prototype.Subtract;
+    P.targetCorrection = 1; // Subtract (numeric: enum constant name varies across PI versions)
     P.normalize = true;
     P.discardModel = true;
     P.replaceTarget = true;
@@ -675,7 +675,7 @@ async function checkMemory(stepId) {
       for (const [branch, viewId] of Object.entries(liveImages)) {
         await purgeUndoHistory(viewId);
       }
-      await pjsr('gc(); processEvents();');
+      await pjsr('processEvents();');
       // Re-check
       const out2 = execSync("ps aux | grep '[P]ixInsight.app' | awk '{s+=$6} END{print s}'").toString().trim();
       const memMB2 = Math.round(parseInt(out2, 10) / 1024);

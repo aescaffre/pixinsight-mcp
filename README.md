@@ -30,6 +30,8 @@ Pipeline:
   8. Quality gates pass -> saves final XISF + JPG -> saves memory for next target
 ```
 
+Mono narrowband masters (S/H/O or H/O) are detected automatically and routed through a dedicated SHO/HOO prep and palette workflow (see "Narrowband (SHO / HOO)" below).
+
 ---
 
 ## Architecture Overview
@@ -45,66 +47,72 @@ Pipeline:
                         |  Classifier          |
                         |  agents/classifier   |
                         |  target-taxonomy.json|
+                        |  processing-profiles |
                         +---------+-----------+
                                   |
                +------------------+------------------+
                |                                     |
     +----------v-----------+           +-------------v-----------+
-    | Phase 1: Deterministic|           | Phase 2+: Creative Agent |
-    | Prep (no LLM)         |           | (Claude Max subprocess)  |
+    | Phase 1: Deterministic|           | Phase 2+: Creative Agents|
+    | Prep (no LLM)         |           | (Claude Max subprocesses)|
     | deterministic-prep.mjs|           | giga-run.mjs             |
-    |                       |           |                          |
-    | open, align, combine, |           | 53 MCP tools             |
-    | GC, BN, BXT, SPCC,   |           | bracket-then-critic      |
-    | NXT, SXT, stretch     |           | 4 branches x 4 candidates|
-    +-----------+-----------+           | quality gates             |
+    | narrowband-prep.mjs   |           |                          |
+    |                       |           | gradient sub-agent       |
+    | open, align, combine, |           | giga orchestrator        |
+    | GC, BN, BXT, SPCC,   |           |   (100 MCP tools)        |
+    | NXT, SXT, stretch     |           | optional core specialist |
+    +-----------+-----------+           | aesthetic critic + gates |
                 |                       +-------------+-------------+
                 |                                     |
-                +----> PixInsight (PJSR) <------------+
+                +----> PixInsight (PJSR, V8) <--------+
                        via file-based bridge IPC
                        (~/.pixinsight-mcp/bridge/)
 ```
 
 ### Two-Phase Design
 
-**Phase 1: Deterministic Prep** (`agents/llm/deterministic-prep.mjs`) -- Zero LLM involvement. Opens calibrated masters, aligns channels via StarAlignment, combines RGB, runs the canonical linear processing sequence (gradient correction, BlurXTerminator correction, astrometric solution copy, SPCC color calibration, background neutralization, NoiseXTerminator, BlurXTerminator sharpening, StarXTerminator star extraction, Seti statistical stretch). Repeats for L and Ha channels if present. This phase is deterministic and **cached**: a SHA-256 fingerprint of the script content plus input file headers (size + mtime + first/last 64KB) means identical inputs skip reprocessing entirely.
+**Phase 1: Deterministic Prep** (`agents/llm/deterministic-prep.mjs`) -- Zero LLM involvement. Opens calibrated masters, aligns channels via StarAlignment, combines RGB, runs the canonical linear processing sequence (gradient correction, BlurXTerminator correction, astrometric solution copy, SPCC color calibration, background neutralization, NoiseXTerminator, BlurXTerminator sharpening, StarXTerminator star extraction, Seti statistical stretch). Repeats for L and Ha channels if present. Every applied step is recorded in the prep result, and prep warns if the extracted star layer is not linear. This phase is deterministic and **cached**: a SHA-256 fingerprint of the script content plus input file headers (size + mtime + first/last 64KB) means identical inputs skip reprocessing entirely. When the config lists mono S/H/O masters and no R/G/B, prep is routed to `agents/llm/narrowband-prep.mjs` instead.
 
-**Phase 2+: Creative Agent** (`agents/llm/giga-run.mjs`) -- A single Claude agent spawned as a `claude -p` subprocess (running on a Max subscription, zero API cost) receives the prepped working assets and a system prompt dynamically built from the target's classification and processing traits. The agent has access to 53 MCP tools that map to PixInsight operations and drives the creative processing through a structured bracket-then-critic workflow.
+**Phase 2+: Creative Agents** (`agents/llm/giga-run.mjs`) -- Claude agents spawned as `claude -p` subprocesses (running on a Max subscription, zero API cost). A dedicated **gradient sub-agent** first flattens the background on the linear data; the **giga orchestrator** then receives the prepped working assets and a system prompt dynamically built from the target's classification and processing profile, with access to 100 MCP tools that map to PixInsight operations. An optional **core specialist** post-pass (`--core-specialist`) and an **aesthetic critic** complete the roster. Each agent has an explicit model/effort/turn budget (`agents/llm/agent-models.mjs`).
 
 ### File-Based Bridge IPC
 
-Node.js communicates with PixInsight's PJSR scripting engine through a file-based bridge at `~/.pixinsight-mcp/bridge/`. A watcher script (`pjsr/pixinsight-mcp-watcher.js`, ECMAScript 5) runs inside PixInsight, polls for JSON command files, executes them via the PJSR engine, and writes result files. This is the only way to programmatically control PixInsight -- there is no socket or HTTP API. Bridge latency is approximately 2 seconds per tool call.
+Node.js communicates with PixInsight's PJSR scripting engine through a file-based bridge at `~/.pixinsight-mcp/bridge/`. A watcher script (`pjsr/pixinsight-mcp-watcher.js`) runs inside PixInsight, polls for JSON command files, executes them via the PJSR engine, and writes result files. This is the only way to programmatically control PixInsight -- there is no socket or HTTP API. Bridge latency is approximately 2 seconds per tool call.
+
+**The watcher runs on PixInsight's V8 runtime** (`#engine v8` on its first line, PixInsight >= 1.9.5). Without that directive a script runs on the legacy SpiderMonkey runtime, whose garbage collector aborted PixInsight 1.9.5 on Apple Silicon with large images open (explicit `gc()` or automatic collections alike). The V8 watcher ships a small compatibility layer for command snippets written in the legacy style: `processEvents`/`msleep`/`sleep` globals, `gc()` as a no-op, and a rewrite of `Process.prototype.CONST` to `Process.CONST` before eval. It also includes the V8 ImageSolver library (`MCP_WITH_SOLVER`) so prep can plate-solve when the masters carry no astrometric solution. The SpiderMonkey version is kept as `pjsr/pixinsight-mcp-watcher-sm-legacy.js` for reference only.
 
 ### The Claude Max Engine
 
-The creative agent runs via `claude -p` subprocess (`agents/llm/engine-max.mjs`). No API key is needed -- it uses the user's Claude Max subscription through Claude Code. The system prompt is passed via `--append-system-prompt`, the initial message contains prep results and diagnostic views, and custom MCP tools are provided via an MCP server configuration. Claude Code handles the tool loop automatically. Budget is set to 200 turns for the full pipeline.
+The creative agents run via `claude -p` subprocess (`agents/llm/engine-max.mjs`). No API key is needed -- it uses the user's Claude Max subscription through Claude Code. The system prompt is passed via `--append-system-prompt-file` (falls back to `--append-system-prompt` on older CLIs), the initial message contains prep results and diagnostic views, and custom MCP tools are provided via an MCP server configuration (`agents/llm/mcp-agent-tools.mjs`). Claude Code handles the tool loop automatically.
+
+- **Tool containment**: every agent is launched with `--disallowedTools Bash,Edit,Write,MultiEdit,NotebookEdit,Agent,Task,WebFetch,WebSearch,TodoWrite,KillShell,BashOutput` -- it can only call the pipeline's MCP tools (plus Read). A processing agent can no longer modify pipeline source, user memory or run ad-hoc PJSR from a shell.
+- **Explicit models**: `agents/llm/agent-models.mjs` is the single table (giga_orchestrator, gradient_agent, core_specialist, aesthetic_critic) resolved as CLI `--model-<alias>` / `--effort-<alias>` > `config.models.<agent>` > defaults; `--fallback-model` is honoured and the run log warns when a fallback actually fired. `PIX_CLAUDE_BIN` overrides the claude binary.
+- **Sessions**: each agent is pinned to a `--session-id`, recorded under `<run>/agents/<agent>.json`, so a crashed run can be re-attached with `claude --resume` (see "Robustness and Operations").
 
 ---
 
 ## The Tool Inventory
 
-60 tools organized into categories (`agents/llm/tools.mjs`):
+100 tools organized into categories (`agents/llm/tools.mjs`, `TOOL_CATALOG`). A selection:
 
 | Category | Tools | Purpose |
 |----------|-------|---------|
-| measurement | get_image_stats, measure_uniformity | Read pixel statistics, background uniformity |
-| preview | save_and_show_preview | Export diagnostic JPEGs for visual inspection |
-| image_mgmt | clone_image, restore_from_clone, close_image, purge_undo | State management and memory control |
-| gradient | run_gradient_correction, run_abe, run_per_channel_abe, run_scnr | Background flattening and green cast removal |
-| denoise | run_nxt | NoiseXTerminator |
-| sharpen | run_bxt | BlurXTerminator (correct + sharpen modes) |
-| stretch | seti_stretch, auto_stretch, stretch_stars | Statistical stretch, quick inspection, star stretch |
-| masks | create_luminance_mask, apply_mask, remove_mask, close_mask | Mask creation, application, cleanup |
+| measurement | get_image_stats, measure_uniformity, measure_color_gradient, measure_chroma_noise, measure_psf_field, measure_dust_coverage, check_noise | Pixel statistics, uniformity, color casts/banding, chroma noise, field-dependent PSF |
+| preview | save_and_show_preview | Export diagnostic JPEGs (1:1 crops) for visual inspection |
+| image_mgmt | clone_image, restore_from_clone, close_image, purge_undo, list_open_images | State management and memory control (new windows refused above 12 open) |
+| gradient | run_gradient_correction, run_abe, run_per_channel_abe, run_scnr | Background flattening (masked per-channel ABE) and green cast removal |
+| denoise / sharpen / stretch | run_nxt, run_bxt, seti_stretch, auto_stretch, stretch_stars | NoiseXTerminator, BlurXTerminator (correct + sharpen), statistical and star stretch |
+| masks | create_luminance_mask, create_zone_masks, mask_ops, apply_mask, remove_mask, close_mask | Mask creation, core/shell/halo zones, mask arithmetic with statistics, geometry-checked apply |
 | detail | run_lhe, run_hdrmt | LocalHistogramEqualization, HDRMultiscaleTransform |
 | curves | run_curves, run_pixelmath | Tonal and color adjustments, arbitrary expressions |
-| lrgb | lrgb_combine | Luminance-RGB combination with LinearFit |
+| lrgb | lrgb_combine, inject_luminance | LinearFit LRGB combination, PixelMath L injection for large median mismatch |
 | ha_injection | ha_inject_red, ha_inject_luminance | Narrowband Ha blending into RGB (soft-clamp prevents burning) |
-| narrowband | extract_pseudo_oiii, continuum_subtract_ha, dynamic_narrowband_blend, create_synthetic_luminance, create_zone_masks | Emission-line extraction from broadband, dual-zone color, zone-based HDR |
-| stars | star_screen_blend | Star reintegration via screen blend |
-| quality_gate | check_star_quality, check_ringing, check_core_burning, check_sharpness, scan_burnt_regions | Zero-tolerance burn scan (100×100 blocks), star quality, ringing detection |
+| narrowband | sho_combine, sho_hue_shift, measure_palette_balance, lift_faint_halo, body_edge_contrast, chroma_smooth, reload_narrowband_channel, lift_dust, inject_l_ifn, ... | SHO/HOO palettes, faint-halo and dust lifting, pseudo-OIII extraction |
+| stars | star_protected_blend, check_star_layer_integrity | Luminance-protected star reintegration, star-layer precondition |
+| quality_gate | scan_burnt_regions, check_star_quality, check_ringing, check_tonal_presence, check_background_floor, compare_to_reference, run_quality_gates | The gate battery, runnable read-only at any time |
 | memory | recall_memory, save_memory | Hierarchical knowledge store access |
 | scoring | compute_scores, submit_scores | Multi-dimensional image scoring (8 dimensions) |
-| control | save_variant, list_variants, load_variant, finish | Candidate management and workflow control |
+| control | save_variant, list_variants, load_variant, begin_composition, finish | Candidate management and workflow control |
 
 ---
 
@@ -112,13 +120,29 @@ The creative agent runs via `claude -p` subprocess (`agents/llm/engine-max.mjs`)
 
 ### Quality Gates as Code-Enforced Constraints
 
-Quality gates (`agents/ops/quality-gates.mjs`) execute actual PJSR pixel analysis inside PixInsight -- they are not prompt suggestions that the agent might ignore. The `finish` tool runs all gates automatically; the agent cannot complete processing until every gate passes.
+Quality gates (`agents/ops/quality-gates.mjs`, `agents/ops/subject-metrics.mjs`) execute actual PJSR pixel analysis inside PixInsight -- they are not prompt suggestions that the agent might ignore. The `finish` tool runs all gates automatically; only a result of "Finished (quality gates PASSED)" moves the state machine to finalize. `run_quality_gates` runs the same battery read-only at any time (results are persisted into the variant's metadata).
 
-- **Zero-tolerance burn scan**: Tiles the image in 100×100px blocks (large enough that individual stars can't false-positive). If ANY block has >3% pixels above 0.93 luminance, the image fails. Zero burnt blocks allowed — the agent literally cannot finish with a blown-out core, regardless of how small the subject is relative to the frame. Every brightness-modifying tool also reports inline burn warnings (`⚠️ BURN WARNING: max=X`).
-- **Star quality**: Detects stars via local-maximum scanning on a 16px grid, refines positions in 5x5 windows, measures FWHM via half-maximum radius in 4 directions (must be < 6px), and color diversity via normalized channel spread (must be > 0.05). Minimum 50 detected stars required.
-- **Subject metrics**: Subject brightness ≥ 0.25 (hard gate), contrast ratio ≥ 2× for PNe / 3× for others, detail score ≥ 0.001.
-- **Ringing detection**: Radial brightness profile around brightest region, counts derivative sign changes.
-- **Over-denoising**: NXT denoise values above 0.25 are flagged; the prompt enforces a 0.15 maximum for final passes.
+**One gate contract.** Every threshold lives in `agents/llm/gate-contract.mjs` (`BURN_CLIP` 0.95, `BRIGHT_BLOCK_LEVEL` 0.80, `NOISE_BG_HARD` 0.022, `SUBJECT_MIN` 0.25, `CONTRAST_GATE` 3.0 (2.0 for outer-halo targets), `TONAL` 3.0 (2.5 for small subjects), `STAR_CONTRAST` 4/3/2 by star prominence, `FWHM_HARD` 12, ...). `buildGateTable()` renders the same rows into the agent's system prompt, so the agent sees exactly what the finish handler will enforce.
+
+**Per-profile calibrated overrides.** `agents/processing-profiles.json` may override a listed subset of thresholds per target class (`OVERRIDE_KEYS`: `noise.bg_hard`, `core_burn.*`, `background.min_level`, `stars.min_density_per_mpx`, `reference.*`, `burn.max_clip_blocks`, ...). An override is honoured **only** when its block carries a `_calibration` string naming the approved image it was back-tested on; uncalibrated overrides are ignored with a warning on stderr. Calibrated today: background floor 0.045 (galaxies), 0.032 (PNe), 0.050 (emission), 0.062 (reflection); PNe `core_burn.rel_contrast` 0.15.
+
+**Approved-image registry and back-test harness.** `agents/calibration/approved-images.json` registers user-approved, rejected and superseded final images per class (PACMAN LIFT5, NGC 7023 iter03 / best-of-both, NGC 3628 v3, M97, NGC 4490 ...). Approved images are floors: a gate that rejects one is wrong by definition. `scripts/backtest-gates.mjs [--class X] [--id a,b] [--only gate,gate] [--critic] [--dry]` opens each registered image in PixInsight, runs the full battery and writes `agents/calibration/last-backtest.json`. Exit codes: `1` an approved image hit a blocking gate, `2` a rejected image passed every blocking gate, `3` PixInsight crashed mid-run, `0` otherwise. To add an approved image, run `giga-run ... --approve [<runId>]` on a finished run: the final XISF is copied to `~/.pixinsight-mcp/approved/<class>/` and an entry is appended (so pruning old runs never rots the registry).
+
+The battery (blocking unless noted):
+
+- **Burn**: a single PJSR scan feeds both the zero-tolerance clip gate (no 100×100 block with >3% pixels above 0.95) and the extended bright-block gate (0.80+, per-profile block limit). Every brightness-modifying tool also reports inline burn warnings.
+- **Core contrast**: catches perceptual core burn (white, desaturated, flat cores); becomes advisory when the core is demonstrably structured.
+- **Stars**: brightness contrast vs. background per prominence profile, FWHM (hard 12 px, galaxies exempt), color diversity; `star_retention` (stars per Mpx, advisory until calibrated).
+- **Subject metrics**: brightness >= 0.25, contrast ratio, detail gain against the prep baseline (noise-floor corrected), tonal presence (ROI-based subject/background separation with star rejection).
+- **Background floor** (`check_background_floor`): sky level and fraction of near-black 64 px blocks, blocking where `background.min_level` is calibrated. Prevents the crushed-sky look that used to pass.
+- **Noise / dust**: dark-sky grain <= 0.022; IFN/dust gate for reflection nebulae (greyed, crushed or warm dust).
+- **Saturation**: per-class P90 ceiling from the profile `look` block.
+- **L usage**: when an L master exists, clone-chain provenance must prove it was really incorporated.
+- **Palette balance** (SHO/HOO), **highlight texture** (emission), **ringing**, **over-denoising** (NXT above 0.25 flagged).
+- **Reference comparison** (`compare_to_reference`): palette L1, chroma-only Lab EMD and background-cast delta against a reference image -- `files.referencePath`, or auto-picked: the latest approved registry image for the same target.
+- **Aesthetic critic**: advisory everywhere until >= 8 user-rated pairs agree with the judge for that class (`agents/llm/rate-critique.mjs` records ratings and reports agreement).
+
+Non-safety gates relax to warnings only when the agent has <= 10 turns left. New gates ship advisory and are promoted only after the back-test harness passes.
 
 ### Target Taxonomy and Classifier
 
@@ -141,7 +165,9 @@ A 12-category taxonomy (`agents/target-taxonomy.json`) defines processing-releva
 
 Each category carries 7 trait dimensions (signalType, structuralZones, colorZonation, starRelationship, faintStructureGoal, subjectScale, dynamicRange) plus boolean flags and free-text processing notes.
 
-The classifier (`agents/classifier.mjs`) maps target names to categories using a known-object lookup (100+ objects) with heuristic fallbacks, then generates a processing brief including classification, workflow detection (LRGB, HaLRGB, HaRGB, RGB), aesthetic intent, and field characteristics. **Zero hardcoded target text exists in the prompt** -- the same generic orchestrator prompt handles M81 and the Owl Nebula because all behavior is driven by taxonomy traits and processing notes.
+The classifier (`agents/classifier.mjs`) maps target names to categories using a known-object lookup (100+ objects) with heuristic fallbacks, then generates a processing brief including classification, workflow detection (LRGB, HaLRGB, HaRGB, RGB, SHO, HOO), aesthetic intent, field characteristics and the reference image. **Zero hardcoded target text exists in the prompt** -- the same generic orchestrator prompt handles M81 and the Owl Nebula because all behavior is driven by taxonomy traits and the per-class profile.
+
+**Processing profiles** (`agents/processing-profiles.json`) carry per-class defaults and gate blocks: `gradient`, `noise`, `reference`, `detail`, `core_burn`, `look`, `background`, `stretch`, `tools` (BXT correct_only / sharpen_nonstellar, read by prep), `stars`. A `narrowband_palette` profile is deep-merged over the base class for SHO/HOO runs.
 
 ### Hierarchical Memory with Auto-Promotion
 
@@ -153,14 +179,11 @@ Five levels of processing knowledge (`agents/memory/hierarchical-memory.mjs`), s
 4. **data_class** -- keyed by workflow + subject scale (e.g., HaLRGB_large)
 5. **target** -- keyed by target name (e.g., M81 specific Ha injection strength)
 
-The `recallForBrief()` function gathers all relevant entries from all levels, matching on classification, all trait keys (structuralZones, signalType, colorZonation, etc.), data class fingerprint, and target name. The agent receives a formatted summary at the start of every run.
+The `recallForBrief()` function gathers all relevant entries from all levels, matching on classification, all trait keys (structuralZones, signalType, colorZonation, etc.), data class fingerprint, and target name. The agent receives a formatted summary at the start of every run; broadband-era rules are excluded on narrowband runs.
 
-The memory optimizer (`optimizeMemory()`) runs after every processing session and automatically promotes entries up the hierarchy:
-- Same param+value wins in 3+ targets of the same type --> promote to type level
-- Same param+value confirmed across 2+ types sharing a trait --> promote to trait level
-- Type-level entry confirmed across all data classes --> promote to universal
+The memory optimizer (`optimizeMemory()`) runs after every processing session and automatically promotes entries up the hierarchy: the same param+value winning in 3+ targets of a type is promoted to type level, confirmation across 2+ types sharing a trait promotes to trait level, and a type-level entry confirmed across all data classes becomes universal.
 
-This means knowledge from processing M81 (galaxy_spiral with core_arms_ifn and high dynamic range) can inform processing of the Veil Nebula (supernova_remnant), because they share processing traits like bright cores and similar HDRMT masking requirements.
+This means knowledge from processing M81 (galaxy_spiral with core_arms_ifn and high dynamic range) can inform processing of the Veil Nebula (supernova_remnant), because they share processing traits like bright cores and similar HDRMT masking requirements. Cross-run learning about winning parameters lives in the promotion ledger (`agents/ledger.mjs`).
 
 ### Bracket-Then-Critic Workflow
 
@@ -179,19 +202,32 @@ The four branches address conflicting goals that cannot be optimized simultaneou
 - **Branch C -- Color Richness**: Two-stage saturation curves + hue-selective boosts + Ha injection
 - **Branch D -- Star Policy**: Stretch, color saturation, and reduction decisions on the extracted star layer
 
-After generation, a critic pass evaluates candidates per branch, identifies overdone boundaries, selects winners, and may trigger one narrow refinement round. Composition candidates (balanced, bold-IFN, bold-color, edge) combine branch winners, followed by a composition critic and art director decision targeting "near-edge but credible."
+After generation, a critic pass evaluates candidates per branch, identifies overdone boundaries, selects winners, and may trigger one narrow refinement round. The agent calls `begin_composition`; composition candidates (balanced, bold-IFN, bold-color, edge) combine branch winners, followed by a composition critic and art director decision targeting "near-edge but credible." A state machine (`agents/llm/state-machine.mjs`) restricts which tools are available in each phase, and a repair engine (`agents/llm/repair-policies.mjs`) tracks what modified each view, applies per-gate repair policies and enforces forbidden tools on a view in any state.
+
+### Narrowband (SHO / HOO)
+
+Mono S/H/O (or H/O) masters are detected from the config and routed to `agents/llm/narrowband-prep.mjs`: no SPCC or background neutralization, per-channel linear BXT/NXT/SXT, gradient correction only when the border spread warrants it, **unlinked** per-channel stretch, linear star layers saved to disk, and a hash-keyed cache. `agents/ops/sho-palette.mjs` provides the palette operations (sho / foraxx / hue_screen / hoo combination, hue shift, palette balance measurement, background neutralization, faint-halo lift, body-edge contrast, chroma smoothing, star-residual repair) exposed as agent tools. The orchestrator prompt gains a narrowband mode with a palette branch; branch completeness requires at least two palette variants.
 
 ### Prep Caching
 
-Deterministic prep computes a cache key from a SHA-256 hash of the prep script content plus fingerprints of each input master file (file size + mtime + first/last 64KB content hash). Cache hits load pre-computed XISF files directly into PixInsight, skipping 10-15 minutes of linear processing. Cache is stored at `~/.pixinsight-mcp/prep-cache/`.
+Deterministic prep computes a cache key from a SHA-256 hash of the prep script content plus fingerprints of each input master file (file size + mtime + first/last 64KB content hash, `agents/llm/prep-cache-util.mjs`). Cache hits load pre-computed XISF files directly into PixInsight, skipping 10-15 minutes of linear processing. Cache is stored at `~/.pixinsight-mcp/prep-cache/` (capped to the 4 newest entries; the gradient sub-agent's solutions are cached the same way in `~/.pixinsight-mcp/gradient-cache/`).
 
 ### Scoring Model
 
-An 8-dimension scoring model (`agents/scoring.mjs`) with target-type-specific weight profiles:
-- detail_credibility, background_quality, color_naturalness, star_integrity
-- tonal_balance, subject_separation, artifact_penalty, aesthetic_coherence
+An 8-dimension scoring model (`agents/scoring.mjs`) -- detail_credibility, background_quality, color_naturalness, star_integrity, tonal_balance, subject_separation, artifact_penalty, aesthetic_coherence -- each scored 0-100, with target-type-specific weight profiles (galaxy_spiral weights detail_credibility highest; star_cluster_open weights star_integrity highest).
 
-Each dimension scored 0-100. Weight profiles vary by target type (galaxy_spiral weights detail_credibility highest; star_cluster_open weights star_integrity highest).
+---
+
+## Robustness and Operations
+
+PixInsight 1.9.5 can still abort under memory pressure, and its crash reports carry no symbols. The pipeline is built to survive that:
+
+- **Crash forensics**: the watcher writes `~/.pixinsight-mcp/bridge/executing.json` (the command it is about to run) from inside PixInsight; the Node bridge writes `last-command.json` plus a rolling `command-log.jsonl` (last 30 commands) and deletes stale command files so a dead session's command is never replayed by the next watcher. SPCC captures the PixInsight console to `/tmp/spcc-prep-console.log` and prints the tail on failure. When the PixInsight process disappears, the MCP server writes `<run>/CRASH.json` (agent, tool, trace seq) and refuses every further tool call with a FATAL text; the parent polls `CRASH.json` and terminates the CLI.
+- **Session resume**: the state machine, view provenance, star-integrity flags and trace sequence are snapshotted to `<run>/agent-state-<agent>.json`. After restarting PixInsight, `giga-run --config ... --resume-agent <runId>` re-attaches the same Claude session (`claude --resume`) with `PIX_RESUME=1` restoring the MCP state; the agent reloads its best saved variant and continues.
+- **Relaunch script**: `scripts/pi-relaunch.sh [--kill]` starts PixInsight headlessly with the RC-Astro suite module (`-m`) and the watcher (`-r`), clears stale bridge files and waits (up to 180 s) for `watcher-state.json`. With `--kill` it terminates a stalled instance and removes its orphan swap files first.
+- **Safer window handling**: `close_image` / `close_mask` detach a mask from every window before closing (force-closing an active mask crashed PI), `ctx.safeClose()` purges, drains events and settles before closing, no explicit `gc()` is ever called from Node, and a swap guard purges undo history periodically and whenever free disk is low.
+- **Disk hygiene** (`agents/llm/disk-hygiene.mjs`): pre-flight removes orphan PixInsight swap files (created before the live PI process started -- never newer ones), aborts under 10 GB free and warns under 20 GB; runs beyond the newest 3 (`--keep-runs N`) are deleted by mtime unless they are younger than 24 h, hold a `CRASH.json`, or are referenced by the ledger champions or the approved-image registry; prep and gradient caches are capped at 4 entries. `scripts/clean-swap.mjs [--dry-run]` runs the swap cleanup standalone.
+- **Run artifacts and budgets** (`agents/llm/run-artifacts.mjs`): `run-summary.json`, `trace.jsonl`, a Mermaid diagram and a trace summary are written on every exit path (finished, recovered, crashed, timed_out, max_turns). Every agent has a turn budget: an MCP-side call counter for the gradient and core agents, maxTurns ×1.2 for the giga agent with the CLI `--max-turns` as a 1.5× outer net; blocked calls consume budget.
 
 ---
 
@@ -199,43 +235,34 @@ Each dimension scored 0-100. Weight profiles vary by target type (galaxy_spiral 
 
 ```
 DETERMINISTIC PREP (Phase 1, ~10-15 min first run, cached thereafter):
-  disk space check (>= 20 GB required)
+  orphan swap cleanup + disk space check (>= 20 GB recommended, < 10 GB aborts)
   --> cache key computation (script hash + input fingerprints)
   --> [cache hit: load XISF files, skip to Phase 2]
   --> close all open images
   --> open masters (with channel swap if configured)
-  --> check dimensions, align to R reference via StarAlignment
-  --> combine RGB channels
-  --> gradient correction (GC or ABE, auto-selected)
-  --> BXT correct_only (deconvolution)
-  --> copy astrometric solution back (BXT strips WCS)
-  --> SPCC color calibration
-  --> background neutralization
-  --> NXT linear denoise (0.20)
-  --> BXT sharpen
-  --> SXT star extraction (linear mode, stars=true only)
-  --> Seti statistical stretch (target=0.12, headroom=0.05)
-  --> NXT post-stretch denoise (0.25)
-  --> [repeat GC, BXT, NXT, SXT, stretch for L and Ha if present]
-  --> save to cache
+  --> align to R via StarAlignment (forced with files.forceAlign), combine RGB
+  --> gradient correction (GC or ABE), BXT correct_only, astrometric solution copied back
+      (V8 ImageSolver fallback if the masters carry none)
+  --> SPCC (console captured, one retry after regenerating the solution), background neutralization
+  --> optional border auto-crop (files.autoCropBorder)
+  --> NXT linear, BXT sharpen (profile tools.BXT), SXT star extraction (linear, stars=true only)
+  --> Seti statistical stretch (profile stretch.target_median), NXT post-stretch
+  --> [repeat for L and Ha if present], baseline texture/detail metrics recorded, save to cache
+
+GRADIENT SUB-AGENT (linear data, cached solutions):
+  ABE / GC bracketing until the color-gradient metric is flat; prep continues after it
 
 CREATIVE AGENT (Phase 2+, ~30-60 min via Claude Max):
-  Phase 0: recall_memory, inspect prep diagnostics
-  Phase 2: Branch generation (4 branches x 4 candidates = 16 candidates)
-    Branch A -- Luminance detail (LHE, HDRMT, masks)
-    Branch B -- Faint structure / IFN (shadow-lifting curves, inverted masks)
-    Branch C -- Color / Ha injection (saturation curves, narrowband blending)
-    Branch D -- Stars (stretch, color saturation, screen blend params)
-  Phase 3: Branch critic pass (score, compare, select winners)
-  Phase 4: Optional narrow refinement (1 round max)
-  Phase 5: Composition candidates (balanced, bold-IFN, bold-color, edge)
-  Phase 6: Composition critic pass
-  Phase 7: Art director decision (near-edge but credible)
-  Phase 7.5: Final gradient correction
-  Phase 8: Quality gates (star quality, ringing, core burning)
+  Phase 0: recall_memory, inspect prep diagnostics, GATE TABLE from gate-contract
+  Phase 2: Branch generation (4 branches x 4 candidates): A luminance detail (LHE, HDRMT, masks),
+           B faint structure / IFN (shadow-lifting curves), C color / Ha injection, D stars (protected blend)
+  Phase 3-4: Branch critic pass (score, compare, select winners), optional narrow refinement (1 round)
+  Phase 5-7: begin_composition -> candidates (balanced, bold-IFN, bold-color, edge) -> composition critic
+             -> art director decision (near-edge but credible)
+  Phase 8: finish -> full quality-gate battery; REJECTED -> repair policies, try again
   Phase 9: Final polish + save_memory
-  --> save final XISF + JPG
-  --> run memory optimizer (auto-promote patterns)
+  --> save final XISF + JPG, run-summary.json, trace artifacts; optional core-specialist post-pass
+  --> run memory optimizer (auto-promote patterns), update ledger
 ```
 
 ---
@@ -247,20 +274,21 @@ Successfully processed with zero target-specific code changes between runs:
 - **M81/M82** (Bode's Galaxy + Cigar Galaxy) -- spiral galaxy, HaLRGB, 5 channels. IFN visible in galactic cirrus, Ha emission highlighting HII regions in spiral arms, dust lanes resolved with HDRMT inverted, core structure preserved with headroom stretch.
 - **M97 Owl Nebula** -- planetary nebula, LRGB. Internal shell structure resolved via fine-scale LHE, faint outer halo revealed through shadow-lifting, OIII/Ha zoned color preserved. First-attempt result described as "stunning" with zero target tuning.
 - **Abell 2151 Hercules Cluster** -- galaxy cluster, LRGB. Dozens of tiny diverse galaxies sharpened with conservative SXT overlap, star color diversity preserved, varied galaxy morphologies and colors visible.
+- **NGC 281 Pacman Nebula** -- SHO narrowband, starless. Hubble-palette gold/blue with revealed faint outer nebulosity. Together with NGC 7023, NGC 3628, M97 and NGC 4490 it anchors the approved-image registry used for gate calibration.
 
 ---
 
 ## Requirements
 
-- **PixInsight** (tested with 1.8.9+) with the following third-party modules installed:
+- **PixInsight 1.9.5+** (the watcher uses the V8 scripting runtime; earlier builds still run the legacy watcher but crash on Apple Silicon under GC) with the following third-party modules installed:
   - BlurXTerminator (BXT)
   - NoiseXTerminator (NXT)
   - StarXTerminator (SXT)
 - **Node.js** v22+ (tested with v22.13.1)
 - **Claude Code** with a **Max subscription** (the creative agent runs via `claude -p` subprocess -- no API key needed)
-- **Calibrated master frames** -- WBPP-stacked, debayered XISF files (R, G, B, optionally L and Ha)
+- **Calibrated master frames** -- WBPP-stacked, debayered XISF files (R, G, B, optionally L and Ha; or mono S/H/O for narrowband)
 - **macOS** (tested on Darwin/arm64; Linux may work but is untested)
-- At least 20 GB free disk space (checked at startup)
+- At least 20 GB free disk space (checked at startup; under 10 GB the run aborts)
 
 ---
 
@@ -271,8 +299,10 @@ Successfully processed with zero target-specific code changes between runs:
 export PATH="/Users/aescaffre/.local/node-v22.13.1-darwin-arm64/bin:$PATH"
 cd /Users/aescaffre/pixinsight-mcp && npm run build
 
-# 2. Start PixInsight and load the watcher script:
-#    Script > Run Script... > pjsr/pixinsight-mcp-watcher.js
+# 2. Start PixInsight with the watcher. Either:
+#    a) Script > Run Script... > pjsr/pixinsight-mcp-watcher.js   (first line: #engine v8)
+#    b) headless relaunch with RC-Astro modules + watcher (clears stale bridge files, waits for the watcher):
+scripts/pi-relaunch.sh            # add --kill to terminate a stalled PixInsight first
 
 # 3. Verify bridge connectivity
 node scripts/ping-watcher.mjs
@@ -285,13 +315,21 @@ node agents/llm/giga-run.mjs --config /path/to/config.json --intent "push IFN ha
 
 # 6. Dry run (classification + brief only, no processing)
 node agents/llm/giga-run.mjs --config /path/to/config.json --dry-run
+
+# 7. After a PixInsight crash: restart PixInsight + watcher, then re-attach the same Claude session
+node agents/llm/giga-run.mjs --config /path/to/config.json --resume-agent <runId>
+
+# 8. Promote a finished run's final image to the approved-image registry
+node agents/llm/giga-run.mjs --config /path/to/config.json --approve <runId>
+
+# 9. Back-test the gates against every registered image (PixInsight running); 10. unit tests (no PixInsight)
+node scripts/backtest-gates.mjs            # exit 1 = approved image rejected, 2 = rejected image passed
+npm test                                   # prompt goldens under test/golden, UPDATE_GOLDEN=1 to refresh
 ```
 
-The legacy deterministic pipeline (no LLM) is still available:
-```bash
-node scripts/run-pipeline.mjs --config /path/to/config.json
-node scripts/run-pipeline.mjs --config /path/to/config.json --restart-from stretch
-```
+Other useful flags: `--base-run <runId>` (warm start from a previous run), `--core-specialist` / `--post-pass-only <runId>`, `--keep-runs N`, `--model-giga opus`, `--effort-gradient medium`.
+
+The legacy deterministic pipeline (no LLM) is still available: `node scripts/run-pipeline.mjs --config /path/to/config.json [--restart-from stretch]`.
 
 ---
 
@@ -307,7 +345,12 @@ node scripts/run-pipeline.mjs --config /path/to/config.json --restart-from stret
     "L": "/absolute/path/to/masterLight_L.xisf",
     "Ha": "/absolute/path/to/masterLight_Ha.xisf",
     "outputDir": "/absolute/path/to/output/",
-    "channelSwap": ""
+    "channelSwap": "",
+    "pixelScale": 0.0,
+    "forceAlign": false,
+    "distortionCorrection": false,
+    "autoCropBorder": false,
+    "referencePath": ""
   },
   "aestheticPreferences": {
     "noiseLevel": "very_clean",
@@ -319,9 +362,16 @@ node scripts/run-pipeline.mjs --config /path/to/config.json --restart-from stret
 
 **Important notes**:
 - All file paths **must be absolute**. The pipeline does not resolve relative paths or prepend any base directory.
-- Leave channel keys as empty strings (not omitted) if that filter is not available.
+- Leave channel keys as empty strings (not omitted) if that filter is not available. For narrowband, use `S`, `H`/`Ha`, `O` keys with no R/G/B.
 - Use `channelSwap` (e.g., `"RB,GB"` for BRV filter wheel correction) if your filter labels are incorrect.
-- The workflow (LRGB, HaLRGB, HaRGB, RGB) is auto-detected from which channels have file paths.
+- The workflow (LRGB, HaLRGB, HaRGB, RGB, SHO, HOO) is auto-detected from which channels have file paths.
+- Optional keys, mainly for borrowed or foreign datasets:
+  - `pixelScale` -- arcsec/px seed for the plate-solve fallback (the seed is bracketed ×2/×0.5/×4/×0.25 if it fails).
+  - `forceAlign` -- register every channel to R even when dimensions already match (fixes channel fringing); empty bands left by registration are trimmed automatically.
+  - `distortionCorrection` -- enable StarAlignment distortion correction for drizzled or distorted sets.
+  - `autoCropBorder` -- trim noisy low-coverage borders after SPCC.
+  - `referencePath` -- a reference image for `compare_to_reference` / the reference gate; when absent, the latest approved registry image for the same target is used.
+- Optional `models.<agent>` block (`{ "model", "effort", "fallbackModel" }` for giga_orchestrator, gradient_agent, core_specialist, aesthetic_critic); CLI `--model-<alias>` / `--effort-<alias>` win over config.
 
 ---
 
@@ -330,47 +380,62 @@ node scripts/run-pipeline.mjs --config /path/to/config.json --restart-from stret
 ```
 agents/
   llm/
-    giga-run.mjs               -- Main entry point (GIGA pipeline runner)
-    deterministic-prep.mjs      -- Phase 1: scripted linear processing with caching
-    engine-max.mjs              -- Claude Max subprocess engine (claude -p)
-    tools.mjs                   -- 53 MCP tool definitions and handlers
-    vision.mjs                  -- Diagnostic view generation and image messaging
-    mcp-agent-tools.mjs         -- MCP server for agent tool access
-    prompts/
-      giga-orchestrator.mjs     -- System prompt builder (generic, trait-driven)
+    giga-run.mjs               -- Main entry point (GIGA pipeline runner, --resume-agent, --approve)
+    deterministic-prep.mjs      -- Phase 1: scripted linear processing with caching (broadband)
+    narrowband-prep.mjs         -- Phase 1 for mono S/H/O masters (unlinked stretch, NB cache)
+    prep-cache-util.mjs         -- Shared cache key / fingerprint helpers
+    engine-max.mjs              -- Claude Max subprocess engine (claude -p, tool containment, crash poll)
+    agent-models.mjs            -- Explicit per-agent model / effort / fallback / maxTurns table
+    agent-state.mjs             -- CRASH.json sentinel + per-agent MCP state snapshots
+    resume-agent.mjs            -- Helpers for --resume-agent (session re-attach)
+    run-artifacts.mjs           -- run-summary.json, trace artifacts, manifest finalize/fail
+    disk-hygiene.mjs            -- Old-run cleanup, orphan swap cleanup, cache caps
+    gate-contract.mjs           -- Single source of gate thresholds + calibrated override rules
+    rate-critique.mjs           -- CLI: record user ratings vs critic verdicts, agreement report
+    tools.mjs                   -- 100 MCP tool definitions and handlers (TOOL_CATALOG)
+    state-machine.mjs, repair-policies.mjs -- Phase-gated tool availability, repair engine
+    mcp-agent-tools.mjs         -- MCP server for agent tool access (swap guard, crash FATAL)
+    aesthetic-critic.mjs, composer.mjs, warmstart.mjs, vision.mjs, trace-*.mjs
+    prompts/                    -- giga-orchestrator (generic, trait-driven, gate table), gradient-agent, core-specialist
+  legacy/
+    llm/                        -- ARCHIVED API-provider engine (engine.mjs, orchestrator.mjs, 8 old stage prompts); not used by giga-run
   ops/
-    bridge.mjs                  -- File-based IPC with PixInsight
-    quality-gates.mjs           -- Star quality, ringing, core burning checks (PJSR)
-    stats.mjs                   -- Image statistics and uniformity measurement
+    bridge.mjs                  -- File-based IPC with PixInsight (command log, crash detection, safeClose)
+    quality-gates.mjs           -- Star field, ringing, burn, background floor, chroma noise checks (PJSR)
+    subject-metrics.mjs         -- Subject brightness/contrast/detail, tonal presence, texture baselines
+    stats.mjs                   -- Image statistics, uniformity and color-gradient measurement
     stretch.mjs                 -- Seti statistical stretch (ported from PixInsight)
-    gradient.mjs                -- Gradient correction (ABE, GC, per-channel)
-    masks.mjs                   -- Luminance mask creation and management
-    preview.mjs                 -- JPEG preview export
-    image-mgmt.mjs              -- Clone, close, purge operations
-    checkpoint.mjs              -- Checkpoint save/restore
-    index.mjs                   -- Ops module aggregator
+    gradient.mjs                -- Gradient correction (ABE, GC, masked per-channel ABE; PI 1.9.5 enums)
+    masks.mjs                   -- Luminance/zone masks, mask_ops, geometry-checked apply
+    narrowband-enhance.mjs      -- Emission-object tools (pseudo-OIII, continuum subtraction, zones)
+    sho-palette.mjs             -- SHO / HOO palette operations and palette metrics
+    preview.mjs, image-mgmt.mjs, checkpoint.mjs, index.mjs
   memory/
     hierarchical-memory.mjs     -- 5-level memory store with auto-promotion optimizer
-  classifier.mjs                -- Target classification and processing brief generation
+  calibration/
+    approved-images.json        -- Approved / rejected / superseded image registry (gate floors)
+    last-backtest.json          -- Output of the last scripts/backtest-gates.mjs run
+  classifier.mjs                -- Target classification, profile merge, reference auto-pick
   target-taxonomy.json          -- 12 categories with 7 trait dimensions each
-  scoring.mjs                   -- 8-dimension scoring model with per-type weight profiles
-  artifact-store.mjs            -- Per-run artifact management
-  processing-profiles.json      -- Default processing parameters per target type
+  processing-profiles.json      -- Per-class defaults + calibrated gate blocks (+ narrowband_palette)
+  scoring.mjs, ledger.mjs, artifact-store.mjs -- Scoring model, promotion ledger, per-run artifacts
 scripts/
+  backtest-gates.mjs            -- Gate back-test harness against the approved-image registry
+  pi-relaunch.sh                -- Headless PixInsight relaunch with RC-Astro module + watcher
+  clean-swap.mjs, ping-watcher.mjs, relevel-legacy-universal.mjs
   run-pipeline.mjs              -- Legacy deterministic pipeline (~2000 lines)
-  ping-watcher.mjs              -- Bridge connectivity test
 pjsr/
-  pixinsight-mcp-watcher.js     -- PixInsight-side watcher (ECMAScript 5)
-src/
-  -- MCP server TypeScript source (for IDE/tool integration)
-editor/
-  server.mjs                    -- Web UI backend for config editing
-  index.html                    -- Web UI frontend
-  default-config.json           -- Default pipeline configuration
+  pixinsight-mcp-watcher.js     -- PixInsight-side watcher (V8 runtime, #engine v8)
+  pixinsight-mcp-watcher-sm-legacy.js -- Legacy SpiderMonkey watcher (reference only)
+test/
+  *.test.mjs                    -- node --test suite (gates, state machine, crash/resume, prompts, ...)
+  golden/                       -- Prompt snapshot goldens
+src/                            -- MCP server TypeScript source (for IDE/tool integration)
+editor/                         -- Web UI (server.mjs, index.html, default-config.json)
+AGENTIC_PIPELINE_PLAN_2026-10-28.md -- The improvement plan behind the current architecture (work items WI-01..27)
 .claude/skills/
   pixinsight-pipeline/          -- Processing knowledge base for Claude Code sessions
-    SKILL.md                    -- Pipeline overview and parameter tuning guide
-    reference/                  -- PJSR processes, gotchas, tools, stretch formulas
+    SKILL.md, reference/        -- Overview, tuning guide, PJSR processes/gotchas, XTerminators, GHS, narrowband SHO
 ```
 
 ---
@@ -381,12 +446,14 @@ editor/
 |-----------|--------|----------------|
 | Seti Statistical Stretch | [Seti Astro](https://www.setiastro.com) v2.3 (Franklin Marek) | Ported to Node.js: blackpoint rescale, MTF, normalize, Hermite HDR compress |
 | GHS Stretch | [GHS](https://ghsastro.co.uk) (Cranfield & Shelley) | PixelMath piecewise fallback (no .dylib) |
-| Screen Blend Stars | Standard technique | `~(~$T * ~(strength * stars))` -- halo-free recombination |
+| Protected Star Blend | Screen blend + luminance attenuation | Screen reintegration with attenuation in bright cores and soft roll-off; stars delivered linear |
 | Ha Injection | Community techniques | R-channel injection + luminance boost with brightness limiting |
-| Inverted HDRMT | PixInsight community | Enhances local detail instead of compressing brights |
-| Intelligent Gradient Removal | Original | ABE vs GC comparison via corner uniformity metric, per-channel mode |
+| Inverted HDRMT | PixInsight community | Enhances local detail instead of compressing brights (donut masks on edge-on / PNe) |
+| Intelligent Gradient Removal | Original | Dedicated sub-agent, ABE vs GC via color-gradient metric, masked per-channel mode |
+| Unlinked Narrowband Stretch | Standard SHO practice | Per-channel stretch before palette combination; palette ops on stretched starless channels |
 | Hierarchical Memory | Original | 5-level knowledge store with auto-promotion across targets |
 | Bracket-Then-Critic | Adapted from photography bracketing | 4 candidates (weak/target/edge/overdone) per creative branch |
+| Calibrated Gates | Original | Thresholds back-tested against user-approved images before they may block |
 
 ---
 
@@ -401,3 +468,24 @@ Seats are regularly available for remote observation. Visit the [Teams section](
 ## License
 
 MIT
+
+---
+
+## Changelog
+
+### 2026-10-28 / 2026-10-30 -- V8 watcher, calibrated gates, crash resilience, narrowband
+
+- **Watcher moved to PixInsight's V8 runtime** (`#engine v8`). The legacy SpiderMonkey runtime's GC aborted PixInsight 1.9.5 on Apple Silicon; the V8 watcher adds compatibility shims (`Process.prototype.CONST` rewrite, legacy globals) and the ImageSolver library. Legacy watcher kept as `pjsr/pixinsight-mcp-watcher-sm-legacy.js`. `scripts/pi-relaunch.sh` relaunches PixInsight headlessly with the RC-Astro module and the watcher.
+- **Gate contract + calibration registry.** All finish thresholds live in `agents/llm/gate-contract.mjs`; per-profile overrides only count when back-tested (`_calibration`). `agents/calibration/approved-images.json` + `scripts/backtest-gates.mjs` (exit 1/2/3) back-test the battery against user-approved and rejected images; `giga-run --approve` registers new ones. The classifier auto-picks a same-target approved image as the reference.
+- **New and reworked gates**: `background_floor` (blocking where calibrated), `star_retention` (advisory), single-pass burn scan feeding both clip and bright-block gates, structured-core advisory for core contrast, L-usage provenance, SHO/HOO palette balance, chroma-only reference metrics, `run_quality_gates` read-only battery, one GATE TABLE rendered into the prompt.
+- **Advisory diagnostics**: star-field metrics (FWHM, ellipticity, centre/edge), field-dependent PSF map, chroma noise, banding detection in the color-gradient metric, highlight-texture and detail baselines recorded by prep.
+- **Crash containment and resume**: `CRASH.json` sentinel, FATAL tool responses, parent kills the CLI, per-agent state snapshots, `--resume-agent <runId>` re-attaches the same Claude session. Forensics: `executing.json`, `last-command.json`, `command-log.jsonl`, SPCC console capture, stale-command cleanup. Mask-aware `close_image`, `safeClose()`, no explicit `gc()` anywhere.
+- **Sub-agent containment and explicit models**: every agent runs with `--disallowedTools` (MCP tools + Read only), a pinned session id, `--effort` / `--fallback-model`; `agents/llm/agent-models.mjs` is the single model table (`--model-<alias>`, `config.models`).
+- **processing-profiles.json schema reworked**: per-class `gradient`, `noise`, `reference`, `detail`, `core_burn`, `look`, `background` blocks, BXT correct_only / sharpen_nonstellar read by prep, `narrowband_palette` overlay class; `learned_overrides` and the profile-learning step removed (cross-run learning lives in the ledger).
+- **SHO / HOO narrowband workflow**: `narrowband-prep.mjs` (no SPCC, unlinked stretch, linear star layers, cache), `sho-palette.mjs` and 13 palette/narrowband agent tools, narrowband prompt mode, palette branch, warm-start support.
+- **State machine + repair engine rewrite**: `begin_composition` sentinel, branch coverage advisory, REJECTED finish no longer advances, repair reachable from finalize, forbids enforced on a view in any state, blocked calls consume budget, turn budgets for every agent, window limit of 12.
+- **Borrowed-dataset support in prep**: `files.pixelScale`, `forceAlign`, `distortionCorrection`, `autoCropBorder`, `referencePath`; V8 ImageSolver fallback with seed bracketing; SPCC retry after regenerating the astrometric solution; aligned windows renamed by returned id (PI 1.9.5 names them ImageNN).
+- **ABE on PixInsight 1.9.5 fixed** (`run_abe` was a silent no-op because the 1.9.x enums changed); masked per-channel ABE; gradient prompt v2 caps the polynomial degree on faint/dust fields.
+- **Mask tooling and previews**: `mask_ops` with statistics, geometry-checked `apply_mask`, PixelMath zone masks, 1:1 native-resolution crop previews (`region="subject"`).
+- **Disk hygiene**: orphan swap cleanup before every run, old-run pruning by mtime with 24 h / crashed / referenced-run protection, prep and gradient cache caps, `scripts/clean-swap.mjs`.
+- **Run artifacts, tests, docs**: `run-artifacts.mjs` writes summaries on every exit path; `test/` adds a `node --test` suite (gates, state machine, crash/resume, repair policies, disk hygiene, prompt goldens); legacy API-provider engine archived under `agents/legacy/llm/`; `AGENTIC_PIPELINE_PLAN_2026-10-28.md` documents the work items behind these changes; `CLAUDE.md` and the `.claude/skills/pixinsight-pipeline/` references updated (new `narrowband-sho.md`).

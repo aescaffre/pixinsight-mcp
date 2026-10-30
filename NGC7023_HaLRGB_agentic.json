@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "name": "NGC 7023 Iris Nebula HaLRGB — LLM Agentic Pipeline (full-frame + autocrop)",
+  "files": {
+    "sourceFolder": "/Volumes/Extension/NGC3628/master",
+    "L": "/Volumes/Extension/NGC3628/master/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-L_mono_(1).xisf",
+    "R": "/Volumes/Extension/NGC3628/master/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-R_mono_(1).xisf",
+    "G": "/Volumes/Extension/NGC3628/master/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-V_mono_(1).xisf",
+    "B": "/Volumes/Extension/NGC3628/master/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-B_mono_(1).xisf",
+    "Ha": "/Volumes/Extension/NGC3628/master/masterLight_BIN-1_6224x4168_EXPOSURE-180.00s_FILTER-HAlpha_mono.xisf",
+    "autoCropBorder": true,
+    "outputDir": "/Volumes/Extension/NGC7023/masters/agentic",
+    "targetName": "NGC7023"
+  }
+}

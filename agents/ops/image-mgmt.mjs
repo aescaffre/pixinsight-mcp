@@ -50,7 +50,20 @@ export async function restoreFromClone(ctx, targetId, cloneId) {
  * Close an image window.
  */
 export async function closeImage(ctx, viewId) {
-  await ctx.pjsr(`var w = ImageWindow.windowById('${viewId}'); if (!w.isNull) w.forceClose();`);
+  // Detach this window from any image that uses it as a MASK before closing it:
+  // force-closing an active mask window crashed PixInsight 1.9.5 (bad dynamic_cast
+  // in QWidget::event, M101 run 9dab226d, 2026-10-30: close_image('HA_MASK')).
+  await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}');
+    if (!w.isNull) {
+      var ws = ImageWindow.windows;
+      for (var i = 0; i < ws.length; i++) {
+        try { var mk = ws[i].mask; if (mk && !mk.isNull && mk.mainView.id === w.mainView.id) ws[i].removeMask(); } catch (e) {}
+      }
+      processEvents();
+      w.forceClose();
+    }
+  `);
 }
 
 /**

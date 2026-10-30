@@ -23,62 +23,28 @@ import { execSync } from 'child_process';
 
 import { createBridgeContext } from '../ops/bridge.mjs';
 import { getStats, measureUniformity } from '../ops/stats.mjs';
-import { ArtifactStore } from '../artifact-store.mjs';
+import { ArtifactStore, getBestVariant } from '../artifact-store.mjs';
 import { generateBrief } from '../classifier.mjs';
 import { MaxAgent } from './engine-max.mjs';
-import { buildToolSet } from './tools.mjs';
-import { generateDiagnosticViews, buildImageMessage } from './vision.mjs';
+import { buildToolSet, formatCriticalSummary } from './tools.mjs';
+import { resolveAgentModels, parseModelFlags, fallbackFired, formatModelTable } from './agent-models.mjs';
+import { generateDiagnosticViews } from './vision.mjs';
 import { buildGigaOrchestratorPrompt } from './prompts/giga-orchestrator.mjs';
 import { buildGradientAgentPrompt } from './prompts/gradient-agent.mjs';
 import { buildCoreSpecialistPrompt } from './prompts/core-specialist.mjs';
-import { composeCore, judgeAB } from './composer.mjs';
+import { composeCore, judgeAB, selectCoreCandidate, measureCoreCandidates } from './composer.mjs';
 import { runDeterministicPrep } from './deterministic-prep.mjs';
-import { recordOutcomes, extractLedgerGuidance, getChampions } from '../ledger.mjs';
+import { recordOutcomes, extractLedgerGuidance, getChampions, repointChampions, ledgerKey } from '../ledger.mjs';
+import { cleanOldRuns, collectProtectedRuns, cleanOrphanSwap, capPrepCache, capGradientCache } from './disk-hygiene.mjs';
+import { writeRunArtifacts, mergeRunSummary, makeAgentRunRecord, formatAgentTable } from './run-artifacts.mjs';
+import { getCritiqueUsage } from './aesthetic-critic.mjs';
+import { buildResumePrompt, loadResumeInfo } from './resume-agent.mjs';
 import { loadBaseRunAsPrep, gradientHash, hasGradientSolution, saveGradientSolution, replayGradientSolution } from './warmstart.mjs';
 
 const home = os.homedir();
 
-// ============================================================================
-// P2a: PixInsight swap file management
-// ============================================================================
-function cleanPISwapFiles(staleMinutes = 5) {
-  // Smart cleanup: only delete swap files not modified in the last N minutes.
-  // Active files are continuously written by PI — safe to keep.
-  const SWAP_DIR = '/var/folders/zs/l60syh197h32ptdrp2yfvzs00000gn/C';
-  const now = Date.now();
-  const threshold = now - staleMinutes * 60 * 1000;
-  let totalBytes = 0, deletedBytes = 0, deletedCount = 0, keptCount = 0;
-
-  try {
-    const files = fs.readdirSync(SWAP_DIR).filter(f => f.startsWith('~PI~') && f.endsWith('.swp'));
-    for (const file of files) {
-      const fullPath = path.join(SWAP_DIR, file);
-      try {
-        const stat = fs.statSync(fullPath);
-        totalBytes += stat.size;
-        if (stat.mtimeMs < threshold) {
-          fs.unlinkSync(fullPath);
-          deletedBytes += stat.size;
-          deletedCount++;
-        } else {
-          keptCount++;
-        }
-      } catch {}
-    }
-    const freedGB = (deletedBytes / (1024 ** 3)).toFixed(2);
-    const keptGB = ((totalBytes - deletedBytes) / (1024 ** 3)).toFixed(2);
-    if (deletedCount > 0) {
-      console.log(`  PI swap: cleaned ${deletedCount} stale files (${freedGB} GB freed), kept ${keptCount} active (${keptGB} GB)`);
-    } else if (keptCount > 0) {
-      console.log(`  PI swap: ${keptCount} active files (${keptGB} GB), 0 stale`);
-    } else {
-      console.log('  PI swap: no swap files found');
-    }
-    return { cleaned: deletedCount > 0, deletedBytes, totalBytes, fileCount: files.length };
-  } catch (err) {
-    return { cleaned: false, deletedBytes: 0, totalBytes: 0, fileCount: 0 };
-  }
-}
+const writeRunSummary = mergeRunSummary;
+let _currentStore = null;  // WI-25: for the FATAL handler
 
 // ============================================================================
 // P2b: Automatic disk space monitoring
@@ -108,22 +74,11 @@ function checkDiskSpace() {
 
   const minFree = Math.min(rootFreeGB ?? Infinity, varFreeGB ?? Infinity);
 
-  if (minFree < 8) {
-    console.log('  WARNING: Low disk space (<8 GB). Clean swap files MANUALLY before running.');
-    // cleanPISwapFiles(); // DISABLED — crashes PI if it has images open
-
-    // Re-check after cleaning
-    const rootAfter = getFreeGB('/');
-    const varAfter = getFreeGB('/var');
-    const minAfter = Math.min(rootAfter ?? Infinity, varAfter ?? Infinity);
-
-    if (rootAfter !== null) console.log(`  / (data) after cleanup: ${rootAfter} GB free`);
-    if (varAfter !== null) console.log(`  /var (swap) after cleanup: ${varAfter} GB free`);
-
-    if (minAfter < 5) {
-      console.error('  FATAL: Less than 5 GB free after cleanup — aborting to prevent data loss');
-      process.exit(1);
-    }
+  if (minFree < 10) {
+    console.error(`  FATAL: Less than 10 GB free (${minFree} GB) after orphan-swap cleanup — aborting to prevent data loss`);
+    process.exit(1);
+  } else if (minFree < 20) {
+    console.log(`  WARNING: Low disk space (${minFree} GB < 20 GB). Free space soon (PI swap low-water mark is 14 GB).`);
   }
 
   return { rootFreeGB, varFreeGB };
@@ -138,12 +93,19 @@ for (let i = 0; i < args.length; i++) {
   if (args[i] === '--config' && args[i + 1]) opts.configPath = args[++i];
   else if (args[i] === '--intent') opts.intent = args[++i];
   else if (args[i] === '--base-run') opts.baseRun = args[++i];   // B1 warm-start
+  else if (args[i] === '--keep-runs') opts.keepRuns = parseInt(args[++i], 10);   // WI-24
   else if (args[i] === '--core-specialist') opts.coreSpecialist = true;   // C-tier phase 1
+  else if (args[i] === '--post-pass-only' && args[i + 1]) { opts.postPassOnly = args[++i]; opts.coreSpecialist = true; }   // WI-27: run ONLY the core-specialist post-pass on an existing run
   else if (args[i] === '--dry-run') opts.dryRun = true;
+  else if (args[i] === '--resume-agent' && args[i + 1]) opts.resumeAgent = args[++i];   // WI-07b
+  else if (args[i] === '--approve') {   // WI-01: copy the final XISF to ~/.pixinsight-mcp/approved/<class>/ + register it
+    opts.approve = true;
+    if (args[i + 1] && !args[i + 1].startsWith('--')) opts.approveRunId = args[++i];
+  }
 }
 
 if (!opts.configPath) {
-  console.error('Usage: node agents/llm/giga-run.mjs --config /path/to/config.json [--intent "..."] [--base-run <runId>]');
+  console.error('Usage: node agents/llm/giga-run.mjs --config /path/to/config.json [--intent "..."] [--base-run <runId>] [--resume-agent <runId>]');
   process.exit(1);
 }
 
@@ -161,8 +123,38 @@ async function main() {
   console.log('='.repeat(60));
 
   // Pre-flight: disk space check only — swap cleanup DISABLED (crashes PI)
+  // WI-24: orphan swap (created before the live PI process started) is removed first, then disk is checked
+  if (!opts.dryRun) {
+    try { cleanOrphanSwap({ log: console.log }); } catch (e) { console.log(`  orphan swap cleanup skipped: ${e.message}`); }
+  }
   checkDiskSpace();
-  // cleanPISwapFiles(); // DISABLED — too risky while PI is running
+
+  // Classification
+  console.log('\n--- Classification ---');
+  // WI-07b: --resume-agent reuses the saved brief of the crashed run
+  const savedBrief = opts.resumeAgent ? new ArtifactStore(opts.resumeAgent).loadBrief() : null;
+  if (opts.resumeAgent && !savedBrief) { console.error(`Cannot resume: no brief.json in run ${opts.resumeAgent}`); process.exit(1); }
+  const brief = savedBrief || generateBrief(config, { intent: opts.intent });
+  // WI-08: explicit per-agent model table (CLI > config.models > defaults)
+  const AGENT_MODELS = resolveAgentModels(parseModelFlags(args), config);
+  brief.models = { ...(brief.models || {}), critic: AGENT_MODELS.aesthetic_critic.model };
+  console.log('\n--- Agent models ---');
+  console.log(formatModelTable(AGENT_MODELS));
+  console.log(`  Target: ${brief.target.name} (${brief.target.classification})`);
+  console.log(`  Workflow: ${brief.dataDescription.workflow}`);
+  console.log(`  Style: ${brief.aestheticIntent.style}`);
+
+  if (opts.dryRun) {
+    console.log('\n--- DRY RUN ---');
+    console.log(JSON.stringify(brief, null, 2));
+    try {
+      const sp = buildGigaOrchestratorPrompt(brief, config);
+      const tmpl = ['overview', 'center_crop', 'corner_crop', 'bg_stretch'].map((n, i) => `${i + 1}. <run dir>/diagnostics/prep/${n}.jpg`);
+      console.log(`\n--- System prompt: ${sp.length} chars ---`);
+      console.log(`--- Initial message ends with the diagnostics path list (appended by the agent engine; paths filled in at run time) ---\n### Preview images saved to disk\nUse the Read tool to view any of these images:\n${tmpl.join('\n')}${config.files?.L ? '\n(+ L diagnostics under <run dir>/diagnostics/prep_l/)' : ''}`);
+    } catch (e) { console.log(`  system prompt render failed: ${e.message}`); }
+    return;
+  }
 
   // Bridge
   const ctx = createBridgeContext({ log: console.log });
@@ -174,30 +166,121 @@ async function main() {
     process.exit(1);
   }
 
-  // Classification
-  console.log('\n--- Classification ---');
-  const brief = generateBrief(config, { intent: opts.intent });
-  console.log(`  Target: ${brief.target.name} (${brief.target.classification})`);
-  console.log(`  Workflow: ${brief.dataDescription.workflow}`);
-  console.log(`  Style: ${brief.aestheticIntent.style}`);
 
-  if (opts.dryRun) {
-    console.log('\n--- DRY RUN ---');
-    console.log(JSON.stringify(brief, null, 2));
+  // WI-27: --post-pass-only <runId>: run ONLY the core-specialist post-pass on an existing run (no prep, no cleanup, no export)
+  if (opts.postPassOnly) {
+    const store = new ArtifactStore(opts.postPassOnly);
+    _currentStore = store;
+    const ppBrief = store.loadBrief() || brief;
+    ppBrief.runLabel = store.runId.split('_').pop().slice(0, 8);
+    const fsel = store.readFinalSelection();
+    if (!fsel || !fs.existsSync(fsel.variant_path)) { console.error(`No usable final-selection.json in ${store.runId}`); process.exit(1); }
+    const agentRuns = [];
+    const recordAgentPP = (name, res) => {
+      try {
+        agentRuns.push(makeAgentRunRecord(name, AGENT_MODELS[name]?.model, res));
+        const cfg = AGENT_MODELS[name];
+        store.recordAgentRun(name, { agent: name, requestedModel: cfg.model, effort: cfg.effort, fallbackModel: cfg.fallbackModel,
+          actualModels: res?.actualModels || [], num_turns: res?.num_turns ?? res?.turnCount, duration_ms: res?.duration_ms ?? res?.elapsedMs, usage: res?.usage });
+      } catch (e) { console.log(`  recordAgentRun skipped: ${e.message}`); }
+    };
+    const t0 = Date.now();
+    const ppDir = path.join(store.baseDir, 'core_post_pass');   // never write next to the masters
+    fs.mkdirSync(ppDir, { recursive: true });
+    const pp = await runCorePostPass({ ctx, store, brief: ppBrief, AGENT_MODELS, recordAgent: recordAgentPP, finalSelection: fsel,
+      outputDir: ppDir, targetName: config.files?.targetName || 'Target', exportSource: null });
+    console.log(`\n--- post-pass-only done in ${Math.round((Date.now() - t0) / 1000)}s | final variant: ${pp.finalSelection.variant_id} | ${pp.exportSource || 'mega-winner kept'} ---`);
     return;
   }
 
   // Artifact store
-  const store = new ArtifactStore();
+  const store = new ArtifactStore(opts.resumeAgent || undefined);
+
+  // WI-24: old-run cleanup (protects current run, base run, ledger champions, approved registry) + cache caps
+  try {
+    const protect = collectProtectedRuns({
+      runId: store.runId, baseRun: opts.baseRun,
+      ledgerPath: path.join(home, '.pixinsight-mcp', 'ledger.json'),
+      approvedPath: path.join(__dirname, '..', 'calibration', 'approved-images.json'),
+    });
+    const keepRuns = Number.isFinite(opts.keepRuns) ? opts.keepRuns : 3;
+    const del = cleanOldRuns({ runsDir: store.runsDir, keep: keepRuns, protect, log: console.log });
+    if (del.length) console.log(`  runs: removed ${del.length} old run(s), ${(del.reduce((a, d) => a + d.bytes, 0) / 1024 ** 3).toFixed(2)} GB freed`);
+    capPrepCache(path.join(home, '.pixinsight-mcp', 'prep-cache'), 4, console.log);
+    capGradientCache(path.join(home, '.pixinsight-mcp', 'gradient-cache'), 4, console.log);
+  } catch (e) { console.log(`  disk hygiene skipped: ${e.message}`); }
 
   // Add run label for internal version naming (last 8 chars of run ID)
   brief.runLabel = store.runId.split('_').pop().slice(0, 8);
 
   store.saveBrief(brief);
+  // WI-08: run_meta first line of trace.jsonl + per-agent run recording
+  try {
+    const tp = path.join(store.baseDir, 'trace.jsonl');
+    const toolStats = () => {
+      const out = [];
+      for (const agent of ['giga_orchestrator', 'gradient_agent', 'core_specialist']) {
+        const ts = buildToolSet(agent);
+        out.push({ agent, toolCount: ts.definitions.length, schemaChars: JSON.stringify(ts.definitions).length });
+      }
+      return out;
+    };
+    if (!fs.existsSync(tp)) fs.writeFileSync(tp, JSON.stringify({ type: 'run_meta', ts: Date.now(), runId: store.runId, models: AGENT_MODELS, tools: toolStats() }) + '\n');
+  } catch (e) { console.log(`  run_meta write skipped: ${e.message}`); }
+  const agentRuns = [];
+  _currentStore = store;
+  const recordAgent = (name, res) => {
+    try {
+      agentRuns.push(makeAgentRunRecord(name, AGENT_MODELS[name]?.model, res));
+      const cfg = AGENT_MODELS[name];
+      const info = {
+        agent: name, requestedModel: cfg.model, effort: cfg.effort, fallbackModel: cfg.fallbackModel,
+        actualModels: res?.actualModels || [], num_turns: res?.num_turns ?? res?.turnCount, duration_ms: res?.duration_ms ?? res?.elapsedMs, usage: res?.usage,
+      };
+      store.recordAgentRun(name, info);
+      if (fallbackFired(cfg.model, info.actualModels)) {
+        console.log(`  WARNING: ${name} requested "${cfg.model}" but actual models were [${info.actualModels.join(', ')}] — fallback may have fired`);
+      }
+    } catch (e) { console.log(`  recordAgentRun skipped: ${e.message}`); }
+  };
   console.log(`  Run ID: ${store.runId}`);
   console.log(`  Run label: ${brief.runLabel}`);
   console.log(`  Artifacts: ${store.baseDir}`);
 
+  let result, elapsed;
+  if (opts.resumeAgent) {
+    // ------------------------------------------------------------------
+    // WI-07b: --resume-agent. PixInsight was restarted (all views are gone). Skip prep/gradient and
+    // resume the SAME Claude session (identical cwd, same system prompt, same MCP state snapshot).
+    // ------------------------------------------------------------------
+    console.log(`\n--- RESUME-AGENT: run ${store.runId} ---`);
+    if (!(await ctx.ping())) {
+      console.error('PixInsight/watcher not responding (ping failed). Restart PixInsight + the watcher first, then re-run this command.');
+      process.exit(1);
+    }
+    const info = loadResumeInfo(store, brief, config, buildGigaOrchestratorPrompt);
+    console.log(`  session=${info.sessionId} state=${info.state} cwd=${info.cwd} systemPrompt=${info.promptSource}`);
+    // The old MCP server is dead; remove the sentinel BEFORE spawning or engine-max would kill the new session.
+    try { fs.unlinkSync(path.join(store.baseDir, 'CRASH.json')); } catch {}
+    try { store.manifest.status = 'running'; delete store.manifest.failReason; store._saveManifest(); } catch {}
+    const agent = new MaxAgent('giga_orchestrator', {
+      systemPrompt: info.systemPrompt,
+      agentName: 'giga_orchestrator',
+      maxTurns: AGENT_MODELS.giga_orchestrator.maxTurns,
+      model: AGENT_MODELS.giga_orchestrator.model,
+      effort: AGENT_MODELS.giga_orchestrator.effort,
+      fallbackModel: AGENT_MODELS.giga_orchestrator.fallbackModel,
+      store,
+      brief,
+      extraArgs: ['--resume', info.sessionId],
+      cwd: info.cwd,
+      env: { PIX_RESUME: '1' },
+    });
+    const startTime = Date.now();
+    result = await agent.run(buildResumePrompt(info.state));
+    elapsed = Date.now() - startTime;
+    recordAgent('giga_orchestrator', result);
+  } else {
   // ================================================================
   // PHASE 1: DETERMINISTIC PREP (no LLM, pure code)
   // ================================================================
@@ -206,7 +289,7 @@ async function main() {
   let baseSelection = null;
   if (opts.baseRun) {
     console.log(`\n--- Phase 1 SKIPPED — warm-starting from base run ${opts.baseRun} ---`);
-    const loaded = await loadBaseRunAsPrep(ctx, opts.baseRun, config.files?.targetName || 'Target');
+    const loaded = await loadBaseRunAsPrep(ctx, opts.baseRun, config.files?.targetName || 'Target', { config });
     prepResult = loaded.prepResult;
     baseSelection = loaded.selection;
     console.log(`  Loaded base winner: ${baseSelection.variant_id} (${baseSelection.variant_path})`);
@@ -228,10 +311,11 @@ async function main() {
       try {
         const rgbStats0 = await getStats(ctx, targetName);
         gHash = gradientHash(config.files, rgbStats0);
-        if (hasGradientSolution(gHash)) {
+        if (hasGradientSolution(gHash, hasL)) {
           console.log(`\n--- Phase 1.5: Gradient solution CACHE HIT (${gHash.slice(0, 12)}) — replaying snapshot ---`);
           await replayGradientSolution(ctx, gHash, targetName, hasL);
           console.log('--- Gradient snapshot replayed — skipping sub-agent ---');
+          try { console.log('  Windows after gradient phase: ' + (await ctx.listImages()).map(i => i.id).join(', ')); } catch { /* */ }
           return;
         }
       } catch (e) {
@@ -251,15 +335,28 @@ The corrected views MUST stay under these exact IDs. Do NOT stretch, denoise, ru
       const gradAgent = new MaxAgent('gradient_agent', {
         systemPrompt: buildGradientAgentPrompt(brief),
         agentName: 'gradient_agent',
-        budget: { maxTurns: 50 },
+        maxTurns: AGENT_MODELS.gradient_agent.maxTurns,
+        model: AGENT_MODELS.gradient_agent.model,
+        effort: AGENT_MODELS.gradient_agent.effort,
+        fallbackModel: AGENT_MODELS.gradient_agent.fallbackModel,
         store,
         brief,
-        ctx,
       });
-      await gradAgent.run(gradInitial);
+      const gradResult = await gradAgent.run(gradInitial);
+      recordAgent('gradient_agent', gradResult);
+      try {
+        const tr = gradResult?.transcript;
+        const gtext = Array.isArray(tr)
+          ? tr.map(m => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n\n')
+          : String(tr || '');
+        fs.writeFileSync(path.join(store.baseDir, 'gradient-result.md'), `# Gradient agent result\n\n${gtext}\n`);
+        const gm = gtext.match(/GRADIENT RESULT:[^\n]*/);
+        fs.appendFileSync(path.join(store.baseDir, 'trace.jsonl'), JSON.stringify({ type: 'run_meta', ts: Date.now(), event: 'gradient_result', result: gm ? gm[0] : null, text: gtext.slice(0, 4000) }) + '\n');
+      } catch (e) { console.log(`  gradient-result persist skipped: ${e.message}`); }
       console.log('--- Gradient Agent done — handing flattened linear views to prep phase 2 ---');
 
       if (gHash) {
+        try { console.log('  Windows after gradient phase: ' + (await ctx.listImages()).map(i => i.id).join(', ')); } catch { /* */ }
         try { await saveGradientSolution(ctx, gHash, targetName, hasL); console.log(`  Gradient solution cached: ${gHash.slice(0, 12)}`); }
         catch (e) { console.log(`  Gradient cache save skipped: ${e.message}`); }
       }
@@ -269,6 +366,22 @@ The corrected views MUST stay under these exact IDs. Do NOT stretch, denoise, ru
 
   // Generate diagnostic views for the agent to start with
   const diagDir = path.join(store.baseDir, 'diagnostics', 'prep');
+  // Detail baseline (prep-metrics.json) for the finish detail-gain advisory.
+  if (prepResult.baselineDetail) {
+    brief._baselineDetail = prepResult.baselineDetail;
+    brief._hasL = !!prepResult.views.l;
+    if (opts.baseRun) {
+      try { fs.writeFileSync(path.join(store.baseDir, 'prep-metrics.json'), JSON.stringify({ baselineDetail: prepResult.baselineDetail, baseRun: opts.baseRun }, null, 2)); } catch { /* */ }
+    }
+  }
+  if (prepResult.narrowband) brief._nbPrep = { linearStarless: prepResult.narrowband.linearStarless || {}, prepParams: prepResult.narrowband.prepParams || {}, prepDir: prepResult.narrowbandPrepDir || path.join(store.baseDir, 'prep') };
+  const baselineDetailText = (() => {
+    const b = prepResult.baselineDetail;
+    if (!b) return '';
+    const fx = (v) => (typeof v === 'number' ? v.toExponential(3) : 'n/a');
+    const maxGain = brief?.processingProfile?.detail?.max_gain;
+    return `\n### Detail baseline (prep, before your processing):\n- RGB: detailCredible=${fx(b.rgb?.credible)} detailWeber=${fx(b.rgb?.weber)}${b.l ? `\n- L: detailCredible=${fx(b.l.credible)} detailWeber=${fx(b.l.weber)}` : ''}\n- Reference for gain = ${b.l ? 'max(RGB, L)' : 'RGB'}; detailCredible should rise modestly (profile detail.max_gain${maxGain != null ? ` = x${maxGain}, ADVISORY` : ' not set'}); detailRaw/detailCredible must stay < 2.5.\n`;
+  })();
   const diagPaths = await generateDiagnosticViews(ctx, prepResult.views.rgb, diagDir);
   let lDiagPaths = [];
   if (prepResult.views.l) {
@@ -284,23 +397,37 @@ The corrected views MUST stay under these exact IDs. Do NOT stretch, denoise, ru
   // Build system prompt
   const systemPrompt = buildGigaOrchestratorPrompt(brief, config);
 
-  // Creative agent gets all tools EXCEPT readiness (prep already done)
-  const creativeCategories = [
-    'measurement', 'preview', 'image_mgmt', 'gradient',
-    'denoise', 'sharpen', 'stretch',
-    'masks', 'detail', 'curves', 'lrgb', 'ha_injection', 'stars',
-    'artifacts', 'memory', 'control', 'scoring', 'quality_gate'
-  ];
-  const { definitions, handlers } = buildToolSet('giga_orchestrator', creativeCategories);
-  console.log(`  Tools available: ${definitions.length}`);
-
   // Build initial message with prep results + diagnostic views
   const viewsList = Object.entries(prepResult.views)
-    .map(([k, v]) => `- **${k}**: \`${v}\` (median=${prepResult.stats[k]?.median?.toFixed(4) || 'N/A'})`)
+    .map(([k, v]) => {
+      const med = prepResult.stats[k]?.median;
+      const medStr = typeof med !== 'number' ? 'N/A' : (Math.abs(med) < 1e-3 ? med.toExponential(2) : med.toFixed(4));
+      return `- **${k}**: \`${v}\` (median=${medStr})`;
+    })
     .join('\n');
 
-  const initialText = `## PHASE 1 COMPLETE — Deterministic prep has been done for you.
+  // WI-09: L uniformity (route 5 of the L incorporation decision) and the applied prep recipe from the profile.
+  let lUniformityLine = '';
+  if (prepResult.views.l) {
+    try { lUniformityLine = `- Background uniformity (L): ${(await measureUniformity(ctx, prepResult.views.l)).score.toFixed(6)} (> 0.02 means inject_luminance at a low weight, never RGB-only)\n`; } catch (e) { /* non-fatal */ }
+  }
+  const appliedBlock = (() => {
+    const ap = Array.isArray(prepResult.applied) ? prepResult.applied : [];
+    if (!ap.length) return '';
+    const lines = ap.map(a => `- ${a.step} on \`${a.view}\`: ${JSON.stringify(a.params)}`);
+    return `\n### Prep recipe already applied (do not repeat)\n${lines.join('\n')}\n`;
+  })();
+  const prepRecipe = (() => {
+    const p = brief.processingProfile || {};
+    const nxt = p.tools?.NXT;
+    return `### Prep recipe applied (from the processing profile)\n- Stretch: target_median=${p.stretch?.target_median ?? 'n/a'}, headroom=${p.stretch?.headroom ?? 'n/a'}; linear NXT ${nxt?.denoise_linear ?? 'n/a'}, post-stretch NXT ${nxt?.denoise_post_stretch ?? 'n/a'}; SXT applied on linear data (stars delivered LINEAR).\n${appliedBlock}`;
+  })();
+  const dustNote = brief.processingProfile?.ifn
+    ? '\n### Dust gate\nFinish Gate 3e will reject greyed/crushed dust — Branch B must run inject_l_ifn + lift_dust and verify with measure_dust_coverage.\n'
+    : '';
+  const initialText = `## DETERMINISTIC PREP COMPLETE — it has been done for you.
 
+${prepRecipe}
 ### Working assets ready in PixInsight:
 ${viewsList}
 
@@ -309,25 +436,30 @@ ${viewsList}
 - Max: ${(prepResult.stats.rgb?.max || 0).toFixed(4)}
 - Background uniformity: ${(await measureUniformity(ctx, prepResult.views.rgb)).score.toFixed(6)}
 
+${baselineDetailText}
 ${prepResult.views.l ? `### Current L stats:
 - Median: ${prepResult.stats.l?.median?.toFixed(6) || 'N/A'}
 - Max: ${(prepResult.stats.l?.max || 0).toFixed(4)}
-- L is STARLESS, stretched from processing profile targets
+${lUniformityLine}- L is STARLESS, stretched from processing profile targets
 ` : ''}
 
-${prepResult.views.ha ? `### Ha available: \`${prepResult.views.ha}\` (stretched, starless)` : ''}
-${prepResult.views.stars ? `### Stars available: \`${prepResult.views.stars}\` (stretched)` : ''}
+${prepResult.narrowband ? `### NARROWBAND ${prepResult.narrowband.workflow} — mono channels (stretched, starless, unlinked):
+- SII: \`${prepResult.views.s || 'n/a'}\` | Ha: \`${prepResult.views.ha}\` | OIII: \`${prepResult.views.o}\`
+- Initial palette in \`${prepResult.views.rgb}\`: ${prepResult.narrowband.palette} (gains S=${prepResult.narrowband.gains?.s?.toFixed?.(2)} O=${prepResult.narrowband.gains?.o?.toFixed?.(2)})
+- Initial palette balance: ${prepResult.narrowband.initialBalance}
+- Gradient: ${JSON.stringify(prepResult.narrowband.gradient)}
+${prepResult.narrowband.prepParams ? `- Prep applied: NXT linear ${JSON.stringify(prepResult.narrowband.prepParams.nxtLinear)}, NXT post-stretch ${JSON.stringify(prepResult.narrowband.prepParams.nxtPost)}, stretch target ${prepResult.narrowband.prepParams.stretchTarget}, hueShift ${JSON.stringify(prepResult.narrowband.prepParams.hueShift)}, scnr ${JSON.stringify(prepResult.narrowband.prepParams.scnr)}, hGain ${prepResult.narrowband.prepParams.hGain}${prepResult.narrowband.cacheHit ? ' (channels restored from NB cache)' : ''}
+- Any NXT you apply is ON TOP of the prep's post-NXT above — lower it, or rebracket the channel from its linear starless snapshot with \`reload_narrowband_channel\` (channel S/H/O, nxt_post, stretch_target) if grain or smoothing looks wrong.
+` : ''}${prepResult.narrowband.warmStart ? '- WARM START: FILTER_S/Ha/O re-opened from the base run prep; `rgb` is the base winner.\n' : ''}${brief.dataDescription?.starless ? '' : `- Linear NB star layers on disk (not open): ${Object.values(prepResult.narrowband.starLayers || {}).join(', ')}\n`}${brief.dataDescription?.starless ? '- **STARLESS deliverable** — do not blend stars, do not crop/resample.' : ''}` : (prepResult.views.ha ? `### Ha available: \`${prepResult.views.ha}\` (stretched, starless)` : '')}
+${prepResult.views.stars ? `### Stars available: \`${prepResult.views.stars}\` (LINEAR, median=${(prepResult.stats.stars?.median ?? 0).toExponential(2)} — call stretch_stars, then check_star_layer_integrity, BEFORE any curves/rolloff/blend; stretch_stars refuses non-linear input so it is always safe to call first)` : ''}
 
-### Diagnostic views attached (RGB overview, center crop, corner crop, background-stretched)
-
-### Winning Parameters from Previous Runs
-${extractWinningParams(brief.target.classification)}
-
+### Diagnostic views saved on disk (RGB: overview / center_crop / corner_crop / bg_stretch; L in diagnostics/prep_l) — paths are listed at the end of this message. Read the overview and corner crop before branching (corner crop = coma/gradient check).
+${dustNote}
 ### Cross-Run Promotion Ledger (what wins vs what never wins for this target class)
-${(() => { try { return extractLedgerGuidance(brief.target.classification); } catch (e) { return 'LEDGER: unavailable.'; } })()}
+${(() => { try { return extractLedgerGuidance(ledgerKey(brief)); } catch (e) { return 'LEDGER: unavailable.'; } })()}
 ${(() => {
   try {
-    const champs = getChampions(brief.target.classification);
+    const champs = getChampions(ledgerKey(brief));
     const dims = Object.keys(champs);
     if (!dims.length) return '';
     return `\n### Cross-Run Champions Available\nPrior runs of this target class produced best-of-breed images on: ${dims.map(d => `${d} (score ${(champs[d].score ?? 0).toFixed(3)})`).join(', ')}.\nUse recall_champion(<dimension>) to open one and graft its strong region (via blend_regions / star_protected_blend) for any dimension your current best is weak on.\n`;
@@ -356,34 +488,53 @@ RULES:
 - Measure first (get_stats / measure_* on \`rgb\`), make the smallest change that satisfies the intent, then save_variant and finish.
 - Quality gates still apply — do not regress core contrast, noise, saturation, or star quality.
 ## Begin directly: measure \`rgb\`, then apply the touch-up.`
-  : `## SKIP Phase 0 and Phase 1 — they are done.
-## Begin at Phase 2: Branch Generation.
+  : `## Intake and prep are done. Begin with the branch generation mission.
 ## Call recall_memory first, then start generating bracketed candidate sets.`}`;
+
+  // WI-05: warm start has no branch phase - the MCP-side state machine begins in compose.
+  if (opts.baseRun) brief.warmStart = { baseRun: opts.baseRun, intent: opts.intent || null };
 
   // Create MaxAgent
   console.log('\n--- Launching GIGA Agent via Claude Max ---');
+  // Turn budget (2026-10-30): every run, 24 MP or 104 MP, used ~250-295 turns and reached the
+  // emergency budget with the star gate still failing — size does not drive the turn count, the
+  // agent spends whatever it has on branches. Uniform +20% for now; the real fix is a reserved
+  // finish phase (TODO: state machine) so star repair happens before the emergency relaxation.
+  const mainMaxTurns = Math.round(AGENT_MODELS.giga_orchestrator.maxTurns * 1.2);
+  console.log(`  Turn budget: maxTurns=${mainMaxTurns} (base ${AGENT_MODELS.giga_orchestrator.maxTurns} x1.2)`);
   const agent = new MaxAgent('giga_orchestrator', {
     systemPrompt,
     agentName: 'giga_orchestrator',
-    tools: { definitions, handlers },
-    budget: { maxTurns: 250 }, // Large budget for the full pipeline
+    maxTurns: mainMaxTurns,
+    model: AGENT_MODELS.giga_orchestrator.model,
+    effort: AGENT_MODELS.giga_orchestrator.effort,
+    fallbackModel: AGENT_MODELS.giga_orchestrator.fallbackModel,
     store,
     brief,
-    ctx,
   });
 
   // Run
   const startTime = Date.now();
-  const result = await agent.run(initialText);
-  const elapsed = Date.now() - startTime;
+  result = await agent.run(initialText, [...diagPaths, ...lDiagPaths]);
+  elapsed = Date.now() - startTime;
+  recordAgent('giga_orchestrator', result);
+  }
 
   console.log(`\n--- GIGA Agent completed in ${Math.round(elapsed / 1000)}s ---`);
 
   // Do NOT clean swap files here — PI still has images open and needs its swap files.
   // Cleaning while PI is running causes crashes. Only clean on startup (before PI connects).
 
+  const agentCut = result.timedOut ? 'AGENT TIMED OUT' : (result.maxTurnsHit ? 'MAX TURNS' : null);
+  if (agentCut) {
+    console.error(`\n${'!'.repeat(60)}\n!!! giga_orchestrator ${agentCut} - the agent did NOT finish normally.\n!!! Export will use the best available saved variant (see export source).\n${'!'.repeat(60)}\n`);
+  }
+
   if (result.crashError) {
+    writeRunSummary(store, { status: 'crashed', exitCode: result.exitCode ?? null, signal: result.signal ?? null, durationMs: elapsed });
     console.error(`CRASH: ${result.crashError.message}`);
+    await writeRunArtifacts(store, 'crashed', { agentRuns, elapsedMs: elapsed, exitCode: result.exitCode ?? null, signal: result.signal ?? null, turns: result.turnCount || 0, failReason: result.crashError.message });
+    console.error(`\nRestart PixInsight + the watcher (full PI quit if it was the RAM-fragmentation crash), then:\n  node agents/llm/giga-run.mjs --config ${configPath} --resume-agent ${store.runId}`);
     process.exit(77);
   }
 
@@ -457,45 +608,42 @@ RULES:
     }
   }
 
+  // BEST-EFFORT FALLBACK (WI-07a): no final-selection and no PASSED finish in the trace ->
+  // pick the best saved variant so export AND the core-specialist post-pass still run.
+  if (!finalSelection) {
+    try {
+      const best = getBestVariant(store, 'giga_orchestrator');
+      if (best) {
+        finalSelection = store.writeFinalSelection({
+          variant_id: best.variantId,
+          variant_path: best.xisfPath,
+          agent: 'giga_orchestrator',
+          notes: 'RECOVERED best-effort (no passing finish)',
+          recovered: true,
+          gates_passed: false,
+        });
+        exportSource = 'best-variant fallback (no passing finish)';
+        console.log(`  Best-variant fallback: ${best.variantId} (${best.xisfPath})`);
+      }
+    } catch (e) { console.log(`  Best-variant fallback error: ${e.message}`); }
+  }
+  if (agentCut && exportSource) exportSource += ` (${agentCut})`;
+  const runStatus = result.timedOut ? 'timed_out' : result.maxTurnsHit ? 'max_turns'
+    : (!finalSelection ? 'no_final_selection' : (finalSelection.recovered ? 'recovered' : 'finished'));
+  writeRunSummary(store, {
+    status: runStatus, exportSource: exportSource || null, exitCode: result.exitCode ?? null,
+    signal: result.signal ?? null, durationMs: elapsed, turns: result.turnCount || 0,
+    finalVariant: finalSelection?.variant_id || null, gatesPassed: finalSelection ? finalSelection.gates_passed !== false : false,
+  });
+
   // === C-TIER PHASE 1: optional core-specialist post-pass (flagged --core-specialist) ===
   // Improves ONLY the core of the mega-winner via a short scoped specialist, grafts that
   // core back through a feathered mask (deterministic composer), and a strict no-regression
   // A/B exports whichever wins. The mega-agent path above is UNCHANGED; this can only
   // improve or tie. Any error falls back to the mega-winner.
   if (opts.coreSpecialist && finalSelection && fs.existsSync(finalSelection.variant_path)) {
-    try {
-      console.log('\n--- C-tier: Core Specialist post-pass ---');
-      const megaPath = finalSelection.variant_path;
-      const escMega = megaPath.replace(/'/g, "\\'");
-      await ctx.pjsr(`var ws=ImageWindow.windows;for(var i=0;i<ws.length;i++){ws[i].forceClose();} var a=ImageWindow.open('${escMega}'); var w=a[0]; for(var i=1;i<a.length;i++)a[i].forceClose(); w.mainView.id='CORE_WORK'; w.show(); 'ok';`);
-      const coreAgent = new MaxAgent('core_specialist', {
-        systemPrompt: buildCoreSpecialistPrompt(brief),
-        agentName: 'core_specialist',
-        budget: { maxTurns: 50 },
-        store, brief, ctx,
-      });
-      await coreAgent.run(`## CORE SPECIALIST TASK\nThe finished run-winner is open as \`CORE_WORK\` (a clone). Its surroundings are already what we want — improve ONLY its core (structure, no flat blob, no halo, no white-burn), masked, per your instructions. Leave \`CORE_WORK\` as your BEST result before stopping (restore your best clone into it). Do NOT touch the field/dust/stars.`);
-      const specPath = path.join(outputDir, `${targetName}_core_spec.xisf`);
-      const mergedPath = path.join(outputDir, `${targetName}_merged.xisf`);
-      const chk = await ctx.pjsr(`var w=ImageWindow.windowById('CORE_WORK'); if(w.isNull){'MISSING';}else{w.saveAs('${specPath.replace(/'/g, "\\'")}',false,false,false,false);'ok';}`);
-      if (((chk.outputs?.consoleOutput || chk.result || '').trim()) === 'MISSING') {
-        console.log('  Core specialist left no CORE_WORK view — keeping mega-winner.');
-      } else {
-        await composeCore(ctx, { megaPath, specPath, outPath: mergedPath, log: (m) => console.log(m) });
-        const profile = { ...(brief.processingProfile || {}), _classification: brief.target.classification };
-        const verdict = await judgeAB(ctx, { megaPath, mergedPath, profile, log: (m) => console.log(m) });
-        if (verdict.winner === 'merged') {
-          finalSelection = { ...finalSelection, variant_path: mergedPath, variant_id: `${finalSelection.variant_id || 'variant'}+core` };
-          exportSource = 'core-specialist merge (A/B win)';
-          console.log('  C-tier: MERGE wins the A/B — exporting the core-grafted result.');
-        } else {
-          console.log('  C-tier: mega-winner kept (merge did not beat it).');
-        }
-      }
-      await ctx.pjsr(`var ws=ImageWindow.windows;for(var i=0;i<ws.length;i++){ws[i].forceClose();} 'ok';`);
-    } catch (e) {
-      console.log(`  C-tier core-specialist post-pass error (keeping mega-winner): ${e.message}`);
-    }
+    const pp = await runCorePostPass({ ctx, store, brief, AGENT_MODELS, recordAgent, finalSelection, outputDir, targetName, exportSource });
+    finalSelection = pp.finalSelection; exportSource = pp.exportSource;
   }
 
   // Export from the artifact
@@ -524,6 +672,10 @@ RULES:
       console.log(`  ${r.outputs?.consoleOutput || 'done'}`);
       console.log(`  Saved: ${xisfPath}`);
       console.log(`  Saved: ${pngPath}`);
+      if (opts.approve) {
+        try { approveExport({ brief, store, xisfPath, variantPath: finalSelection.variant_path, targetName, requestedRunId: opts.approveRunId }); }
+        catch (e) { console.error(`  --approve failed (non-fatal): ${e.message}`); }
+      }
     } else if (finalSelection) {
       console.error(`  Export error: variant XISF not found at ${finalSelection.variant_path}`);
     } else {
@@ -547,206 +699,136 @@ RULES:
     console.log(`  Memory optimizer skipped: ${e.message}`);
   }
 
-  // P3b: Update processing profile with learned parameters from this run
-  try {
-    updateProcessingProfile(brief.target.classification, store);
-  } catch (e) {
-    console.log(`  Profile learning skipped: ${e.message}`);
-  }
-
   // P3c: Record competitive-attempt outcomes to the cross-run promotion ledger
   // (loss-aware learning — prunes approaches that never win, fast-tracks winners)
   try {
-    recordOutcomes(brief.target.classification, store);
+    recordOutcomes(ledgerKey(brief), store);
   } catch (e) {
     console.log(`  Ledger recording skipped: ${e.message}`);
   }
 
-  // Token usage summary
-  // claude CLI reports: input_tokens (non-cached) + cache_read + cache_creation + output_tokens
-  // Real input cost = input_tokens + cache_read + cache_creation
-  const usage = result.usage || {};
-  const inputTokens = usage.input_tokens || 0;
-  const outputTokens = usage.output_tokens || 0;
-  const cacheRead = usage.cache_read_input_tokens || 0;
-  const cacheCreation = usage.cache_creation_input_tokens || 0;
-  const totalInput = inputTokens + cacheRead + cacheCreation;
-  const totalTokens = totalInput + outputTokens;
+  // WI-09: critical summary (flaws first) - printed before the paths and appended to trace-summary.md
+  const criticalBlock = formatCriticalSummary(finalSelection);
 
-  // Generate execution trace diagram
-  let traceStats = '';
-  try {
-    const tracePath = path.join(store.baseDir, 'trace.jsonl');
-    if (fs.existsSync(tracePath)) {
-      const { analyzeTrace } = await import('./trace-analyzer.mjs');
-      const { generateMermaidDiagram, generateTraceSummary } = await import('./trace-mermaid.mjs');
-
-      const analysis = analyzeTrace(tracePath);
-      const mermaid = generateMermaidDiagram(analysis);
-      const summary = generateTraceSummary(analysis);
-
-      fs.writeFileSync(path.join(store.baseDir, 'trace-analysis.json'), JSON.stringify(analysis, null, 2));
-      fs.writeFileSync(path.join(store.baseDir, 'trace-diagram.mmd'), mermaid);
-      fs.writeFileSync(path.join(store.baseDir, 'trace-summary.md'), summary);
-
-      const deadEnds = Object.values(analysis.branches).filter(b => b.outcome === 'dead-end').length;
-      const gateFails = analysis.qualityGates.filter(g => !g.pass).length;
-      traceStats = `  Trace: ${analysis.totalCalls} tool calls, ${Object.keys(analysis.branches).length} branches (${deadEnds} dead-ends), ${analysis.qualityGates.length} quality checks (${gateFails} failures)`;
-      console.log(`\n--- Execution Trace ---`);
-      console.log(traceStats);
-      console.log(`  Diagram: ${path.join(store.baseDir, 'trace-diagram.mmd')}`);
-      console.log(`  Summary: ${path.join(store.baseDir, 'trace-summary.md')}`);
-    }
-  } catch (e) {
-    console.log(`  Trace generation skipped: ${e.message}`);
-  }
+  // WI-25: trace artifacts + run-summary.json + manifest finalize/fail (explicit; no finally, process.exit skips it)
+  const { traceStats } = await writeRunArtifacts(store, runStatus, {
+    agentRuns, exportSource, elapsedMs: elapsed, exitCode: result.exitCode ?? null, signal: result.signal ?? null,
+    turns: result.turnCount || 0, finalSelection, criticalBlock,
+    failReason: runStatus === 'crashed' ? 'run crashed' : undefined,
+  });
 
   console.log(`\n${'='.repeat(60)}`);
-  console.log(`  GIGA Processing complete!`);
+  console.log(criticalBlock);
+  console.log('-'.repeat(60));
+  console.log(`  Run finished — review the flaws above; final judgment is yours.`);
   console.log(`  Final: ${pngPath}`);
   console.log(`  Run: ${store.baseDir}`);
   console.log(`  Duration: ${Math.round(elapsed / 1000)}s (${result.turnCount || 0} turns)`);
-  console.log(`  Tokens: ${totalTokens.toLocaleString()} total`);
-  console.log(`    Input: ${totalInput.toLocaleString()} (${inputTokens.toLocaleString()} fresh + ${cacheRead.toLocaleString()} cache-read + ${cacheCreation.toLocaleString()} cache-write)`);
-  console.log(`    Output: ${outputTokens.toLocaleString()}`);
+  console.log(`  Status: ${runStatus}${exportSource ? ` | export source: ${exportSource}` : ''}`);
+  console.log(formatAgentTable(agentRuns, (() => { const { calls, ...usage } = getCritiqueUsage(store.baseDir); return { calls, usage }; })()));
   if (traceStats) console.log(traceStats);
   console.log(`${'='.repeat(60)}`);
 }
 
-// ============================================================================
-// P3b: Processing profile learning — update learned_overrides from winning params
-// ============================================================================
-function updateProcessingProfile(classification, store) {
-  const profilePath = path.join(__dirname, '../../agents/processing-profiles.json');
-  if (!fs.existsSync(profilePath)) {
-    console.log('  Profile learning: no processing-profiles.json found');
-    return;
-  }
-
-  const profiles = JSON.parse(fs.readFileSync(profilePath, 'utf-8'));
-  const profile = profiles[classification];
-  if (!profile) {
-    console.log(`  Profile learning: no profile for "${classification}"`);
-    return;
-  }
-
-  // Strategy 1: Extract from artifact store winner variant metadata
-  const learned = {};
-  const manifest = store.manifest;
-  const winnerAgents = Object.keys(manifest.agents || {});
-
-  for (const agentName of winnerAgents) {
+async function runCorePostPass({ ctx, store, brief, AGENT_MODELS, recordAgent, finalSelection, outputDir, targetName, exportSource }) {
     try {
-      const winner = store.getWinner(agentName);
-      if (!winner?.params) continue;
-      const p = winner.params;
-
-      if (p.ha_strength !== undefined) learned.ha_strength = p.ha_strength;
-      if (p.oiii_strength !== undefined) learned.oiii_strength = p.oiii_strength;
-      if (p.lhe_amounts) learned.lhe_amounts = p.lhe_amounts;
-      if (p.star_power !== undefined) learned.star_power = p.star_power;
-      if (p.composition_method) learned.composition_method = p.composition_method;
-      if (p.screen_blend_strength !== undefined) learned.screen_blend_strength = p.screen_blend_strength;
-      if (p.lrgb_lightness !== undefined) learned.lrgb_lightness = p.lrgb_lightness;
-      if (p.lrgb_saturation !== undefined) learned.lrgb_saturation = p.lrgb_saturation;
-      if (p.saturation_midpoint !== undefined) learned.saturation_midpoint = p.saturation_midpoint;
-      if (p.hdrmt_layers !== undefined) learned.hdrmt_layers = p.hdrmt_layers;
-      if (p.hdrmt_iterations !== undefined) learned.hdrmt_iterations = p.hdrmt_iterations;
-    } catch { /* skip unreadable winner */ }
-  }
-
-  // Strategy 2: Parse agent memory for winning_param entries from this run
-  if (Object.keys(learned).length === 0) {
-    const memDir = path.join(home, '.pixinsight-mcp', 'agent-memory');
-    const gigaMemFile = path.join(memDir, 'giga_orchestrator.json');
-    if (fs.existsSync(gigaMemFile)) {
-      const entries = JSON.parse(fs.readFileSync(gigaMemFile, 'utf-8'));
-      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-      const recentWinners = entries.filter(e =>
-        e.tags?.includes('winning_param') &&
-        (e.timestamp || e.date || '') >= oneHourAgo
-      );
-
-      for (const entry of recentWinners) {
-        const content = entry.content || '';
-        const title = (entry.title || '').toLowerCase();
-
-        const haMatch = content.match(/ha[_ ]?(?:inject(?:ion)?|strength)[=: ]*(\d+\.?\d*)/i);
-        if (haMatch) learned.ha_strength = parseFloat(haMatch[1]);
-
-        const oiiiMatch = content.match(/oiii[_ ]?strength[=: ]*(\d+\.?\d*)/i);
-        if (oiiiMatch) learned.oiii_strength = parseFloat(oiiiMatch[1]);
-
-        const lheMatches = content.match(/(?:lhe|amount)[=: ]*(\d+\.?\d*)/gi);
-        if (lheMatches) {
-          learned.lhe_amounts = lheMatches.map(m => parseFloat(m.match(/(\d+\.?\d*)/)[1]));
+      console.log('\n--- C-tier: Core Specialist post-pass ---');
+      const megaPath = finalSelection.variant_path;
+      const escMega = megaPath.replace(/'/g, "\\'");
+      await ctx.pjsr(`var ws=ImageWindow.windows;for(var i=0;i<ws.length;i++){ws[i].forceClose();} var a=ImageWindow.open('${escMega}'); var w=a[0]; for(var i=1;i<a.length;i++)a[i].forceClose(); w.mainView.id='CORE_WORK'; w.show(); 'ok';`);
+      const coreAgent = new MaxAgent('core_specialist', {
+        systemPrompt: buildCoreSpecialistPrompt(brief),
+        agentName: 'core_specialist',
+        maxTurns: AGENT_MODELS.core_specialist.maxTurns,
+        model: AGENT_MODELS.core_specialist.model,
+        effort: AGENT_MODELS.core_specialist.effort,
+        fallbackModel: AGENT_MODELS.core_specialist.fallbackModel,
+        store, brief,
+      });
+      recordAgent('core_specialist', await coreAgent.run(`## CORE SPECIALIST TASK\nThe finished run-winner is open as \`CORE_WORK\` (a clone). Its surroundings are already what we want — improve ONLY its core (structure, no flat blob, no halo, no white-burn), masked, per your instructions. Leave \`CORE_WORK\` as your BEST result before stopping (restore your best clone into it). Do NOT touch the field/dust/stars.`));
+      const specPath = path.join(outputDir, `${targetName}_core_spec.xisf`);
+      const mergedPath = path.join(outputDir, `${targetName}_merged.xisf`);
+      const chk = await ctx.pjsr(`var w=ImageWindow.windowById('CORE_WORK'); if(w.isNull){'MISSING';}else{w.saveAs('${specPath.replace(/'/g, "\\'")}',false,false,false,false);'ok';}`);
+      if (((chk.outputs?.consoleOutput || chk.result || '').trim()) === 'MISSING') {
+        console.log('  Core specialist left no CORE_WORK view — keeping mega-winner.');
+      } else {
+        const profile = { ...(brief.processingProfile || {}), _classification: brief.target.classification };
+        // Deterministic candidate selection: saved core_specialist variants + live CORE_WORK,
+        // judged against the mega baseline with the judgeAB core win condition.
+        let corePath = specPath;
+        try {
+          const cands = [{ path: specPath, label: 'CORE_WORK' }];
+          for (const v of (store.listVariants('core_specialist') || [])) {
+            if (v && v.xisfPath && fs.existsSync(v.xisfPath)) cands.push({ path: v.xisfPath, label: `variant ${v.variantId || '?'}` });
+          }
+          const [base] = await measureCoreCandidates(ctx, [{ path: megaPath, label: 'MEGA' }], profile, (m) => console.log(m));
+          if (base && base.core) {
+            const measured = await measureCoreCandidates(ctx, cands, profile, (m) => console.log(m));
+            const sel = selectCoreCandidate(base.core, measured);
+            console.log(`  [core-select] ${sel.reason}`);
+            if (sel.chosen && sel.chosen.path) corePath = sel.chosen.path;
+          } else {
+            console.log('  [core-select] baseline measure failed — using CORE_WORK');
+          }
+        } catch (e) {
+          console.log(`  [core-select] error (${e.message}) — using CORE_WORK`);
         }
-
-        const starMatch = content.match(/star[_ ]?(?:power|reduction|factor)[=: ]*(\d+\.?\d*)/i);
-        if (starMatch) learned.star_power = parseFloat(starMatch[1]);
-
-        if (title.includes('composition') || title.includes('comp')) {
-          const methodMatch = content.match(/(rgb[_ ]?only|lrgb|pixelmath[_ ]?l|synth(?:etic)?[_ ]?l)/i);
-          if (methodMatch) learned.composition_method = methodMatch[1].toLowerCase().replace(/\s+/g, '_');
+        await composeCore(ctx, { megaPath, specPath: corePath, outPath: mergedPath, log: (m) => console.log(m) });
+        const verdict = await judgeAB(ctx, { megaPath, mergedPath, profile, log: (m) => console.log(m) });
+        if (verdict.winner === 'merged') {
+          finalSelection = { ...finalSelection, variant_path: mergedPath, variant_id: `${finalSelection.variant_id || 'variant'}+core` };
+          exportSource = 'core-specialist merge (A/B win)';
+          console.log('  C-tier: MERGE wins the A/B — exporting the core-grafted result.');
+          if (opts.postPassOnly) { try { store.writeFinalSelection({ ...finalSelection, merged_from: megaPath }); } catch (e) { console.log(`  final-selection repoint failed: ${e.message}`); } }
+        } else {
+          console.log('  C-tier: mega-winner kept (merge did not beat it).');
         }
-
-        const blendMatch = content.match(/(?:screen[_ ]?)?blend[_ ]?strength[=: ]*(\d+\.?\d*)/i);
-        if (blendMatch) learned.screen_blend_strength = parseFloat(blendMatch[1]);
-
-        const lightnessMatch = content.match(/lightness[=: ]*(\d+\.?\d*)/i);
-        if (lightnessMatch) learned.lrgb_lightness = parseFloat(lightnessMatch[1]);
-
-        const satMatch = content.match(/(?:lrgb[_ ])?saturation[=: ]*(\d+\.?\d*)/i);
-        if (satMatch) learned.lrgb_saturation = parseFloat(satMatch[1]);
       }
+      await ctx.pjsr(`var ws=ImageWindow.windows;for(var i=0;i<ws.length;i++){ws[i].forceClose();} 'ok';`);
+    } catch (e) {
+      console.log(`  C-tier core-specialist post-pass error (keeping mega-winner): ${e.message}`);
     }
-  }
-
-  if (Object.keys(learned).length > 0) {
-    profile.learned_overrides = { ...profile.learned_overrides, ...learned };
-    profile.learned_overrides._lastUpdated = new Date().toISOString();
-    profile.learned_overrides._runId = store.runId;
-    fs.writeFileSync(profilePath, JSON.stringify(profiles, null, 2) + '\n');
-    console.log(`  Profile learning: updated "${classification}" with ${Object.keys(learned).length} param(s): ${Object.keys(learned).join(', ')}`);
-  } else {
-    console.log('  Profile learning: no extractable params from this run');
-  }
+  return { finalSelection, exportSource };
 }
 
-// ============================================================================
-// Winning parameter extraction (same as orchestrator.mjs)
-// ============================================================================
-function extractWinningParams(classification) {
-  const memDir = path.join(home, '.pixinsight-mcp', 'agent-memory');
-  const results = [];
-
-  // Check all agent memory files
-  for (const agentFile of ['luminance_detail', 'composition', 'rgb_cleanliness', 'star_policy', 'ha_integration']) {
-    const memFile = path.join(memDir, `${agentFile}.json`);
-    if (!fs.existsSync(memFile)) continue;
-
-    const entries = JSON.parse(fs.readFileSync(memFile, 'utf-8'));
-    const winners = entries
-      .filter(e => e.tags?.includes('winning_param') &&
-                   (e.tags?.includes(classification) || e.title?.toLowerCase().includes(classification.replace('_', ' '))))
-      .reverse();
-
-    const seen = new Set();
-    for (const w of winners) {
-      const key = w.tags?.find(t => t !== classification && t !== 'winning_param') || w.title;
-      if (!seen.has(key)) {
-        seen.add(key);
-        results.push(`- [${agentFile}] **${w.title}**: ${w.content.split('\n')[0]}`);
-      }
-    }
+/**
+ * --approve: copy the exported final XISF to a durable per-class location and append an
+ * 'approved' entry to agents/calibration/approved-images.json (so the back-test registry
+ * does not rot when old runs are pruned). Also repoints this run's ledger champions.
+ */
+function approveExport({ brief, store, xisfPath, variantPath, targetName, requestedRunId }) {
+  if (requestedRunId && requestedRunId !== store.runId && `run_${requestedRunId}` !== store.runId && !String(store.runId).includes(requestedRunId)) {
+    console.log(`  --approve ${requestedRunId}: does not match current run ${store.runId} — not approving.`);
+    return;
   }
-
-  return results.length > 0
-    ? results.join('\n')
-    : 'No winning parameters found for this classification. This is the first run.';
+  const classification = brief.target.classification;
+  const runId = String(store.runId);
+  const shortRun = runId.replace(/^run_\d{4}-\d{2}-\d{2}_/, '');
+  const dir = path.join(home, '.pixinsight-mcp', 'approved', classification);
+  fs.mkdirSync(dir, { recursive: true });
+  const dest = path.join(dir, `${String(targetName).replace(/[^A-Za-z0-9_.-]/g, '_')}_${shortRun}.xisf`);
+  fs.copyFileSync(xisfPath, dest);
+  const regPath = path.join(__dirname, '..', 'calibration', 'approved-images.json');
+  const reg = fs.existsSync(regPath) ? JSON.parse(fs.readFileSync(regPath, 'utf-8')) : { entries: [] };
+  reg.entries = (reg.entries || []).filter(e => e.path !== dest);
+  reg.entries.push({
+    id: `${String(targetName).replace(/[^A-Za-z0-9_]/g, '_')}_${shortRun}`,
+    path: dest,
+    sourceVariantPath: variantPath,
+    classification,
+    narrowband: !!brief.dataDescription?.narrowband,
+    starless: !!brief.dataDescription?.starless,
+    verdict: 'approved',
+    source: `giga-run --approve (${runId}), ${new Date().toISOString()}`,
+    notes: ''
+  });
+  fs.writeFileSync(regPath, JSON.stringify(reg, null, 2) + '\n');
+  const n = repointChampions(ledgerKey(brief), runId, variantPath, dest);
+  console.log(`  APPROVED: ${dest} (registry updated; ${n} champion(s) repointed)`);
 }
 
-main().catch(err => {
+main().catch(async err => {
   console.error('FATAL:', err);
+  try { if (_currentStore) await writeRunArtifacts(_currentStore, 'crashed', { agentRuns: [], failReason: `FATAL: ${err && err.message}` }); } catch {}
   process.exit(1);
 });

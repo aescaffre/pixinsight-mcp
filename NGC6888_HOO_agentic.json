@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "name": "NGC 6888 Crescent Nebula HOO — starless bicolor palette (example config: replace the paths with your masters)",
+  "files": {
+    "sourceFolder": "/path/to/NGC6888/masters",
+    "Ha": "/path/to/NGC6888/masters/masterLight_FILTER-H_mono.xisf",
+    "O": "/path/to/NGC6888/masters/masterLight_FILTER-O_mono.xisf",
+    "palette": "HOO",
+    "starless": true,
+    "narrowband": {
+      "palette": "hoo"
+    },
+    "outputDir": "/path/to/NGC6888/agentic",
+    "targetName": "NGC6888"
+  }
+}

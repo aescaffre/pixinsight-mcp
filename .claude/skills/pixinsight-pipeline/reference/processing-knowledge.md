@@ -184,3 +184,63 @@
 5. **Color**: Natural emission colors, no over-saturation?
 6. **Noise**: Controlled without smearing detail?
 7. **Overall feel**: "Observed" not "processed"?
+
+## Star contract (WI-04, 2026-10-28)
+- One source per class: `processing-profiles.json` `stars.*` (prominence, stretch_midtone/iterations, screen_blend_strength, core_threshold_low/high, min_strength_fraction). The classifier derives `starProminence`/`starPresence` from it; the giga prompt renders a single STAR CONTRACT block; the finish gate reads `STAR_CONTRAST[prominence]` from gate-contract.mjs.
+- `star_protected_blend` resolves thresholds agent > profile > default (0.60/0.82/0.10) and reports the source; `screen_blend_strength` is a cap for ANY class that defines it (galaxy_spiral 0.95 now; the user asked for MORE prominent galaxy stars). Clamps print `PROFILE CAP (<class>): ...` and are traced as `profileCaps`.
+- PNe defaults 0.75/0.95/0.50 (M27 1a3cc341, M97 e8834489); emission 0.55/0.75/0.10 (NGC7635 6d0b2048, bc93d9d1); reflection 0.55/0.70/0.0.
+- Prep stars are LINEAR (stats.stars.median ~1e-5..1e-4). The agent must call stretch_stars first; non-linear input is refused.
+
+## Core contrast gate: relC advisory for structured cores (WI-17)
+- `measureCoreContrast`: low relContrast (< rel_contrast_hard) is only a warning when the core is demonstrably structured (coreStructFrac >= 0.80, haloFrac <= 0.03, not white-burnt). White burn always blocks. Profile-supplied `min_struct_frac`/`max_halo_frac` remain blocking (do not re-introduce the f3a5a44 starvation).
+- Built-in 0.80/0.03 calibrated in 7ae7ef8 (pass: iter03 97.5/0.3, best-of-both 95.7/0.5; fail: flat-core 45.7/12.3, blown-halo 81.9/6.1).
+- Caveat: struct uses an absolute grad>0.012 test and can count noise on a 60 MP galaxy bulge. galaxy_* `core_burn.rel_contrast_hard` 0.10 is PROVISIONAL until backtest-gates.mjs runs on approved galaxy images.
+
+## Detail metric (WI-18): credible, star-rejected, baseline-relative
+- `measure_subject_detail` samples ALL subject blocks (stratified, <=50), rejects star windows (3x3 max > blockMedian+0.25 or any pixel > 0.85) and star-dominated blocks, and measures a self-calibrated noise floor (Sobel energy of the darkest background blocks, same kernel/stride).
+- Outputs: `detailRaw` (= legacy `detailScore`, hard gate 0.001 unchanged), `detailCredible` (mean of max(0, E_block - E_noise); optimise this), `detailWeber` (E / blockMedian^2; used for gain), `noiseDominated` (raw/credible > 2.5 = grain, not structure).
+- Prep baseline: `brief._baselineDetail = {rgb, l, max}` + `prep-metrics.json` in the run dir (copied on `--base-run`). Finish compares gain = weber(final or pre-star-blend starless) / baseline (`max` for LRGB, `rgb` for RGB-only; ratio, 1.28 = +28%) with profile `detail.max_gain` - ADVISORY, all values PROVISIONAL (galaxy_spiral 1.6, edge_on 2.0, emission 3.0, reflection 2.0, cluster 1.5). Promote to blocking only after the back-test harness measures the confirmed NGC3628 approved image (+28% must pass) and PACMAN LIFT5; M81 v11 (+76%) implies galaxy_spiral needs >= 1.9.
+- `check_sharpness` now delegates to this measurement (ROI supported); the ledger 'detail' dimension uses detailCredible*100 + contrast*0.1.
+- Not yet validated against live PixInsight data (PI was unavailable).
+
+## Ledger and cross-run learning (WI-19)
+- Ledger key = classification for broadband, `classification@workflow` for narrowband (e.g. `emission_nebula@SHO`); `ledgerKey(brief)` in agents/ledger.mjs.
+- `save_variant` takes `stage` (base, branch_detail, branch_ifn, branch_color, branch_stars, branch_palette, branch_core, composition, final) and `approach` (token array). Only composition/final variants count as "tried"; runs without a final-selection record nothing.
+- Champions carry `scoreVersion` (CHAMPION_SCORE_VERSION=2); mismatched champions are ignored and replaced. ifn_visibility uses measured dust (coverage*2 + meanSat + 0.25*min(fieldP95,0.5)) when available; weights are PROVISIONAL until back-tested on NGC7023 iter03 / best-of-both vs the regressed 4bbeec17 output (needs PixInsight).
+- Removed: updateProcessingProfile / `learned_overrides` and the "Winning Parameters from Previous Runs" prompt block (recall_memory returns the same buckets). A passing finish saves numeric params_summary keys as hierarchical-memory entries tagged `auto`,`finish_params` (not `winning_param`).
+
+### Star-field metric (WI-16, ADVISORY, provisional)
+- `measureStarField` (agents/ops/quality-gates.mjs; attached as `starField` on `check_star_quality`): ES5 scan, no StarDetector. Hill-climbs to the peak, skips saturated plateaus (>0.98), rejects nebula knots (neighbours at +/-8 px, or +/-FWHM for bloated stars, >= 0.6x peak above the 6-8 FWHM annulus background), local-background half-max walk up to 31 px (the old r<=10 walk silently dropped bloated stars), second-moment ellipticity (SNR>20, blends rejected), 3x3-mean colour diversity, centre/edge split (centre = 0.55 x half-diagonal, override `gates.stars.center_radius_px`), absolute prominence (peak - localBg).
+- `star_protected_blend` records `brief._starPeaks` from the linear star layer; finish re-measures those coordinates on the final view.
+- BLOCKING gates are unchanged: whole-image `medianPeak/bgMedian` contrast and median FWHM (old walk). Note the contrast gate structurally conflicts with the 0.65 rolloff knee at target_median >= 0.20. Ellipticity 0.25, dark ring 5% of prominence, FWHM advisory 8 px are provisional until `scripts/backtest-gates.mjs` confirms them; the galaxy FWHM exemption stays until NGC891/M81 champions pass with knot rejection.
+- The ledger champion record stores the measured star field (`rawMetrics.stars.starField`).
+
+## PNe HDRMT (prompt consistency pass, WI-09)
+The old "global unmasked inverted HDRMT (4 layers)" mandate for planetary nebulae is gone. Validated option (a TRY in the branch phase): luminance mask (clip_low=0.10, blur=10, gamma=2.0) -> donut `$T*(1-$T)*4` -> apply_mask -> run_hdrmt (inverted, 5 layers, 1 iteration) -> remove_mask -> check_ringing (0 oscillations) + measure_subject_detail. 7 layers is rejected. Keep only if detail rises and the 2x contrast gate still passes (M97 +173%; the M27 v10 winner used no HDRMT). Five rules replace the old v7-v12 failure list: no clamp = core burn; one global clamp = halo loss; HDRMT through a small-blur core zone mask = rings; clamp-before-stars then screen blend re-burns (clamp after the blend or use star_protected_blend); discrete zone-mask clamping = dark rims (use continuous_clamp).
+
+## compare_to_reference metrics (WI-21)
+- `bg_cast_delta`: dE on a*b* between the two images' dark-cell median RGB (Lab converted directly). `color_emd` is a deprecated alias (bg_cast_delta/100); the old residual-then-Lab version was ~0 by construction and never discriminated, so it no longer blocks.
+- `palette_l1` (0..2): L1 distance of hue-family fractions over subject pixels with HSV saturation >= 0.08 (`sat_frac_*` reports the saturated fraction). ADVISORY above 0.35.
+- `lab_emd`: chroma-only sliced-Wasserstein (24x24 a*b* histogram over [-60,60], 8 angles, own dark-cell bg subtracted, <=50k subject pixels). L* excluded on purpose so a differently stretched user PNG does not dominate. ADVISORY above 12. PROVISIONAL: promote only after backtest (pacman_lift5 vs itself ~0, vs pacman_iter01 above thresholds, ngc7023_best_of_both vs ngc7023_iter03 passing).
+- `ms_ssim`: both images resampled to ~1500 px wide (MitchellNetravali); skipped when aspect ratios differ >1% (then `lum_cdf_dist`, a 9-decile subject luminance distance, is the geometry-free structure proxy). Peak extra PI windows: 2 (reference + temp target duplicate), all closed in finally.
+- Finish Gate 12 blocks only on `coverage_delta` > 0.30.
+
+## Prep BXT sharpen / Seti HDR are profile-driven (WI-23)
+- `deterministic-prep.mjs` reads `processingProfile.tools.BXT` ({correct_only, sharpen_nonstellar}); the sharpen step (RGB, L, Ha) runs only when `correct_only === false`, strength default 0.70. `stretch.hdr_amount`/`hdr_knee` (default 0.25/0.35) feed `setiStretch`.
+- All 13 classes ship `correct_only:false, sharpen_nonstellar:0.70`, hdr 0.25/0.35 = the baseline every approved image was produced with. PSF study (2026-10-28) found correct-only most faithful; lower per-class values must be back-tested on the approved image before shipping (see `_bxt_calibration`).
+- Prep records `result.applied` [{step, view, params}]; giga-run prints it as "Prep recipe already applied (do not repeat)". Running `run_bxt` with correct_only=false afterwards is a double-sharpen.
+
+## WI-26 advisory metrics (2026-10-28, all ADVISORY until backtest-gates calibrates them)
+- **Banding (finish Gate 13)**: `measure_color_gradient` now also returns `band {axis,index,amp,channel,stepMax}` (per column/row MEAN chroma over background cells, least-squares line removed: a ramp = gradient, amp~0; a localized step = band) plus `cornerLumDelta`/`cornerChroma` (4-corner medians). Needs >= `min_bg_cells` (12) background cells else `insufficientBg`. Profile `gradient:{warn:0.012, block:0.020, band_block:null, min_bg_cells:12, blocking:false}`; warnings unless `blocking:true`. Fix a band on the FINAL image: `mask_ops` outer-field mask (inverted) then `run_per_channel_abe` poly_degree=1 with `mask_view_id` (ABE ignores an applied mask; the tool blends back via PixelMath), or redo the last lift_dust/inject_l_ifn with a gentler taper. Never re-run the linear gradient stage. Calibration images: ngc7023_best_of_both (green band at left) vs ngc7023_iter03 (clean).
+- **Chroma noise / mottle**: `measure_chroma_noise` (6x6 patches, clean/dust bands; Ca=R-L, Cb=B-L; chromaNoise, chromaToLumNoise, mottle16, mottle48; no sigma^2/64 correction because NXT correlates noise). Profile `noise:{max_chroma_to_lum:null,max_mottle48:null}` - warnings only when set. Remedy: chroma_smooth sigma 6-8 through the halo/dust mask or lift less upstream; never global desaturation.
+- **Highlight-texture baseline**: prep stores `brief._roi` + `brief._baselineTexture {rgb,l,ha}` (+ `baseline-texture.json`); star_protected_blend stashes `brief._preBlendTexture` of the STARLESS input. Finish no longer opens any variant XISF; retention thresholds come from profile `highlight_texture.min_retention/warn_retention`; baseline-relative failures are warnings unless `highlight_texture.blocking:true`.
+- **PSF field map**: `measure_psf_field` (LINEAR data; 2x binned detection + full-res moments, one temp window closed in finally) gives per-cell FWHM/ellipticity/orientation/skew, L/R and T/B asymmetry, verdict (uniform | radial coma | asymmetric - check tilt/backfocus at ratio >= 1.5) and a `crop_box` suggestion for the USER's crop (never crop the starless deliverable). Prep records before/after BXT-correct maps (`brief._psfPrep`). Not a gate.
+
+
+## Background-floor gate (2026-10-29, user-approved) and what the "crushed to black" measurements showed
+- New finish gate `background_floor` (tool `check_background_floor`, metric `measureBackgroundFloor`: 64-px background blocks, sky level = median of their medians, black fraction = blocks < 0.015). Blocking where `processing-profiles.json` carries calibrated `background.min_level` / `max_black_fraction` (emission 0.050, galaxy 0.045, reflection 0.062, PNe 0.032; black <= 5%), advisory elsewhere.
+- Measured facts: approved skies sit at 0.056-0.081 (M97 v8 0.106). The 2026-10-29 PACMAN rerun was genuinely darker (0.044) and fails the new gate; the galaxy reruns were NOT darker (NGC4490 v8 0.068, NGC3628 v8 0.079) — their "flat pale" look is LOW SATURATION (p90S 0.30 vs 0.46 for the accepted NGC4490 RGB), so a crushed-sky gate cannot catch it. Candidate next gate: a per-class saturation FLOOR (approved galaxies 0.37-0.46).
+- `star_retention` (star density) stays ADVISORY: the detector threshold (bg + 5 MAD) adapts to each image's noise so counts are not comparable across processings, and `colorDiversity` reads 0 on the accepted NGC4490 RGB because its 30 brightest stars are saturated white. Fix the detector (fixed absolute threshold, exclude saturated stars) before calibrating.
+
+## Borrowed / externally integrated masters (2026-10-29)
+Config flags in `files`: `pixelScale` (arcsec/px seed for the plate-solve fallback; else derived from FOCALLEN/XPIXSZ), `forceAlign: true` (StarAlignment of every channel to R even when dimensions match — prep otherwise skips alignment and separately integrated channels keep red/cyan star fringes), `distortionCorrection: true` (StarAlignment distortion model). Prep's SPCC now runs with generateGraphs/StarMaps/TextFiles=false: the graph WebView failed on a 104 MP image and failed the whole process.

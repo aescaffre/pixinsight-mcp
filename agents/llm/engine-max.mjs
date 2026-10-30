@@ -9,15 +9,30 @@
 // 4. Claude Code handles the tool loop automatically
 // 5. Returns JSON result
 // ============================================================================
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 import { buildToolSet } from './tools.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MCP_SERVER_PATH = path.join(__dirname, 'mcp-agent-tools.mjs');
+
+const CLAUDE_BIN = process.env.PIX_CLAUDE_BIN || 'claude';
+
+// Probe once per process whether the CLI supports --append-system-prompt-file.
+let _promptFileFlagSupported = null;
+function supportsPromptFileFlag() {
+  if (_promptFileFlagSupported !== null) return _promptFileFlagSupported;
+  try {
+    const r = spawnSync(CLAUDE_BIN, ['--help'], { encoding: 'utf-8', timeout: 15000, stdio: ['ignore', 'pipe', 'pipe'] });
+    const txt = (r.stdout || '') + (r.stderr || '');
+    _promptFileFlagSupported = /append-system-prompt-file|append-system-prompt\[-file\]/.test(txt);
+  } catch { _promptFileFlagSupported = false; }
+  return _promptFileFlagSupported;
+}
 
 /**
  * MaxAgent — runs a Claude Code subprocess for each agent.
@@ -45,6 +60,16 @@ export class MaxAgent {
     this.store = opts.store;
     this.brief = opts.brief;
     this.model = opts.model;
+    this.effort = opts.effort;
+    this.fallbackModel = opts.fallbackModel;
+    this.timeoutMs = opts.timeoutMs ?? 120 * 60 * 1000;
+    this.extraArgs = opts.extraArgs || [];   // WI-07b: e.g. ['--resume', sessionId]
+    this.cwd = opts.cwd || process.cwd();
+    this.extraEnv = opts.env || {};
+    const KNOWN_OPTS = new Set(['extraArgs', 'cwd', 'env', 'systemPrompt', 'agentName', 'maxTurns', 'budget', 'store', 'brief', 'model', 'effort', 'fallbackModel', 'timeoutMs']);
+    for (const k of Object.keys(opts)) {
+      if (!KNOWN_OPTS.has(k)) console.warn(`  [${name}][max] WARNING: unknown MaxAgent option "${k}" is ignored`);
+    }
     this.startTime = null;
     this.finishResult = null;
 
@@ -104,31 +129,70 @@ export class MaxAgent {
     const args = [
       '-p', promptText,
       '--output-format', 'json',
-      '--append-system-prompt', this.systemPrompt,
       '--mcp-config', mcpConfigPath,
       '--strict-mcp-config',
       '--allowedTools', allowedTools.join(','),
+      // CONTAINMENT (2026-10-29): under bypassPermissions, --allowedTools does NOT remove the
+      // CLI's built-in tools. The gradient agent used Bash/Edit/Write to modify pipeline
+      // source, skill docs and the user's memory mid-run and ran its own PJSR probe that
+      // crashed PixInsight. Processing agents get MCP tools + Read only.
+      '--disallowedTools', ['Bash', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Agent', 'Task', 'WebFetch', 'WebSearch', 'TodoWrite', 'KillShell', 'BashOutput'].join(','),
       '--permission-mode', 'bypassPermissions',
     ];
 
-    if (this.model) {
-      args.push('--model', this.model);
+    // System prompt: file when the CLI supports it (keeps argv small), else inline argv.
+    let promptFile = null;
+    if (supportsPromptFileFlag() && this.store?.baseDir) {
+      try {
+        const pdir = path.join(this.store.baseDir, 'prompts');
+        fs.mkdirSync(pdir, { recursive: true });
+        promptFile = path.join(pdir, `system-${this.agentName}-${Date.now()}.md`);
+        fs.writeFileSync(promptFile, this.systemPrompt || '');
+        args.push('--append-system-prompt-file', promptFile);
+      } catch { promptFile = null; }
     }
+    if (!promptFile) args.push('--append-system-prompt', this.systemPrompt);
+
+    if (this.model && this.model !== 'inherit') args.push('--model', this.model);
+    if (this.effort) args.push('--effort', this.effort);
+    if (this.fallbackModel) args.push('--fallback-model', this.fallbackModel);
+    // Outer safety net only: CLI turns count text/Read/blocked turns too.
+    args.push('--max-turns', String(Math.ceil(this.maxTurns * 1.5)));
+    // WI-07b: known session id (even if stdout is truncated). A --resume run keeps the resumed id.
+    const resumeIdx = this.extraArgs.indexOf('--resume');
+    this.sessionId = resumeIdx >= 0 ? this.extraArgs[resumeIdx + 1] : crypto.randomUUID();
+    if (resumeIdx < 0) args.push('--session-id', this.sessionId);
+    args.push(...this.extraArgs);
+    this._args = args;
+    this._promptHash = crypto.createHash('sha256').update(this.systemPrompt || '').digest('hex').slice(0, 16);
 
     this._log(`Spawning claude subprocess (${this._toolNames.length} MCP tools)...`);
 
     return new Promise((resolve, reject) => {
-      const spawnEnv = { ...process.env };
+      const spawnEnv = { ...process.env, ...this.extraEnv };
       delete spawnEnv.ANTHROPIC_API_KEY;  // Force OAuth/Max subscription auth
       this._log(`[DEBUG] Args count: ${args.length}, system prompt length: ${this.systemPrompt?.length}`);
-      const claude = spawn('claude', args, {
-        cwd: process.cwd(),
+      // stdin ignored: avoids the 3 s "no stdin data" stall of claude -p.
+      const claude = spawn(CLAUDE_BIN, args, {
+        cwd: this.cwd,
         env: spawnEnv,
-        timeout: 120 * 60 * 1000, // 2 hour max for giga pipeline
+        timeout: this.timeoutMs,
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
 
       let stdout = '';
       let stderr = '';
+
+      // WI-07b: the MCP server writes <store.baseDir>/CRASH.json when the PI process dies. Poll it and kill the CLI.
+      const crashFile = this.store?.baseDir ? path.join(this.store.baseDir, 'CRASH.json') : null;
+      let killedForCrash = false;
+      const crashPoll = crashFile ? setInterval(() => {
+        if (!killedForCrash && fs.existsSync(crashFile)) {
+          killedForCrash = true;
+          this._log('!!! CRASH.json detected - PixInsight crashed; sending SIGTERM to the agent');
+          try { claude.kill('SIGTERM'); } catch {}
+        }
+      }, 10_000) : null;
 
       claude.stdout.on('data', (data) => {
         stdout += data.toString();
@@ -140,7 +204,8 @@ export class MaxAgent {
         stderr += data.toString();
       });
 
-      claude.on('close', (code) => {
+      claude.on('close', (code, signal) => {
+        if (crashPoll) clearInterval(crashPoll);
         const elapsed = Date.now() - this.startTime;
         this._log(`Completed in ${Math.round(elapsed / 1000)}s (exit ${code})`);
 
@@ -154,11 +219,12 @@ export class MaxAgent {
         this._log(`[DEBUG] MCP config: ${mcpConfigPath}`);
         // try { fs.unlinkSync(mcpConfigPath); } catch {}
 
-        // Detect PixInsight crash from stderr
+        // WI-07b: crash = CRASH.json written by the MCP producer (no stderr-string heuristic)
         let crashError = null;
-        if (stderr.includes('BRIDGE_CRASH') || stderr.includes('PixInsight crashed') ||
-            stderr.includes('bridge timeout') || code === 77) {
-          crashError = { isCrash: true, message: `PixInsight bridge crash detected during ${this.name}` };
+        if (crashFile && fs.existsSync(crashFile)) {
+          let info = {};
+          try { info = JSON.parse(fs.readFileSync(crashFile, 'utf-8')); } catch {}
+          crashError = { isCrash: true, message: `PixInsight crashed during ${this.name}${info.tool ? ` (tool ${info.tool})` : ''}: ${info.message || ''}`.trim(), info };
         }
 
         // Parse JSON output
@@ -175,18 +241,49 @@ export class MaxAgent {
         // Extract finish info from the result
         this.finishResult = this._parseFinishResult(resultText);
 
+        const timedOut = signal === 'SIGTERM' && elapsed >= this.timeoutMs - 5000;
+        const maxTurnsHit = result?.subtype === 'error_max_turns';
+        if (timedOut) this._log(`!!! AGENT TIMED OUT after ${Math.round(elapsed / 1000)}s`);
+        if (maxTurnsHit) this._log('!!! AGENT HIT CLI MAX-TURNS');
+
+        // WI-07b: persist session info on every close
+        try {
+          if (this.store?.baseDir) {
+            const adir = path.join(this.store.baseDir, 'agents');
+            fs.mkdirSync(adir, { recursive: true });
+            fs.writeFileSync(path.join(adir, `${this.agentName}.json`), JSON.stringify({
+              sessionId: result?.session_id || this.sessionId, model: this.model || 'inherit',
+              num_turns: result?.num_turns ?? null, elapsedMs: elapsed, usage: result?.usage ?? null,
+              promptHash: this._promptHash, cwd: this.cwd, crashed: !!crashError, exitCode: code, signal,
+            }, null, 2));
+          }
+        } catch (e) { this._log(`agent session record skipped: ${e.message}`); }
+
         resolve({
           finishResult: this.finishResult,
           crashError,
+          timedOut,
+          maxTurnsHit,
+          exitCode: code,
+          signal,
           transcript: [{ role: 'assistant', type: 'text', content: resultText }],
           turnCount: result?.num_turns || 0,
           elapsedMs: elapsed,
-          sessionId: result?.session_id,
+          sessionId: result?.session_id || this.sessionId,
           usage: result?.usage,
+          model: this.model || 'inherit',
+          effort: this.effort,
+          actualModels: Object.keys(result?.modelUsage || {}),
+          modelUsage: result?.modelUsage,
+          num_turns: result?.num_turns,
+          duration_ms: result?.duration_ms,
+          subtype: result?.subtype,
+          is_error: result?.is_error,
         });
       });
 
       claude.on('error', (err) => {
+        if (crashPoll) clearInterval(crashPoll);
         // Clean up temp MCP config on error
         try { fs.unlinkSync(mcpConfigPath); } catch {}
         reject(err);
@@ -215,6 +312,7 @@ export class MaxAgent {
       serverArgs.push('');
     }
 
+    // argv[5] = maxTurns (MCP-side turn gate), argv[6] = model — pushed after brief path below
     // Write brief to a temp file and pass path
     if (this.brief) {
       const briefPath = path.join(tmpDir, `brief-${this.name}-${Date.now()}.json`);
@@ -225,6 +323,8 @@ export class MaxAgent {
     } else {
       serverArgs.push('');
     }
+
+    serverArgs.push(String(this.maxTurns), this.model || '');
 
     const config = {
       mcpServers: {
@@ -240,132 +340,11 @@ export class MaxAgent {
   }
 
   /**
-   * Parse the result text to extract finish/scoring information.
-   * Claude Code agents call the `finish` or `submit_scores` MCP tools,
-   * and the result text will contain the tool output.
-   *
-   * NOTE: With --output-format json, the `result` field is the assistant's
-   * conversational summary, NOT raw tool outputs. The assistant may paraphrase
-   * the finish tool's output, so we need multiple regex strategies.
+   * WI-25: stub. The <<FINISH_VIEW_ID>> marker no longer exists; the finish
+   * result is read from the artifact store (final-selection), not the CLI text.
    */
-  _parseFinishResult(text) {
-    if (!text) {
-      this._log('[_parseFinishResult] text is null/undefined — returning null');
-      return null;
-    }
-
-    // Debug: log first 800 chars of text being parsed so we can see the format
-    this._log(`[_parseFinishResult] Parsing text (${text.length} chars). First 800: ${text.slice(0, 800).replace(/\n/g, '\\n')}`);
-
-    // Strategy 0: Structured marker — <<FINISH_VIEW_ID=xxx>> injected by finish tool handler.
-    // This is the most reliable method: even if the LLM paraphrases the rest of the output,
-    // this exact tag may survive in the tool result text or the assistant's summary.
-    const markerMatch = text.match(/<<FINISH_VIEW_ID=(\w+)>>/);
-    if (markerMatch) {
-      this._log(`[_parseFinishResult] Strategy 0 matched (structured marker): view_id=${markerMatch[1]}`);
-      const rationaleMatch = text.match(/Rationale:\s*(.+?)(?:\n|$)/);
-      return {
-        type: 'finish',
-        view_id: markerMatch[1],
-        rationale: rationaleMatch?.[1] || text.slice(0, 500),
-      };
-    }
-
-    // Strategy 1: Exact tool output — "Finished (quality gates PASSED). Best: <view_id>"
-    const finishMatch = text.match(/Finished\b[^.]*\.\s*Best:\s*(\w+)/);
-    if (finishMatch) {
-      this._log(`[_parseFinishResult] Strategy 1 matched (exact tool output): view_id=${finishMatch[1]}`);
-      const rationaleMatch = text.match(/Rationale:\s*(.+?)(?:\n|$)/);
-      return {
-        type: 'finish',
-        view_id: finishMatch[1],
-        rationale: rationaleMatch?.[1] || text.slice(0, 500),
-      };
-    }
-
-    // Strategy 2: Agent says "Best: VIEW_ID" anywhere (common in summaries)
-    const bestMatch = text.match(/\bBest:\s*[`'"]?(\w+)[`'"]?/i) ||
-                      text.match(/\bbest result[:\s]+[`'"]?(\w+)[`'"]?/i) ||
-                      text.match(/\bwinner[:\s]+[`'"]?(\w+)[`'"]?/i);
-    if (bestMatch) {
-      this._log(`[_parseFinishResult] Strategy 2 matched (Best/winner pattern): view_id=${bestMatch[1]}`);
-      return {
-        type: 'finish',
-        view_id: bestMatch[1],
-        rationale: text.slice(0, 500),
-      };
-    }
-
-    // Strategy 3: Agent mentions "finish" tool with view_id parameter
-    // e.g., "I called finish with view_id COMP_balanced" or "finish(view_id='COMP_balanced')"
-    const finishCallMatch = text.match(/finish\b.*?\bview[_\s]?id[:\s=]+[`'"]*(\w+)/i) ||
-                            text.match(/\bfinish\b.*?[`'"](\w+)[`'"]/i);
-    if (finishCallMatch) {
-      this._log(`[_parseFinishResult] Strategy 3 matched (finish call pattern): view_id=${finishCallMatch[1]}`);
-      return {
-        type: 'finish',
-        view_id: finishCallMatch[1],
-        rationale: text.slice(0, 500),
-      };
-    }
-
-    // Strategy 4: view_id mentioned in various forms
-    const viewMatch = text.match(/view[_\s]?id[:\s]+[`'"]*(\w+)/i);
-    if (viewMatch) {
-      this._log(`[_parseFinishResult] Strategy 4 matched (view_id pattern): view_id=${viewMatch[1]}`);
-      return {
-        type: 'finish',
-        view_id: viewMatch[1],
-        rationale: text.slice(0, 500),
-      };
-    }
-
-    // Strategy 5: Look for "final image/result is VIEW_ID" or "finalized VIEW_ID"
-    // Only match identifiers that look like PixInsight view IDs (contain underscore,
-    // start with uppercase, or use known prefixes like variant_, COMP_, FINAL_).
-    // This avoids matching common English words like "safely", "successfully", etc.
-    const finalMatch = text.match(/\bfinal(?:ized?)?\s+(?:image|result|view|output)\s+(?:is\s+)?[`'"]*([A-Z]\w*_\w+|variant_\w+|\w+_\d+)[`'"]?/i);
-    if (finalMatch) {
-      this._log(`[_parseFinishResult] Strategy 5 matched (finalized pattern): view_id=${finalMatch[1]}`);
-      return {
-        type: 'finish',
-        view_id: finalMatch[1],
-        rationale: text.slice(0, 500),
-      };
-    }
-
-    // Strategy 6: Look for COMP_ or FINAL_ prefixed view names (common naming convention)
-    const compMatch = text.match(/\b(COMP_\w+)\b/) ||
-                      text.match(/\b(FINAL_\w+)\b/) ||
-                      text.match(/\b([A-Za-z]\w*_FINAL)\b/);
-    if (compMatch) {
-      this._log(`[_parseFinishResult] Strategy 6 matched (COMP_/FINAL_ naming): view_id=${compMatch[1]}`);
-      return {
-        type: 'finish',
-        view_id: compMatch[1],
-        rationale: text.slice(0, 500),
-      };
-    }
-
-    // Look for submit_scores output (critic agents)
-    const verdictMatch = text.match(/Verdict:\s*(accept|reject)/i);
-    if (verdictMatch) {
-      this._log(`[_parseFinishResult] Matched verdict: ${verdictMatch[1]}`);
-      const feedbackMatch = text.match(/feedback[:\s]+['"]*(.+?)['"]*(?:\n|$)/i);
-      return {
-        type: 'scores',
-        verdict: verdictMatch[1].toLowerCase(),
-        feedback: feedbackMatch?.[1] || '',
-      };
-    }
-
-    // Fallback: no pattern matched
-    this._log(`[_parseFinishResult] No pattern matched — returning null view_id. Last 300 chars: ${text.slice(-300).replace(/\n/g, '\\n')}`);
-    return {
-      type: 'finish',
-      view_id: null,
-      rationale: text.slice(0, 500),
-    };
+  _parseFinishResult(_text) {
+    return null;
   }
 
   getTranscript() { return []; }

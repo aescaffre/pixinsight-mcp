@@ -45,7 +45,7 @@ async function getExecSync() {
   return _execSync;
 }
 
-async function isAlive() {
+export async function isAlive() {
   try {
     const execSync = await getExecSync();
     const out = execSync("ps aux | grep '[P]ixInsight.app' | wc -l", { timeout: 5000 }).toString().trim();
@@ -64,17 +64,52 @@ export function createBridgeContext(opts = {}) {
   const resDir = opts.resDir || DEFAULT_RES_DIR;
   const logFn = opts.log || console.log;
 
-  // Clean up stale results from previous crashed sessions (older than 5 min)
+  // Clean up stale results AND stale commands from previous crashed sessions (older than 5 min).
+  // Command files survive a PixInsight crash and the next watcher replays them at startup
+  // (seen 2026-10-28: a compare script from a crashed session ran again 7 min later in the
+  // fresh session). Never let a dead session's command run in the next one.
   try {
     const cutoff = Date.now() - 5 * 60_000;
-    for (const f of fs.readdirSync(resDir)) {
-      const fp = path.join(resDir, f);
-      const stat = fs.statSync(fp);
-      if (stat.mtimeMs < cutoff) { try { fs.unlinkSync(fp); } catch {} }
+    for (const dir of [resDir, cmdDir]) {
+      for (const f of fs.readdirSync(dir)) {
+        if (!f.endsWith('.json')) continue;
+        const fp = path.join(dir, f);
+        const stat = fs.statSync(fp);
+        if (stat.mtimeMs < cutoff) { try { fs.unlinkSync(fp); } catch {} }
+      }
     }
   } catch {}
 
+  // Wait for the watcher's deferred GC warm-up (see pixinsight-mcp-watcher.js) before the
+  // first real command of this context: a fresh session that opens a 60 MP image before
+  // its first garbage collection aborts PixInsight 1.9.5. Old watchers write no state
+  // file: proceed after a short grace period. Pings (list_open_images) never wait.
+  let warmChecked = false;
+  async function waitForWarmWatcher() {
+    if (warmChecked) return;
+    warmChecked = true;
+    const stateFile = path.join(cmdDir, '..', 'watcher-state.json');
+    const t0 = Date.now();
+    let announced = false;
+    while (Date.now() - t0 < 150_000) {
+      let state = null;
+      try { state = JSON.parse(fs.readFileSync(stateFile, 'utf-8')); } catch {}
+      if (!state) {
+        if (Date.now() - t0 > 5_000) { logFn('[bridge] no watcher-state.json (older watcher) — proceeding without GC warm-up'); return; }
+      } else if (state.warmedUp) {
+        if (announced) logFn('[bridge] watcher GC warm-up confirmed');
+        return;
+      } else if (!announced) {
+        logFn('[bridge] waiting for the watcher GC warm-up (runs ~45 s after watcher start, with no image open)...');
+        announced = true;
+      }
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    logFn('[bridge] watcher warm-up not confirmed after 150 s — proceeding (close all images and restart the watcher if PixInsight aborts)');
+  }
+
   async function send(tool, proc, params, sendOpts) {
+    if (tool !== 'list_open_images') await waitForWarmWatcher();
     return new Promise(async (resolve, reject) => {
       const id = crypto.randomUUID();
       const cmd = {
@@ -83,6 +118,25 @@ export function createBridgeContext(opts = {}) {
         executeMethod: sendOpts?.exec || 'executeGlobal',
         targetView: sendOpts?.view || null
       };
+      // Crash forensics: PixInsight 1.9.5 aborts (uncaught C++ exception, EXC_BAD_ACCESS/SIGABRT)
+      // on some scripted calls on 60 MP images; the crash report has no symbols, so record the
+      // last command sent. After a crash, read ~/.pixinsight-mcp/bridge/last-command.json.
+      try {
+        const script = typeof params?.script === 'string' ? params.script : (typeof params?.code === 'string' ? params.code : undefined);
+        const entry = {
+          id, timestamp: cmd.timestamp, tool, process: proc, targetView: cmd.targetView,
+          paramKeys: params && typeof params === 'object' ? Object.keys(params) : [],
+          scriptHead: script ? script.slice(0, 600) : undefined,
+        };
+        fs.writeFileSync(path.join(cmdDir, '..', 'last-command.json'), JSON.stringify(entry, null, 2));
+        // Rolling log of the last 30 commands: a post-crash list_open_images must not
+        // overwrite the call that actually crashed PixInsight (it did on 2026-10-29).
+        const logPath = path.join(cmdDir, '..', 'command-log.jsonl');
+        let lines = [];
+        try { lines = fs.readFileSync(logPath, 'utf-8').split('\n').filter(Boolean); } catch {}
+        lines.push(JSON.stringify(entry));
+        fs.writeFileSync(logPath, lines.slice(-30).join('\n') + '\n');
+      } catch {}
       fs.writeFileSync(path.join(cmdDir, id + '.json'), JSON.stringify(cmd, null, 2));
       let att = 0;
       const poll = setInterval(async () => {
@@ -102,7 +156,10 @@ export function createBridgeContext(opts = {}) {
           const alive = await isAlive();
           if (!alive) {
             clearInterval(poll);
-            reject(new BridgeCrashError('PixInsight process not found — it may have crashed. Restart PixInsight and the watcher, then resume with --resume --run-id <runId>'));
+            const err = new BridgeCrashError('PixInsight process not found — it crashed. STOP calling tools and end your turn; the parent will offer --resume-agent.');
+            self.crashed = true;
+            try { opts.onCrash?.(err, { tool }); } catch {}
+            reject(err);
           }
         }
         if (att > 2400) { clearInterval(poll); reject(new Error('Timeout: ' + tool)); }
@@ -165,7 +222,7 @@ export function createBridgeContext(opts = {}) {
             await pjsr(`var w = ImageWindow.windowById('${viewId}'); if (!w.isNull) w.purge();`);
           }
         }
-        await pjsr('gc(); processEvents();');
+        await pjsr('processEvents();');
         const out2 = execSync("ps aux | grep '[P]ixInsight.app' | awk '{s+=$6} END{print s}'").toString().trim();
         const memMB2 = Math.round(parseInt(out2, 10) / 1024);
         logFn(`  [MEMORY] After purge: ${memMB2}MB`);
@@ -179,5 +236,20 @@ export function createBridgeContext(opts = {}) {
 
   function log(msg) { logFn(msg); }
 
-  return { send, pjsr, listImages, detectNewImages, checkMemory, ping, log };
+  // Close a (large) window the gentle way. PixInsight 1.9.5 aborted four times on
+  // 2026-10-28 right after a 60 MP window was force-closed and another heavy
+  // open/measure followed immediately (crash reports: uncaught C++ exception ->
+  // abort, no symbols). Purging history first, letting the event loop drain and
+  // giving the swap writer a moment avoids the back-to-back pattern.
+  async function safeClose(viewId, settleMs = 1500) {
+    const id = String(viewId).replace(/'/g, "\\'");
+    return pjsr(
+      `var w = ImageWindow.windowById('${id}');` +
+      `if (!w.isNull) { var ws = ImageWindow.windows; for (var i = 0; i < ws.length; i++) { try { var mk = ws[i].mask; if (mk && !mk.isNull && mk.mainView.id === w.mainView.id) ws[i].removeMask(); } catch (e) {} } try { w.purge(); } catch (e) {} processEvents(); w.forceClose(); }` +
+      `processEvents(); msleep(${Math.max(0, settleMs | 0)}); processEvents();`
+    );
+  }
+
+  const self = { send, pjsr, listImages, detectNewImages, checkMemory, ping, log, isAlive, safeClose, crashed: false, memWarnMB: MEM_WARN_MB };
+  return self;
 }

@@ -337,7 +337,7 @@ async function run() {
     P.abeDownsample = 2.00;
     P.writeSampleBoxes = false;
     P.justTrySamples = false;
-    P.targetCorrection = AutomaticBackgroundExtractor.prototype.Subtract;
+    P.targetCorrection = 1; // Subtract (numeric: enum constant name varies across PI versions)
     P.normalize = true;
     P.discardModel = true;
     P.replaceTarget = true;

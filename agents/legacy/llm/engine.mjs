@@ -6,7 +6,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { Mistral } from '@mistralai/mistralai';
 import crypto from 'crypto';
-import { BridgeCrashError } from '../ops/bridge.mjs';
+import { BridgeCrashError } from '../../ops/bridge.mjs';
 
 const DEFAULT_MODEL = 'gemini-2.5-pro';
 

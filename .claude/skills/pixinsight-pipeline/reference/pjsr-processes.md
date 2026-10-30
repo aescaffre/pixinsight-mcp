@@ -1,5 +1,11 @@
 # PJSR Process Parameter Reference
 
+> **Process constants under V8 (2026-10-29):** the watcher runs PJSR on the V8 runtime (`#engine v8`), where
+> process enum constants are `Process.CONST` (e.g. `LocalHistogramEqualization.Bit12`, `PixelMath.RGB`), not
+> `Process.prototype.CONST`. The `.prototype.` spelling used throughout this file and in existing agents/scripts
+> code is tolerated ONLY because the watcher rewrites `X.prototype.Y` -> `X.Y` before eval (`v8CompatCode`).
+> New code should write `Process.CONST` directly. See pjsr-gotchas.md, "PJSR runtime: V8 only".
+
 ## LocalHistogramEqualization (LHE)
 CLAHE-style local contrast enhancement. Great for tonal separation within nebulae.
 
@@ -95,6 +101,16 @@ P.numberOfIterations = 1;
 P.executeOn(ImageWindow.windowById('stars').mainView);
 ```
 
+### numberOfIterations = mask growth in pixels (WI-15)
+With the default 3x3 structure, each iteration grows (Dilation) or shrinks (Erosion) a mask edge by ~1 px, so
+`numberOfIterations = N` is "dilate/erode by N px". `mask_ops` (agents/ops/masks.mjs `shapeMask`) uses exactly this
+(structureSize 3, amount 1, no structureWayTable). Cost scales with iterations x pixels: on 60 MP keep N <= ~16 and
+get larger soft growth from `blur_sigma` + `clip_low/clip_high` (blur then range-stretch = soft dilate). Fixed order:
+invert -> dilate/erode -> blur -> range -> gamma -> multiply_with. Outer-field mask recipe:
+`create_luminance_mask(...)` then `mask_ops(invert=true, dilate_px=8, blur_sigma=20, output_id=...)`.
+Mask creators (`create_luminance_mask`, `create_zone_masks`, `mask_ops`) report mean + coverage (>0.5) and flag
+mean<0.01 EMPTY / >0.95 FULL. `apply_mask` throws on a missing view or a width/height mismatch.
+
 ### WARNING: Star erosion creates artifacts
 Morphological erosion on star images creates ring-like artifacts around star cores
 when screen-blended back. The non-linear star extraction approach (SXT with unscreen)
@@ -115,6 +131,17 @@ P.saturation = 0.50;                   // saturation preservation
 P.noiseReduction = false;
 P.executeOn(ImageWindow.windowById('target').mainView);
 ```
+
+### Luminance injection formula (inject_luminance, WI-13)
+Use instead of LRGBCombination when the L/RGB median ratio is > 2x (LinearFit crushes L dynamic range; prep produces ~3x). PixelMath with symbols `Y, Yn, ratio, M`:
+```
+Y = 0.2126*$T[0] + 0.7152*$T[1] + 0.0722*$T[2];
+Yn = w*L + (1-w)*Y;
+ratio = min(max(Yn, 0.00001) / max(Y, 0.00001), 3.0);
+M = mask[0];                      // only when a mask view is given
+$T * (1 + M*(ratio-1))            // NOT $T*ratio*mask (zeroes masked-out pixels); unmasked: $T * ratio
+```
+Truncate 0..1 only, no hard cap (soft compression is continuous_clamp's job). Weight 0.10-0.50, default 0.20; galaxy profiles cap at 0.25 (`tools.LRGB.max_inject_weight`). Same formula is the PixelMath fallback of lrgb_combine.
 
 ## Convolution (Gaussian blur)
 Used for mask smoothing and Ha detail layer extraction.
@@ -150,7 +177,7 @@ Removes background gradients from light pollution, sky glow, or vignetting.
 | `abeDownsample` | float | 2.00 | Downsampling factor (1-8) for model resolution |
 | `writeSampleBoxes` | bool | false | Generate sample visualization image |
 | `justTrySamples` | bool | false | Stop after sample extraction (testing) |
-| `targetCorrection` | enum | **None** | **MUST set explicitly**: `.prototype.Subtract` or `.Divide` |
+| `targetCorrection` | enum | **None** | **MUST set explicitly**. Use the NUMERIC value `1` (Subtract) / `2` (Divide): the prototype constant is named `.Subtract` in older PI and `.Subtraction` in 1.9.x; an undefined name gives "unsigned integer value expected" and ABE silently does nothing |
 | `normalize` | bool | true | Restore original mean color balance after correction |
 | `discardModel` | bool | true | Discard background model after correction |
 | `replaceTarget` | bool | true | Modify image in-place |
@@ -175,7 +202,7 @@ P.modelImageSampleFormat = AutomaticBackgroundExtractor.prototype.f32;
 P.abeDownsample = 2.00;
 P.writeSampleBoxes = false;
 P.justTrySamples = false;
-P.targetCorrection = AutomaticBackgroundExtractor.prototype.Subtract;  // REQUIRED
+P.targetCorrection = 1;  // REQUIRED. 1 = Subtract. Numeric on purpose: the constant is .Subtract or .Subtraction depending on the PI version
 P.normalize = true;
 P.discardModel = true;
 P.replaceTarget = true;
@@ -187,7 +214,7 @@ P.executeOn(ImageWindow.windowById('MyImage').mainView);
 
 ### Tips
 - **MUST set `targetCorrection`** — defaults to None which does nothing
-- `Subtract` for additive gradients (light pollution, sky glow)
+- `Subtraction` for additive gradients (light pollution, sky glow)
 - `Divide` for multiplicative effects (vignetting)
 - For galaxies: `polyDegree=2-3`, increase `boxSeparation=8-10`
 - Inspect model with `discardModel=false` to verify it doesn't contain galaxy signal

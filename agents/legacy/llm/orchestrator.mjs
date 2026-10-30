@@ -6,7 +6,7 @@
 // Claude conversations with tool use and vision.
 //
 // Usage:
-//   node agents/llm/orchestrator.mjs --config /path/to/config.json \
+//   node agents/legacy/llm/orchestrator.mjs --config /path/to/config.json \
 //     [--intent "natural galaxy"] [--model claude-sonnet-4-20250514]
 //     [--use-max]  # Use Claude Max subscription via claude CLI subprocess
 //
@@ -34,7 +34,7 @@ import { fileURLToPath } from 'url';
 
 // Load .env from project root (ANTHROPIC_API_KEY)
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const envPath = path.resolve(__dirname, '../../.env');
+const envPath = path.resolve(__dirname, '../../../.env');
 if (fs.existsSync(envPath)) {
   for (const line of fs.readFileSync(envPath, 'utf-8').split('\n')) {
     const match = line.match(/^\s*([^#=]+?)\s*=\s*(.*)\s*$/);
@@ -42,16 +42,16 @@ if (fs.existsSync(envPath)) {
   }
 }
 
-import { createBridgeContext, BridgeCrashError } from '../ops/bridge.mjs';
-import { getStats, measureUniformity } from '../ops/stats.mjs';
-import { ArtifactStore } from '../artifact-store.mjs';
-import { generateBrief } from '../classifier.mjs';
-import { checkHardConstraints, statsToScores, computeAggregate } from '../scoring.mjs';
-import { generateDossier } from '../dossier.mjs';
+import { createBridgeContext, BridgeCrashError } from '../../ops/bridge.mjs';
+import { getStats, measureUniformity } from '../../ops/stats.mjs';
+import { ArtifactStore } from '../../artifact-store.mjs';
+import { generateBrief } from '../../classifier.mjs';
+import { checkHardConstraints, statsToScores, computeAggregate } from '../../scoring.mjs';
+import { generateDossier } from '../../dossier.mjs';
 import { LLMAgent } from './engine.mjs';
-import { MaxAgent } from './engine-max.mjs';
-import { buildToolSet } from './tools.mjs';
-import { generateDiagnosticViews, buildImageMessage } from './vision.mjs';
+import { MaxAgent } from '../../llm/engine-max.mjs';
+import { buildToolSet } from '../../llm/tools.mjs';
+import { generateDiagnosticViews, buildImageMessage } from '../../llm/vision.mjs';
 import { buildReadinessPrompt } from './prompts/readiness.mjs';
 import { buildRGBCleanlinessPrompt } from './prompts/rgb-cleanliness.mjs';
 import { buildStarPolicyPrompt } from './prompts/star-policy.mjs';
@@ -495,7 +495,7 @@ async function orchestrate() {
   const configPath = opts.configPath;
   if (!configPath || !fs.existsSync(configPath)) {
     console.error(`Config not found: ${configPath || '(none provided)'}`);
-    console.error('Usage: node agents/llm/orchestrator.mjs --config /path/to/config.json [--use-max]');
+    console.error('Usage: node agents/legacy/llm/orchestrator.mjs --config /path/to/config.json [--use-max]');
     process.exit(1);
   }
 
@@ -723,7 +723,7 @@ async function orchestrate() {
     console.error(`\n  CRASH at Stage ${stageIndex} (${stageName}): ${err.message}`);
     statusLines.push(`## ❌ Stage ${stageIndex}: ${stageName} — CRASHED`);
     statusLines.push(`> PixInsight crashed. Restart PI + watcher, then resume:`);
-    statusLines.push(`> \`node agents/llm/orchestrator.mjs --config ${opts.configPath} --resume --run-id ${store.runId}${useMax ? ' --use-max' : ''}\``);
+    statusLines.push(`> \`node agents/legacy/llm/orchestrator.mjs --config ${opts.configPath} --resume --run-id ${store.runId}${useMax ? ' --use-max' : ''}\``);
     updateLiveStatus(store, statusLines);
     process.exit(77); // Distinct exit code for crash (vs 1 for errors)
   }

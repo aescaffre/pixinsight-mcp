@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "name": "NGC 281 Pacman Nebula SHO \u2014 starless Hubble palette",
+  "files": {
+    "sourceFolder": "/Volumes/Extension/PACMAN/output/claude",
+    "S": "/Volumes/Extension/PACMAN/output/claude/masterLight_BIN-1_9576x6388_EXPOSURE-300.00s_FILTER-S_mono_autocrop.xisf",
+    "Ha": "/Volumes/Extension/PACMAN/output/claude/masterLight_BIN-1_9576x6388_EXPOSURE-300.00s_FILTER-H_mono_autocrop.xisf",
+    "O": "/Volumes/Extension/PACMAN/output/claude/masterLight_BIN-1_9576x6388_EXPOSURE-300.00s_FILTER-O_mono_autocrop.xisf",
+    "palette": "SHO",
+    "starless": true,
+    "narrowband": {
+      "palette": "sho"
+    },
+    "outputDir": "/Volumes/Extension/PACMAN/output/claude/agentic",
+    "targetName": "NGC281",
+    "referencePath": "/Volumes/Extension/PACMAN/output/claude/final/NGC281_SHO_starless_iteration_01_haloLift5.xisf"
+  }
+}

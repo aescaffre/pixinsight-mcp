@@ -79,7 +79,7 @@ const KNOWN_OBJECTS = {
   'Abell2151': 'galaxy_cluster', 'Abell1656': 'galaxy_cluster',
   'HCG92': 'galaxy_cluster', 'Stephan': 'galaxy_cluster',
   // Dark nebulae
-  'Barnard33': 'dark_nebula', 'LDN1622': 'dark_nebula', 'Barnard68': 'dark_nebula',
+  'LDN15': 'dark_nebula', 'Barnard33': 'dark_nebula', 'LDN1622': 'dark_nebula', 'Barnard68': 'dark_nebula',
 };
 
 /**
@@ -103,6 +103,34 @@ function classifyFromName(name) {
 }
 
 /**
+ * Class profile, with the `narrowband_palette` overlay deep-merged on top for
+ * SHO/HOO workflows (false-color saturation limits, no SPCC, starless stars).
+ */
+function buildProfile(classification, isNarrowband) {
+  const all = loadProcessingProfiles();
+  const base = all[classification] || all['mixed_field'] || {};
+  if (!isNarrowband || !all.narrowband_palette) return base;
+  const merge = (a, b) => {
+    const out = Array.isArray(a) ? a.slice() : Object.assign({}, a);
+    for (const [k, v] of Object.entries(b)) {
+      out[k] = (v && typeof v === 'object' && !Array.isArray(v) && a && typeof a[k] === 'object') ? merge(a[k], v) : v;
+    }
+    return out;
+  };
+  return merge(base, all.narrowband_palette);
+}
+
+/**
+ * Public wrapper around buildProfile: the processing profile for a class, with the
+ * narrowband_palette overlay when the workflow is narrowband (explicit flag or SHO/HOO).
+ * Used by scripts/backtest-gates.mjs. generateBrief is unchanged.
+ */
+export function profileFor(classification, isNarrowband, workflow) {
+  const nb = !!isNarrowband || workflow === 'SHO' || workflow === 'HOO';
+  return buildProfile(classification, nb);
+}
+
+/**
  * Determine workflow type from available channels.
  */
 function detectWorkflow(config) {
@@ -113,7 +141,12 @@ function detectWorkflow(config) {
   const hasB = !!(F.B && F.B.trim());
   const hasHa = !!(F.Ha && F.Ha.trim());
   const hasRGB = hasR && hasG && hasB;
+  const hasS = !!(F.S && F.S.trim());
+  const hasO = !!(F.O && F.O.trim());
+  const hasH = hasHa || !!(F.H && F.H.trim());
 
+  if (!hasRGB && hasH && hasS && hasO) return 'SHO';
+  if (!hasRGB && hasH && hasO) return 'HOO';
   if (!hasRGB && hasL) return 'L_only';
   if (hasL && hasHa && hasRGB) return 'HaLRGB';
   if (hasHa && hasRGB) return 'HaRGB';
@@ -127,6 +160,35 @@ function detectWorkflow(config) {
  * @param {object} opts - { intent, style, ... }
  * @returns {object} Processing brief
  */
+/**
+ * Auto-select a reference image for Gate 12 / compare_to_reference when the config
+ * gives none: the LAST approved entry of agents/calibration/approved-images.json whose
+ * path or id names the SAME target (e.g. NGC7023 -> ngc7023_best_of_both). Same-target
+ * only — a reference of another object would make the coverage_delta block meaningless.
+ * Returns '' when nothing matches. (2026-10-29: NGC7023 run fed7b3ff finished with
+ * "Reference: no reference" although an approved NGC7023 image was in the registry.)
+ */
+function pickRegistryReference(targetName, classification) {
+  if (process.env.PIXINSIGHT_MCP_NO_AUTO_REFERENCE) return '';   // tests: keep prompts independent of local disks
+  try {
+    const regPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'calibration', 'approved-images.json');
+    if (!fs.existsSync(regPath)) return '';
+    const reg = JSON.parse(fs.readFileSync(regPath, 'utf-8'));
+    const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const t = norm(targetName);
+    if (!t) return '';
+    const expand = p => String(p || '').replace(/^~(?=\/|$)/, process.env.HOME || '');
+    // Same target is the criterion; the registry classification may be finer than the
+    // brief's (galaxy_edge_on vs galaxy_spiral for NGC3628), so it is not required to match.
+    const hits = (reg.entries || []).filter(e => e && e.verdict === 'approved' && e.path && fs.existsSync(expand(e.path))
+      && (norm(e.id).includes(t) || norm(path.basename(e.path)).includes(t) || norm(e.path).includes(t)));
+    if (!hits.length) return '';
+    const pick = hits[hits.length - 1];
+    if (process.env.NODE_ENV !== 'test') console.error(`  Reference (auto, registry): ${pick.id} -> ${expand(pick.path)}`);
+    return expand(pick.path);
+  } catch { return ''; }
+}
+
 export function generateBrief(config, opts = {}) {
   const targetName = config.files?.targetName || config.name || 'Unknown';
   const classification = opts.classification || classifyFromName(targetName);
@@ -157,7 +219,8 @@ export function generateBrief(config, opts = {}) {
   const taxonomy = loadTaxonomy();
   const taxEntry = taxonomy[classification] || {};
   const taxTraits = taxEntry.traits || {};
-  const hasHa = workflow.includes('Ha');
+  const isNarrowband = workflow === 'SHO' || workflow === 'HOO';
+  const hasHa = workflow.includes('Ha') || isNarrowband;
 
   // Override signalType based on actual data
   let signalType = taxTraits.signalType || 'broadband';
@@ -177,6 +240,7 @@ export function generateBrief(config, opts = {}) {
     dustLanes: taxTraits.hasDustLanes ?? isGalaxy,
     brightCore: taxTraits.hasBrightCore ?? false,
     hasIFN: taxTraits.hasIFN ?? false,
+    hasDust: taxTraits.hasDust ?? false,
     hasHIIRegions: taxTraits.hasHIIRegions ?? hasHa,
     // Processing guidance
     processingNotes: taxEntry.processingNotes || ''
@@ -186,7 +250,7 @@ export function generateBrief(config, opts = {}) {
     briefId: `brief_${crypto.randomUUID().slice(0, 8)}`,
     createdAt: new Date().toISOString(),
     // B2b: optional user-supplied reference image for compare_to_reference / Gate 12.
-    reference_path: (config.files?.referencePath || opts.referencePath || '').trim() || undefined,
+    reference_path: (config.files?.referencePath || opts.referencePath || '').trim() || pickRegistryReference(targetName, classification) || undefined,
     target: {
       name: targetName,
       classification,
@@ -199,34 +263,43 @@ export function generateBrief(config, opts = {}) {
         R: !!(config.files?.R?.trim()),
         G: !!(config.files?.G?.trim()),
         B: !!(config.files?.B?.trim()),
-        Ha: !!(config.files?.Ha?.trim())
-      }
+        Ha: !!(config.files?.Ha?.trim() || config.files?.H?.trim()),
+        S: !!(config.files?.S?.trim()),
+        O: !!(config.files?.O?.trim())
+      },
+      // Narrowband false-color workflows: palette is a creative choice (no SPCC);
+      // starless delivers the nebula only (stars added later from RGB data).
+      narrowband: isNarrowband,
+      palette: isNarrowband ? (config.files?.palette || (workflow === 'HOO' ? 'HOO' : 'SHO')) : undefined,
+      starless: isNarrowband ? config.files?.starless !== false : !!config.files?.starless
     },
     aestheticIntent: {
       style,
-      colorSaturation: isGalaxy ? 'moderate' : 'vivid',
+      colorSaturation: opts.colorSaturation || config.aesthetic?.colorSaturation || (isGalaxy && classification !== 'galaxy_cluster' ? 'moderate' : 'vivid'),
       contrastLevel: 'moderate',
       backgroundTarget,
-      starProminence: isGalaxy ? 'subdued' : 'balanced',
+      starProminence: buildProfile(classification, isNarrowband).stars?.prominence || 'balanced',
       detailEmphasis: isGalaxy ? 'fine_detail' : 'balanced',
       referenceNotes: opts.intent || ''
     },
     aestheticPreferences: {
       noiseLevel: opts.noiseLevel || 'clean',              // very_clean | clean | natural
       glow: opts.glow || 'moderate',                     // none | subtle | moderate | strong
-      starPresence: opts.starPresence || 'prominent',    // minimal | subdued | prominent | rich
+      // default maps 1:1 from the profile's star prominence (single source of truth)
+      starPresence: opts.starPresence || (buildProfile(classification, isNarrowband).stars?.prominence || 'balanced'),    // minimal | subdued | balanced | prominent | rich
     },
     technicalPriorities: priorities,
     hardConstraints: {
       maxPixelValue: 0.995,
       minBackgroundMedian: 0.001,
       maxBackgroundMedian: isGalaxy ? 0.15 : 0.25,
-      maxChannelImbalance: 0.05,
+      // false-colour palettes (SHO/HOO) have no meaningful per-channel median balance: null = channel_balanced skipped
+      maxChannelImbalance: isNarrowband ? null : 0.05,
       maxMemoryMB: 8000,
       maxWallClockMinutes: opts.maxWallClockMinutes || 60,
       maxIterationsPerAgent: opts.maxIterationsPerAgent || 8
     },
     softGoals: opts.softGoals || [],
-    processingProfile: loadProcessingProfiles()[classification] || loadProcessingProfiles()['mixed_field'] || {}
+    processingProfile: buildProfile(classification, isNarrowband)
   };
 }

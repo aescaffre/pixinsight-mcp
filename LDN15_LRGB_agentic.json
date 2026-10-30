@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "name": "LDN 15 Dark Nebula LRGB — LLM Agentic Pipeline",
+  "files": {
+    "sourceFolder": "/Users/aescaffre/Downloads/terrapixa_drizzle_b-fits_2026-03-30_1758",
+    "L": "/Users/aescaffre/Downloads/terrapixa_drizzle_b-fits_2026-03-30_1758/drizzle_L.fits",
+    "R": "/Users/aescaffre/Downloads/terrapixa_drizzle_b-fits_2026-03-30_1758/drizzle_R.fits",
+    "G": "/Users/aescaffre/Downloads/terrapixa_drizzle_b-fits_2026-03-30_1758/drizzle_G.fits",
+    "B": "/Users/aescaffre/Downloads/terrapixa_drizzle_b-fits_2026-03-30_1758/drizzle_B.fits",
+    "Ha": "",
+    "outputDir": "/Users/aescaffre/Downloads/terrapixa_drizzle_b-fits_2026-03-30_1758/agentic",
+    "targetName": "LDN15"
+  }
+}

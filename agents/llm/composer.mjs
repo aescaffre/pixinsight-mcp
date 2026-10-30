@@ -125,3 +125,58 @@ export async function judgeAB(ctx, { megaPath, mergedPath, profile, log = consol
   log(`  [judge] ${win ? 'MERGE WINS' : 'MEGA KEPT'}: ${reason}`);
   return { winner: win ? 'merged' : 'mega', reason, mega, merged };
 }
+
+/**
+ * Pure helper: choose the best core-specialist candidate against the mega baseline using
+ * the judgeAB core win condition (struct >= base+0.01 OR relC >= base+0.02) AND
+ * halo <= base+0.005 AND the core check still passes (pass !== false).
+ * candidates: [{path, label, core:{coreStructFrac, haloFrac, coreRelContrast, pass}|null, error?}]
+ * Falls back to the candidate labelled fallbackLabel (default 'CORE_WORK'), then to null
+ * (caller keeps the mega winner) when nothing was measurable.
+ * @returns {{chosen: object|null, reason: string, wins: object[]}}
+ */
+export function selectCoreCandidate(baselineCore, candidates, { fallbackLabel = 'CORE_WORK' } = {}) {
+  const b = baselineCore || {};
+  const bS = b.coreStructFrac ?? 0, bH = b.haloFrac ?? 0, bR = b.coreRelContrast ?? 0;
+  const wins = [];
+  for (const c of candidates || []) {
+    const m = c && c.core;
+    if (!m || c.error) continue;
+    const s = m.coreStructFrac ?? 0, h = m.haloFrac ?? 1, r = m.coreRelContrast ?? 0;
+    const improved = (s >= bS + 0.01 || r >= bR + 0.02) && h <= bH + 0.005;
+    if (improved && m.pass !== false) {
+      wins.push({ ...c, gain: (s - bS) + (r - bR) - Math.max(0, h - bH) });
+    }
+  }
+  if (wins.length) {
+    wins.sort((a, z) => z.gain - a.gain);
+    return { chosen: wins[0], wins, reason: `best of ${wins.length} winning candidate(s): ${wins[0].label}` };
+  }
+  const fb = (candidates || []).find(c => c && c.label === fallbackLabel && c.path);
+  if (fb) return { chosen: fb, wins, reason: `no candidate meets the win condition; falling back to ${fallbackLabel}` };
+  return { chosen: null, wins, reason: 'no usable candidate; keep mega winner' };
+}
+
+/**
+ * Measure core contrast on each file sequentially (one window open at a time, closed after).
+ * Never throws: per-candidate failures are returned as {error}.
+ */
+export async function measureCoreCandidates(ctx, items, profile, log = console.log) {
+  const out = [];
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    const id = 'CORE_CAND';
+    try {
+      await openAs(ctx, it.path, id);
+      const core = await measureCoreContrast(ctx, id, profile?._classification, profile?.core_burn);
+      out.push({ ...it, core });
+      log(`  [core-select] ${it.label}: struct=${((core.coreStructFrac ?? 0) * 100).toFixed(0)}% halo=${((core.haloFrac ?? 0) * 100).toFixed(1)}% relC=${(core.coreRelContrast ?? 0).toFixed(2)} pass=${core.pass}`);
+    } catch (e) {
+      out.push({ ...it, core: null, error: e.message });
+      log(`  [core-select] ${it.label}: measure error ${e.message}`);
+    } finally {
+      try { await closeId(ctx, id); } catch {}
+    }
+  }
+  return out;
+}

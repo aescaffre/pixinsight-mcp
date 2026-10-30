@@ -1,50 +1,62 @@
-// PixInsight MCP Watcher Script
-// Runs inside PixInsight's PJSR engine (ECMAScript 5)
+#engine v8
+// PixInsight MCP Watcher Script — V8 runtime edition (PixInsight >= 1.9.5)
+//
+// WHY V8 (2026-10-29): with no #engine directive a script runs on the legacy
+// SpiderMonkey 24 runtime, which on macOS ARM64 is an obsolete interpreter-only
+// build whose garbage collector aborts PixInsight 1.9.5 (crash stack:
+// libmozjs-24 FinalizeArenas -> signal -> __cxa_throw -> abort). Ten crashes in
+// two days, explicit gc() or automatic collections alike. The V8 runtime is the
+// supported engine; the legacy file is kept as pixinsight-mcp-watcher-sm-legacy.js.
+//
 // Polls the bridge directory for commands, executes them, writes results.
+// Command scripts (run_script) are eval'd inside this runtime; see handleRunScript
+// for the small compatibility layer applied to legacy-style code.
 
-// ============================================================================
-// ImageSolver Library (loaded at preprocessor time for plate solving)
-// ============================================================================
+CoreApplication.ensureMinimumVersion( 1, 9, 5 );
 
-#define __PJSR_USE_STAR_DETECTOR_V2
-
-#include <pjsr/BRQuadTree.jsh>
-#include <pjsr/ColorSpace.jsh>
-#include <pjsr/DataType.jsh>
-#include <pjsr/FrameStyle.jsh>
-#include <pjsr/LinearTransformation.jsh>
-#include <pjsr/NumericControl.jsh>
-#include <pjsr/SectionBar.jsh>
-#include <pjsr/Sizer.jsh>
-#include <pjsr/StarDetector.jsh>
-#include <pjsr/StdButton.jsh>
-#include <pjsr/StdCursor.jsh>
-#include <pjsr/StdIcon.jsh>
-#include <pjsr/TextAlign.jsh>
-#include <pjsr/UndoFlag.jsh>
-#include <pjsr/PropertyType.jsh>
-#include <pjsr/PropertyAttribute.jsh>
-#include <pjsr/RBFType.jsh>
-#include <pjsr/APASSFlag.jsh>
-#include <pjsr/GaiaFlag.jsh>
-#include <pjsr/ReadTextOptions.jsh>
-
-#define TITLE           "Image Solver"
-#define SETTINGS_MODULE "SOLVER"
-#define STAR_CSV_FILE   (File.systemTempDirectory + "/stars-mcp.csv")
-
-// Include AdP dependencies then ImageSolver in library mode
-#include "/Applications/PixInsight/src/scripts/AdP/Projections.js"
-#include "/Applications/PixInsight/src/scripts/AdP/WCSmetadata.jsh"
-#include "/Applications/PixInsight/src/scripts/AdP/AstronomicalCatalogs.jsh"
-#include "/Applications/PixInsight/src/scripts/AdP/CommonUIControls.js"
-#include "/Applications/PixInsight/src/scripts/AdP/SearchCoordinatesDialog.js"
-#include "/Applications/PixInsight/src/scripts/AdP/CatalogDownloader.js"
-
+// Optional ImageSolver library (V8 edition, library mode) for the plate-solve
+// fallback used only when masters carry no WCS. Disabled by default to keep the
+// watcher minimal: uncomment the #define below to enable it (the include chain of
+// ImageSolver.js is replicated with absolute paths).
+#define MCP_WITH_SOLVER
+#ifdef MCP_WITH_SOLVER
 #define USE_SOLVER_LIBRARY
-#include "/Applications/PixInsight/src/scripts/AdP/ImageSolver.js"
+#define VERSION "6.5.0"
+#define TITLE "ImageSolver"
+#define SOLVER_SETTINGS_MODULE "ImageSolver"
+#define SETTINGS_MODULE "ImageSolver"
+#include <pjsr/astrometry/AstrometricMetadata.js>
+#include <pjsr/astrometry/AstronomicalCatalogs.js>
+#include <pjsr/astrometry/SearchCoordinatesDialog.js>
+#include <pjsr/astrometry/CatalogDownloaderDialog.js>
+#include <pjsr/astrometry/ProjectionConfigurationDialog.js>
+#include <pjsr/astrometry/UtilityControls.js>
+#include <pjsr/astrometry/VizierMirrorDialog.js>
+#include <pjsr/controls/DateTimeEditor.js>
+#include <pjsr/controls/GeodeticCoordinatesEditor.js>
+#include "/Applications/PixInsight/src/scripts/ImageSolver/ImageSolverDialog.js"
+#include "/Applications/PixInsight/src/scripts/ImageSolver/ImageSolverEngine.js"
+#endif
 
-#define SETTINGS_MODULE_SCRIPT "SOLVER"
+// ----------------------------------------------------------------------------
+// Compatibility layer for command scripts written for the legacy runtime.
+// Deprecated globals still work in V8 but print a deprecation warning on every
+// call; shadowing them with silent equivalents keeps the console readable.
+// ----------------------------------------------------------------------------
+try { globalThis.processEvents = function() { CoreApplication.processEvents(); }; } catch (eC1) {}
+try { globalThis.msleep = function( ms ) { System.msleep( ms ); }; } catch (eC2) {}
+try { globalThis.sleep = function( s ) { System.sleep( s ); }; } catch (eC3) {}
+try { globalThis.gc = function() {}; } catch (eC4) {}
+
+// Process constants moved from Process.prototype.X to Process.X in V8.
+// Command scripts may still use the legacy spelling; rewrite it before eval.
+function v8CompatCode( code ) {
+   // Uppercase constants (PixelMath.RGB, StarAlignment.Continue, ...) plus the
+   // lowercase sample-format enums (f32, i16, ...). Deliberately NOT a blanket
+   // lowercase match, so genuine prototype methods (Function.prototype.toString)
+   // in command code are never mangled.
+   return code.replace( /\b([A-Z][A-Za-z0-9_]*)\.prototype\.([A-Z][A-Za-z0-9_]*|[fiu](?:8|16|32|64))\b/g, "$1.$2" );
+}
 
 // ============================================================================
 // Configuration
@@ -55,7 +67,7 @@ var COMMANDS_DIR = BRIDGE_DIR + "/commands";
 var RESULTS_DIR = BRIDGE_DIR + "/results";
 var LOGS_DIR = BRIDGE_DIR + "/logs";
 var POLL_INTERVAL_MS = 1000;
-var WATCHER_VERSION = "0.1.0";
+var WATCHER_VERSION = "0.2.0-v8";
 
 // ============================================================================
 // File Helpers (PJSR File API)
@@ -84,7 +96,7 @@ function ensureDirectory(path) {
 
 function listJsonFiles(dirPattern) {
    try {
-      return searchDirectory(dirPattern);
+      return File.searchDirectory(dirPattern);
    } catch (e) {
       return [];
    }
@@ -281,7 +293,7 @@ function handleColorCalibrate(command) {
 
 function handleRemoveGreenCast(command) {
    var P = new SCNR;
-   P.colorToRemove = SCNR.prototype.Green;
+   P.colorToRemove = SCNR.Green;
    P.amount = command.parameters.amount !== undefined ? command.parameters.amount : 1.0;
 
    var view = findViewById(command.targetView);
@@ -402,8 +414,8 @@ function handleSharpen(command) {
 function handleDeconvolve(command) {
    var P = new Deconvolution;
    // Use a Gaussian PSF
-   P.algorithm = Deconvolution.prototype.RichardsonLucy;
-   P.psfMode = Deconvolution.prototype.Gaussian;
+   P.algorithm = Deconvolution.RichardsonLucy;
+   P.psfMode = Deconvolution.Gaussian;
    P.psfGaussianSigma = command.parameters.psfSigma || 2.5;
    P.iterations = [
       [command.parameters.iterations || 50, false, 0, 0, 0, false, 0, 0]
@@ -483,7 +495,7 @@ function handleBlendNarrowband(command) {
 }
 
 function handleRunScript(command) {
-   var code = command.parameters.code;
+   var code = v8CompatCode(command.parameters.code);
    // Capture console output
    var consoleOutput = "";
    try {
@@ -495,7 +507,10 @@ function handleRunScript(command) {
          message: "Script executed successfully"
       };
    } catch (e) {
-      throw new Error("Script error: " + e.message);
+      // V8: non-Error throws (strings, process failures) have no .message — keep the text.
+      var msg = (e && e.message !== undefined) ? e.message : String(e);
+      if (e && e.stack && String(e.stack).indexOf(msg) < 0) msg += " | " + String(e.stack).split("\n").slice(0, 3).join(" / ");
+      throw new Error("Script error: " + msg);
    }
 }
 
@@ -593,8 +608,28 @@ function processNextCommand() {
       return true;
    }
 
+   // Never run a command older than 5 minutes: its sender has timed out (bridge
+   // timeout is 20 min of polling, but a crash/restart cycle is far shorter) and it
+   // may be the very call that crashed the previous session.
+   var cmdAge = command.timestamp ? (Date.now() - Date.parse(command.timestamp)) : 0;
+   if (cmdAge > 5 * 60 * 1000) {
+      console.warningln("[MCP Watcher] Skipping stale command " + command.id + " (" + command.tool + ", " + Math.round(cmdAge / 60000) + " min old)");
+      deleteFile(filePath);
+      return true;
+   }
+
    var startTime = Date.now();
    var resultObj;
+
+   // Crash forensics: record what is about to run. If PixInsight dies during the
+   // command, this file (written by the watcher itself, not the Node side) still
+   // names the exact call.
+   try {
+      var execInfo = { id: command.id, tool: command.tool, process: command.process || null,
+                       startedAt: getTimestamp(),
+                       codeHead: (command.parameters && typeof command.parameters.code === 'string') ? command.parameters.code.substring(0, 800) : null };
+      writeTextFile(BRIDGE_DIR + "/executing.json", JSON.stringify(execInfo));
+   } catch (eX) {}
 
    try {
       console.writeln("[MCP Watcher] Executing: " + command.tool + " (id: " + command.id + ")");
@@ -649,6 +684,7 @@ function runWatcher() {
 
    console.noteln("===========================================");
    console.noteln("  PixInsight MCP Watcher v" + WATCHER_VERSION);
+   console.noteln("  Engine: V8 " + Runtime.v8Version + " (JS " + Runtime.jsVersion + ")");
    console.noteln("  Bridge: " + BRIDGE_DIR);
    console.noteln("  Polling every " + POLL_INTERVAL_MS + "ms");
    console.noteln("  Ctrl+F11 to abort");
@@ -656,7 +692,61 @@ function runWatcher() {
 
    var commandCount = 0;
 
+   // Discard commands left over from a previous (crashed) session. The Node side that
+   // sent them is gone or has timed out, and replaying them is dangerous: on 2026-10-29
+   // a stale `gc()` command was re-executed at every watcher start and killed
+   // PixInsight each time.
+   try {
+      var stale = listJsonFiles(COMMANDS_DIR + "/*.json");
+      for (var si = 0; si < stale.length; si++) deleteFile(stale[si]);
+      if (stale.length > 0) console.warningln("[MCP Watcher] Discarded " + stale.length + " stale command(s) from a previous session");
+   } catch (e0) {
+      console.criticalln("[MCP Watcher] Could not clear stale commands: " + e0.message);
+   }
+
    console.show();
+
+   // GC warm-up (2026-10-29 bisect): in a FRESH session, the first garbage collection
+   // that happens while a 60 MP image is open aborts PixInsight 1.9.5 (signal inside
+   // the JS engine -> uncaught C++ exception). Once a collection has run with nothing
+   // open, the same sequences survive. A gc() right at script start ALSO crashed PI
+   // (00:38, 39 s after launch), so the warm-up is deferred: it runs from the idle
+   // loop once the watcher has been polling for WARMUP_DELAY_MS with no image open.
+   // The Node bridge waits for the state file before sending its first command.
+   // Never call gc() from command scripts; this deferred call is the only allowed one.
+   // 2026-10-29 outcome: the deferred warm-up gc() itself crashed PixInsight in 2 of 3
+   // sessions (always exactly 45 s after start, nothing open). An explicit gc() is a
+   // coin flip in PI 1.9.5 whatever the state, while AUTOMATIC collections only crashed
+   // under one JS-heavy 60 MP pixel loop (now stride-limited). So the warm-up is OFF:
+   // no explicit gc() anywhere, ever. The state file is still written (warmedUp:true at
+   // once) so the Node bridge does not wait.
+   var WARMUP_ENABLED = false;
+   var WARMUP_DELAY_MS = 45000;
+   var WATCHER_STATE_FILE = BRIDGE_DIR + "/watcher-state.json";
+   var watcherStart = Date.now();
+   var warmedUp = !WARMUP_ENABLED;
+   try { if (File.exists(WATCHER_STATE_FILE)) File.remove(WATCHER_STATE_FILE); } catch (eS) {}
+   function writeWatcherState() {
+      try {
+         writeTextFile(WATCHER_STATE_FILE, JSON.stringify({ version: WATCHER_VERSION, engine: "v8", v8Version: String(Runtime.v8Version), startedAt: new Date(watcherStart).toISOString(), warmedUp: warmedUp, at: getTimestamp() }));
+      } catch (eW) {}
+   }
+   function maybeWarmUp() {
+      if (warmedUp) return;
+      if (Date.now() - watcherStart < WARMUP_DELAY_MS) return;
+      if (ImageWindow.windows.length > 0) return;   // only with nothing open
+      try {
+         /* gc() removed: deprecated no-op in V8 */
+         CoreApplication.processEvents();
+         warmedUp = true;
+         console.writeln("[MCP Watcher] GC warm-up done (" + Math.round((Date.now() - watcherStart) / 1000) + " s after start)");
+      } catch (eG) {
+         console.criticalln("[MCP Watcher] GC warm-up failed: " + eG.message);
+         warmedUp = true;   // do not retry forever
+      }
+      writeWatcherState();
+   }
+   writeWatcherState();
 
    // Graceful shutdown: check for sentinel file
    var SHUTDOWN_FILE = BRIDGE_DIR + "/shutdown";
@@ -674,7 +764,7 @@ function runWatcher() {
    // Use short sleeps (20ms) with frequent processEvents() for UI responsiveness
    for (;;) {
       // Yield to PixInsight UI
-      processEvents();
+      CoreApplication.processEvents();
 
       // Check abort or shutdown signal
       if (shouldShutdown()) {
@@ -687,18 +777,19 @@ function runWatcher() {
          commandCount++;
          // Yield heavily after command execution so UI can catch up
          for (var y = 0; y < 20; ++y) {
-            processEvents();
-            msleep(20);
+            CoreApplication.processEvents();
+            System.msleep(20);
             if (shouldShutdown()) break;
          }
       } else {
          // No commands — yield frequently with short sleeps for UI responsiveness
          // Total idle cycle: ~500ms (25 x 20ms) before re-checking commands
          for (var i = 0; i < 25; ++i) {
-            msleep(20);
-            processEvents();
+            System.msleep(20);
+            CoreApplication.processEvents();
             if (shouldShutdown()) break;
          }
+         maybeWarmUp();
       }
    }
 

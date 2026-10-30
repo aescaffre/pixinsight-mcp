@@ -95,6 +95,67 @@ export async function measureUniformity(ctx, viewId, sampleSize = 200) {
   return JSON.parse(r.outputs?.consoleOutput?.trim() || '{"score":999}');
 }
 
+
+// ---------------------------------------------------------------------------
+// Banding helpers (pure ES5 — embedded into the PJSR pass via toString so the
+// tested code is the executed code). A ramp is a gradient (fits a line, amp~0);
+// a band is a localized step (large residual from the fit, large adjacent jump).
+// values: array of numbers (null/NaN entries are skipped).
+// Returns {n, slope, intercept, amp, index, stepMax, stepIndex}.
+// ---------------------------------------------------------------------------
+export function bandFromMeans(values) {
+  var xs = [], ys = [], idx = [];
+  for (var i = 0; i < values.length; i++) {
+    var v = values[i];
+    if (v === null || v === undefined || v !== v) continue;
+    xs.push(i); ys.push(v); idx.push(i);
+  }
+  var n = xs.length;
+  if (n < 3) return { n: n, slope: 0, intercept: 0, amp: 0, index: -1, stepMax: 0, stepIndex: -1 };
+  var sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (var k = 0; k < n; k++) { sx += xs[k]; sy += ys[k]; sxx += xs[k] * xs[k]; sxy += xs[k] * ys[k]; }
+  var den = n * sxx - sx * sx;
+  var slope = den !== 0 ? (n * sxy - sx * sy) / den : 0;
+  var intercept = (sy - slope * sx) / n;
+  var amp = 0, index = -1, stepMax = 0, stepIndex = -1;
+  for (var k2 = 0; k2 < n; k2++) {
+    var res = Math.abs(ys[k2] - (slope * xs[k2] + intercept));
+    if (res > amp) { amp = res; index = idx[k2]; }
+    if (k2 > 0) {
+      var j = Math.abs(ys[k2] - ys[k2 - 1]);
+      if (j > stepMax) { stepMax = j; stepIndex = idx[k2]; }
+    }
+  }
+  return { n: n, slope: slope, intercept: intercept, amp: amp, index: index, stepMax: stepMax, stepIndex: stepIndex };
+}
+
+// Band summary from background cells [{gx,gy,R,G,B,lum}] on a cols x rows grid.
+// Per-column and per-row MEAN chroma (R-L, G-L, B-L); returns the strongest
+// {axis,index,amp,channel,stepMax} or {insufficientBg:true}.
+export function bandFromCells(cells, cols, rows, minBgCells) {
+  var minN = minBgCells || 12;
+  if (!cells || cells.length < minN) return { insufficientBg: true, bgCells: cells ? cells.length : 0 };
+  var chans = ['R', 'G', 'B'];
+  var best = { axis: null, index: -1, amp: 0, channel: null, stepMax: 0 };
+  var axes = [['column', cols, 'gx'], ['row', rows, 'gy']];
+  for (var a = 0; a < 2; a++) {
+    var count = axes[a][1], key = axes[a][2];
+    for (var c = 0; c < 3; c++) {
+      var sum = [], num = [];
+      for (var i = 0; i < count; i++) { sum.push(0); num.push(0); }
+      for (var q = 0; q < cells.length; q++) {
+        var cell = cells[q];
+        sum[cell[key]] += cell[chans[c]] - cell.lum; num[cell[key]] += 1;
+      }
+      var means = [];
+      for (var i2 = 0; i2 < count; i2++) means.push(num[i2] > 0 ? sum[i2] / num[i2] : null);
+      var f = bandFromMeans(means);
+      if (f.amp > best.amp) best = { axis: axes[a][0], index: f.index, amp: f.amp, channel: chans[c], stepMax: f.stepMax };
+    }
+  }
+  return best;
+}
+
 // ============================================================================
 // Color-gradient measurement
 // ----------------------------------------------------------------------------
@@ -109,10 +170,13 @@ export async function measureUniformity(ctx, viewId, sampleSize = 200) {
 export async function measureColorGradient(ctx, viewId, opts = {}) {
   const cols = opts.cols ?? 8;
   const rows = opts.rows ?? 6;
+  const minBg = opts.minBgCells ?? 12;
   const r = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}');
     if (w.isNull) throw new Error('measureColorGradient: not found: ${viewId}');
     var img = w.mainView.image;
+    ${bandFromMeans.toString().replace('export ', '')}
+    ${bandFromCells.toString().replace('export ', '')}
     if (!img.isColor) { JSON.stringify({ error: 'mono image — no color gradient' }); }
     else {
       var cols = ${cols}, rows = ${rows};
@@ -170,7 +234,9 @@ export async function measureColorGradient(ctx, viewId, opts = {}) {
         lumPP: bgLumMax - bgLumMin,
         bgCells: bg.length, totalCells: cells.length,
         bgMedianLum: medLum,
-        worst: worst
+        worst: worst,
+        band: bandFromCells(bg, cols, rows, ${minBg}),
+        cols: cols, rows: rows
       });
     }
   `);
@@ -178,5 +244,28 @@ export async function measureColorGradient(ctx, viewId, opts = {}) {
     ctx.log(`  [colorGradient] WARN: ${r.error?.message || 'unknown error'}`);
     return { score: 999, error: r.error?.message };
   }
-  return JSON.parse(r.outputs?.consoleOutput?.trim() || '{"score":999}');
+  const out = JSON.parse(r.outputs?.consoleOutput?.trim() || '{"score":999}');
+  // Corner fields reuse measureUniformity's 4-corner medians (cheap: 4 rects).
+  if (!out.error && opts.corners !== false) {
+    try {
+      const u = await measureUniformity(ctx, viewId, opts.cornerSize || 200);
+      if (u.corners?.length === 4) Object.assign(out, cornerStats(u));
+    } catch { /* corner stats are optional */ }
+  }
+  return out;
+}
+
+// Pure: corner luminance delta and per-channel chroma spread from measureUniformity output.
+export function cornerStats(u) {
+  const lum = u.corners || [];
+  const cornerLumDelta = lum.length ? Math.max(...lum) - Math.min(...lum) : 0;
+  let cornerChroma = 0;
+  const pc = u.perChannel || [];
+  if (pc.length && pc[0].length === 3) {
+    for (let c = 0; c < 3; c++) {
+      const v = pc.map((p, i) => p[c] - lum[i]);
+      cornerChroma = Math.max(cornerChroma, Math.max(...v) - Math.min(...v));
+    }
+  }
+  return { cornerLumDelta, cornerChroma };
 }

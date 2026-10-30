@@ -9,7 +9,7 @@ through a configurable, branching pipeline (HaRGB, HaLRGB, LRGB workflows).
 - Node.js: `/Users/aescaffre/.local/node-v22.13.1-darwin-arm64/bin` (add to PATH)
 - PixInsight: `/Applications/PixInsight/`
 - Bridge: `~/.pixinsight-mcp/bridge/` (file-based IPC)
-- PJSR: ECMAScript 5 only (no let/const/arrow functions)
+- PJSR: runs on the V8 runtime (`#engine v8` at the top of `pjsr/pixinsight-mcp-watcher.js`, PI >= 1.9.5). ES5 style (var/function, no arrows) remains the convention for command snippets sent from Node; the watcher rewrites `Process.prototype.CONST` -> `Process.CONST`
 
 ## Key Commands
 ```bash
@@ -40,7 +40,7 @@ src/                       — MCP server TypeScript source
 The `.claude/skills/pixinsight-pipeline/` directory contains comprehensive processing knowledge:
 - **SKILL.md** — Pipeline overview, quick start, parameter tuning guide
 - **reference/pjsr-processes.md** — LHE, HDRMT, MorphologicalTransformation, LRGBCombination
-- **reference/pjsr-gotchas.md** — ECMAScript 5 constraints, file I/O, crop masks, memory
+- **reference/pjsr-gotchas.md** — V8 runtime + breaking changes, ES5-style convention, file I/O, crop masks, memory
 - **reference/xterminator-tools.md** — SXT, NXT, BXT parameters and best practices
 - **reference/ghs-stretch.md** — GHS formula implementation via PixelMath
 - **reference/processing-knowledge.md** — Equipment settings, lessons learned, quality assessment
@@ -58,6 +58,7 @@ Skills and memory must be kept up to date as the project evolves. After every se
 Do this proactively — don't wait to be asked. The goal is that skills always reflect the latest validated knowledge, so any new session starts with the best available information.
 
 ## Critical Rules
+- PJSR must run on the V8 runtime (`#engine v8` in the watcher): the legacy SpiderMonkey runtime's GC aborts PI 1.9.5 on arm64. `gc()` is a no-op on V8; never add `#engine sm`. Use `w.purge()` + `processEvents()` for memory
 - PixelMath has NO `pow()` — use `exp(exponent*ln(base))`
 - SXT on linear: `stars=true` only (NO unscreen). On non-linear: `stars=true, unscreen=true`
 - XISF files open with crop_mask windows — close them immediately

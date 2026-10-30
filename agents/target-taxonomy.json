@@ -112,7 +112,7 @@
         "faintStructureGoal": "outer_halo",
         "subjectScale": "medium",
         "dynamicRange": "low",
-        "hasIFN": false, "hasDustLanes": true, "hasBrightCore": false, "hasHIIRegions": false
+        "hasDust": true, "hasIFN": false, "hasDustLanes": true, "hasBrightCore": false, "hasHIIRegions": false
       },
       "processingNotes": "Blue scattered light IS the subject. Very faint — aggressive stretch. Star halos around illuminating star must be controlled. Natural blue, not cyan."
     },
@@ -127,7 +127,7 @@
         "faintStructureGoal": "none",
         "subjectScale": "medium",
         "dynamicRange": "low",
-        "hasIFN": false, "hasDustLanes": true, "hasBrightCore": false, "hasHIIRegions": false
+        "hasDust": true, "hasIFN": false, "hasDustLanes": true, "hasBrightCore": false, "hasHIIRegions": false
       },
       "processingNotes": "Subject IS the dark region — silhouette against star field. Over-stretching destroys it. Subtle dust texture via gentle LHE. Star colors in background are a feature."
     },

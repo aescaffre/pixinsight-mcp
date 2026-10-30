@@ -54,11 +54,15 @@ ${coreDesc}.
 ## How to improve the core
 - START: \`recall_champion('core_integrity')\` and \`recall_memory\` — reuse the structure recipe that won before for this class (warm start). Then \`check_core_contrast\` on \`CORE_WORK\` for the baseline (note coreStructFrac, haloFrac, relContrast, whiteFraction).
 - Recover internal structure with MASKED detail tools through the core mask: \`multi_scale_enhance\` (LHE) and, for a bright resolvable core, a gentle masked HDRMT (donut mask) — but HDRMT RINGS on smooth reflection cores, so prefer LHE there. Compress a bright/blown pedestal with \`continuous_clamp\` so structure shows instead of a white patch.
-- Re-check \`check_core_contrast\` after each change. TARGET: coreStructFrac high (>0.80), haloFrac low (<0.03), relContrast up, whiteFraction low — i.e. a structured, non-haloed, non-blown center. ${isGalaxy ? 'For this galaxy, do NOT chase contrast into noise — a soft-but-clean structured bulge beats a crunchy one.' : ''}
-- ${isReflection ? 'Watch the HALO specifically: the failure mode here is a smooth bright ring around the center. If haloFrac rises, back off / clamp the pedestal — do not brighten the halo.' : 'Watch for ringing around the rim.'}
-- Bracket 2-3 strengths, \`save_variant\` the best (note coreStructFrac/haloFrac/relContrast achieved), and stop. Restraint beats overcooking.
+- Re-check \`check_core_contrast\` after each change. TARGET (relative to the BASELINE you measured on CORE_WORK, which is the judge's own criterion): coreStructFrac >= baseline+0.01 OR relContrast >= baseline+0.02, AND haloFrac <= baseline+0.005, AND \`check_core_contrast\` still passes; whiteFraction must not rise. Absolute struct/halo targets no longer apply. ${isGalaxy ? 'For this galaxy, do NOT chase relContrast (a soft bulge is correct) and do NOT chase contrast into noise — a soft-but-clean structured bulge beats a crunchy one.' : ''}
+- ${isReflection ? 'Watch the HALO specifically: the failure mode here is a smooth bright ring around the center. If haloFrac rises, back off / clamp the pedestal — do not brighten the halo. Verify with \`check_ringing\` and \`scan_burnt_regions\`.' : 'Watch for ringing around the rim: use \`check_ringing\` and \`scan_burnt_regions\` (also \`check_highlight_texture\`) on CORE_WORK after masked detail work.'}
+- Stop after at most 3 brackets, or as soon as a bracket wins and the next is not better. Restraint beats overcooking.
 
 ${GLOBAL_RULES}
+## END-STATE CONTRACT
+- \`CORE_WORK\` must hold your BEST result when you stop (restore_from_clone into it if an earlier bracket was better than the last one).
+- Also \`save_variant\` your best with the note \`core_spec struct=<..> halo=<..> relC=<..>\`.
+- A deterministic post-pass measures CORE_WORK and every saved variant against the baseline and picks the winner; it does not read your prose.
 
 Begin: recall the core champion + memory, measure the baseline core on \`CORE_WORK\`, then improve ONLY the core.`;
 }

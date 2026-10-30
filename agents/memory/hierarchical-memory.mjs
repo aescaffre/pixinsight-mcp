@@ -20,6 +20,50 @@ import os from 'os';
 const MEMORY_DIR = path.join(os.homedir(), '.pixinsight-mcp', 'agent-memory');
 const HIER_FILE = path.join(MEMORY_DIR, 'hierarchical.json');
 
+
+// WI-20: entries carrying these tags are user/gate feedback and must never be evicted by dedupe/cap.
+export const PROTECTED_TAGS = ['feedback', 'user_feedback', 'bug', 'gotcha', 'quality_gate'];
+export const UNIVERSAL_AUTO_CAP = 30;       // auto/technique universal entries kept (by recency)
+export const UNIVERSAL_SUMMARY_RECENT = 20; // recent non-feedback universal entries shown in the summary
+
+export function isProtectedEntry(e) {
+  const tags = Array.isArray(e && e.tags) ? e.tags.map(t => String(t).toLowerCase()) : [];
+  return tags.some(t => PROTECTED_TAGS.includes(t));
+}
+
+// Stale workarounds from the pre-WI-05 state machine. Annotated, not deleted.
+const SUPERSEDED_PATTERNS = [
+  /Pedestal \+ PixelMath screen blend bypass works for finalize state/i,
+  /State machine:\s*lrgb_combine requires compose state\s*[\u2014-]+\s*trigger via early star_protected_blend/i,
+  /Ringing gate made non-blocking \(code fix pending restart\)/i,
+];
+export const SUPERSEDED_NOTE = '[SUPERSEDED after WI-05: compose is entered with begin_composition; lrgb_combine/inject tools are allowed in compose; do not use star-blend or pedestal bypasses]';
+
+export function isSupersededEntry(e) {
+  const text = `${e && e.title || ''} ${e && e.content || ''}`;
+  return SUPERSEDED_PATTERNS.some(re => re.test(text));
+}
+
+function entryTime(e) {
+  const t = Date.parse(e && e.timestamp);
+  return Number.isFinite(t) ? t : 0;
+}
+
+/**
+ * Universal-level curation: dedupe, keep every protected (feedback/bug/gotcha/quality_gate) entry,
+ * cap the remaining entries at `autoCap` by recency. Returns a new array (original order preserved).
+ */
+export function curateUniversal(entries, autoCap = UNIVERSAL_AUTO_CAP) {
+  const deduped = deduplicateEntries(entries || []);
+  const rest = deduped.filter(e => !isProtectedEntry(e));
+  if (rest.length <= autoCap) return deduped;
+  const keep = new Set(rest.slice().sort((a, b) => entryTime(b) - entryTime(a)).slice(0, autoCap));
+  return deduped.filter(e => isProtectedEntry(e) || keep.has(e));
+}
+
+function firstLine(e) { return (e.content || '').split('\n')[0]; }
+function annotate(e) { return isSupersededEntry(e) ? ` ${SUPERSEDED_NOTE}` : ''; }
+
 /**
  * Load the hierarchical memory store.
  * @returns {object} { universal: [], trait: {}, type: {}, data_class: {}, target: {}, meta: {} }
@@ -82,8 +126,13 @@ export function recallForBrief(brief) {
   const fc = brief.target?.fieldCharacteristics || {};
   const dcKey = dataClassKey(brief);
 
+  // WI-11: narrowband runs must not inherit broadband-era universal/trait rules (entries stamped with a broadband workflow).
+  const isNB = !!brief.dataDescription?.narrowband;
+  const isBroadbandStamp = (e) => !!e && typeof e.workflow === 'string' && e.workflow !== 'SHO' && e.workflow !== 'HOO';
+  const keepForBrief = (e) => !(isNB && isBroadbandStamp(e));
+
   const result = {
-    universal: mem.universal || [],
+    universal: (mem.universal || []).filter(keepForBrief),
     trait: [],
     type: mem.type[classification] || [],
     data_class: mem.data_class[dcKey] || [],
@@ -104,31 +153,45 @@ export function recallForBrief(brief) {
 
   for (const tk of traitKeys) {
     if (mem.trait[tk]) {
-      result.trait.push(...mem.trait[tk]);
+      result.trait.push(...mem.trait[tk].filter(keepForBrief));
     }
   }
 
   // Build human-readable summary for the agent
   const lines = [];
+  if (isNB && brief.dataDescription?.starless) {
+    lines.push('NOTE: STARLESS NARROWBAND run — entries about star blends, SPCC, Ha injection and compose-state tricks are broadband-era; do not call star blend tools to unlock compose (use begin_composition).');
+  }
+  // WI-20: universal = dedupe + feedback exemption; summary shows feedback-tagged + the 20 most recent others.
+  result.universal = curateUniversal(result.universal);
   if (result.universal.length) {
-    lines.push(`## Universal Rules (${result.universal.length})`);
-    for (const e of result.universal) lines.push(`- ${e.title || 'untitled'}: ${(e.content || '').split('\n')[0]}`);
+    const fb = result.universal.filter(isProtectedEntry);
+    const recent = result.universal.filter(e => !isProtectedEntry(e))
+      .sort((a, b) => entryTime(b) - entryTime(a)).slice(0, UNIVERSAL_SUMMARY_RECENT);
+    const shown = new Set([...fb, ...recent]);
+    lines.push(`## Universal Rules (${shown.size} of ${result.universal.length})`);
+    for (const e of result.universal) {
+      if (shown.has(e)) lines.push(`- [STRONG] ${e.title || 'untitled'}: ${firstLine(e)}${annotate(e)}`);
+    }
   }
   if (result.trait.length) {
     lines.push(`\n## Trait-Level (${result.trait.length}) [${traitKeys.join(', ')}]`);
-    for (const e of result.trait) lines.push(`- [${e.traitKey || '?'}] ${e.title || 'untitled'}: ${(e.content || '').split('\n')[0]}`);
+    for (const e of result.trait) lines.push(`- [TYPE prior ${e.traitKey || '?'}, conf=${e.confidence || 1}] ${e.title || 'untitled'}: ${firstLine(e)}${annotate(e)}`);
   }
   if (result.type.length) {
     lines.push(`\n## Type-Level: ${classification} (${result.type.length})`);
-    for (const e of result.type) lines.push(`- ${e.title || 'untitled'}: ${(e.content || '').split('\n')[0]}`);
+    for (const e of result.type) lines.push(`- [TYPE prior ${classification}, conf=${e.confidence || 1}] ${e.title || 'untitled'}: ${firstLine(e)}${annotate(e)}`);
   }
   if (result.data_class.length) {
     lines.push(`\n## Data-Class: ${dcKey} (${result.data_class.length})`);
-    for (const e of result.data_class) lines.push(`- ${e.title || 'untitled'}: ${(e.content || '').split('\n')[0]}`);
+    for (const e of result.data_class) lines.push(`- [DATA-CLASS prior ${dcKey}, conf=${e.confidence || 1}] ${e.title || 'untitled'}: ${firstLine(e)}${annotate(e)}`);
   }
   if (result.target.length) {
     lines.push(`\n## Target: ${targetName} (${result.target.length})`);
-    for (const e of result.target) lines.push(`- ${e.title || 'untitled'}: ${(e.content || '').split('\n')[0]}`);
+    for (const e of result.target) lines.push(`- [WEAK target-only ${targetName}, conf=${e.confidence || 1}] ${e.title || 'untitled'}: ${firstLine(e)}${annotate(e)}`);
+  }
+  if (lines.some(l => l.startsWith('- ['))) {
+    lines.push('\nDoctrine: target-level recipes are anecdotes; prefer type/trait rules; override when measurements disagree.');
   }
 
   result.summary = lines.join('\n');
@@ -152,6 +215,9 @@ export function saveEntry(level, key, entry, brief) {
     scopeKey: key,
     source: brief?.target?.name || 'unknown',
     confidence: entry.confidence || 1,
+    // WI-11: stamp the run type so narrowband recalls can exclude broadband-era rules
+    workflow: brief?.dataDescription?.workflow,
+    starless: !!brief?.dataDescription?.starless,
   };
 
   // Add trait key for trait-level entries
@@ -207,31 +273,32 @@ export function optimizeMemory() {
   const promotions = [];
 
   // --- Phase 1: Target → Type promotion ---
-  // Group target entries by param+value across different targets
-  const targetParams = {}; // { "type:param:value" → [entry, entry, ...] }
+  // WI-20: group by type+param only; promote the MEDIAN when 3+ distinct targets fall within ±15% of it
+  // (exact float equality essentially never fires). Non-numeric values still need an exact match.
+  const targetParams = {}; // { type -> { param -> [entry+targetName] } }
   for (const [targetName, entries] of Object.entries(mem.target)) {
     for (const e of entries) {
       if (!e.param || e.value === undefined) continue;
-      // We need the type — look for it in the entry tags or infer
       const type = e.tags?.find(t => t.startsWith('type:'))?.replace('type:', '') || e.classification || 'unknown';
-      const key = `${type}:${e.param}:${JSON.stringify(e.value)}`;
-      if (!targetParams[key]) targetParams[key] = [];
-      targetParams[key].push({ ...e, targetName });
+      if (!targetParams[type]) targetParams[type] = {};
+      if (!targetParams[type][e.param]) targetParams[type][e.param] = [];
+      targetParams[type][e.param].push({ ...e, targetName });
     }
   }
 
-  for (const [key, entries] of Object.entries(targetParams)) {
-    const uniqueTargets = new Set(entries.map(e => e.targetName));
-    if (uniqueTargets.size >= 3) {
-      const [type, param, valueStr] = key.split(':');
-      const value = JSON.parse(valueStr);
-      // Check if already exists at type level
+  for (const [type, params] of Object.entries(targetParams)) {
+    for (const [param, entries] of Object.entries(params)) {
+      const agreeing = agreeingEntries(entries);
+      if (!agreeing) continue;
+      const { group, value } = agreeing;
+      const uniqueTargets = new Set(group.map(e => e.targetName));
+      if (uniqueTargets.size < 3) continue;
       const typeEntries = mem.type[type] || [];
       const existing = typeEntries.find(e => e.param === param);
       if (!existing) {
         const promoted = {
           title: `[AUTO-PROMOTED] ${param} = ${value} (confirmed across ${uniqueTargets.size} targets)`,
-          content: `Parameter ${param} with value ${value} was confirmed as optimal across targets: ${[...uniqueTargets].join(', ')}. Auto-promoted from target to type level.`,
+          content: `Parameter ${param} with value ${value} (median of values within 15%) was confirmed across targets: ${[...uniqueTargets].join(', ')}. Auto-promoted from target to type level.`,
           param,
           value,
           confidence: uniqueTargets.size,
@@ -245,7 +312,6 @@ export function optimizeMemory() {
         mem.type[type].push(promoted);
         promotions.push(`target→type: ${param}=${value} for ${type} (${uniqueTargets.size} targets)`);
       } else {
-        // Update confidence
         existing.confidence = Math.max(existing.confidence || 1, uniqueTargets.size);
         existing.sources = [...new Set([...(existing.sources || []), ...uniqueTargets])];
       }
@@ -311,7 +377,7 @@ export function optimizeMemory() {
   for (const level of ['universal', 'trait', 'type', 'data_class', 'target']) {
     const container = mem[level];
     if (Array.isArray(container)) {
-      mem[level] = deduplicateEntries(container);
+      mem[level] = level === 'universal' ? curateUniversal(container) : deduplicateEntries(container);
     } else {
       for (const [key, entries] of Object.entries(container)) {
         container[key] = deduplicateEntries(entries);
@@ -337,14 +403,48 @@ export function optimizeMemory() {
   return { promotions, totalEntries: countEntries(mem) };
 }
 
-function deduplicateEntries(entries) {
+export function deduplicateEntries(entries) {
   const seen = new Set();
   return entries.filter(e => {
+    if (isProtectedEntry(e)) return true; // WI-20: feedback-tagged entries are never evicted
     const key = `${e.param || ''}:${JSON.stringify(e.value || '')}:${e.title || ''}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
+}
+
+/**
+ * WI-20: find the largest group of entries whose numeric values lie within ±15% of the group median
+ * (non-numeric: largest exact-match group). Returns { group, value } or null.
+ */
+export function agreeingEntries(entries) {
+  const numeric = entries.filter(e => typeof e.value === 'number' && Number.isFinite(e.value));
+  let best = null;
+  if (numeric.length) {
+    for (const anchor of numeric) {
+      const group = numeric.filter(e => Math.abs(e.value - anchor.value) <= 0.15 * Math.abs(anchor.value) + 1e-12);
+      const vals = group.map(e => e.value).sort((x, y) => x - y);
+      const mid = vals.length >> 1;
+      const median = vals.length % 2 ? vals[mid] : (vals[mid - 1] + vals[mid]) / 2;
+      const tight = group.filter(e => Math.abs(e.value - median) <= 0.15 * Math.abs(median) + 1e-12);
+      const tv = tight.map(e => e.value).sort((x, y) => x - y);
+      const tm = tv.length >> 1;
+      const tmed = tv.length % 2 ? tv[tm] : (tv[tm - 1] + tv[tm]) / 2;
+      const nT = new Set(tight.map(e => e.targetName)).size;
+      if (!best || nT > best.n) best = { group: tight, value: tmed, n: nT };
+    }
+  }
+  const byVal = {};
+  for (const e of entries) {
+    if (typeof e.value === 'number') continue;
+    (byVal[JSON.stringify(e.value)] ||= []).push(e);
+  }
+  for (const [k, group] of Object.entries(byVal)) {
+    const nT = new Set(group.map(e => e.targetName)).size;
+    if (!best || nT > best.n) best = { group, value: JSON.parse(k), n: nT };
+  }
+  return best ? { group: best.group, value: best.value } : null;
 }
 
 function loadTaxonomySafe() {

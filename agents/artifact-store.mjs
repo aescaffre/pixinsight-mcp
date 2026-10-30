@@ -5,6 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
+import { scoreVariantDimensions } from './ledger.mjs';
 
 const home = os.homedir();
 const DEFAULT_RUNS_DIR = path.join(home, '.pixinsight-mcp', 'runs');
@@ -69,8 +70,11 @@ export class ArtifactStore {
    * @returns {object} { artifactId, dir, metadata }
    */
   async saveVariant(ctx, agentName, viewId, params, metrics, opts = {}) {
-    const counter = (this.variantCounters[agentName] || 0) + 1;
+    // WI-07b: counter comes from disk (max variant_NN + 1) so MCP restarts / resumed agents never reuse an id
+    const counter = Math.max(this.variantCounters[agentName] || 0, this.maxVariantOnDisk(agentName)) + 1;
     this.variantCounters[agentName] = counter;
+    this.manifest.variantCounters = { ...(this.manifest.variantCounters || {}), [agentName]: counter };
+    this._saveManifest();
     const variantId = `variant_${String(counter).padStart(2, '0')}`;
     const dir = path.join(this.agentDir(agentName), variantId);
     fs.mkdirSync(dir, { recursive: true });
@@ -130,16 +134,58 @@ export class ArtifactStore {
     return { artifactId, dir, metadata };
   }
 
+  /** WI-07b: highest variant_NN number present on disk for an agent (0 if none). */
+  maxVariantOnDisk(agentName) {
+    try {
+      const dir = this.agentDir(agentName);
+      if (!fs.existsSync(dir)) return 0;
+      let max = 0;
+      for (const d of fs.readdirSync(dir)) {
+        const m = /^variant_(\d+)$/.exec(d);
+        if (m) max = Math.max(max, parseInt(m[1], 10));
+      }
+      return max;
+    } catch { return 0; }
+  }
+
+  /** WI-07b: mark the run as crashed (PixInsight died). */
+  fail(reason) {
+    this.manifest.status = 'crashed';
+    this.manifest.failReason = reason || null;
+    this.manifest.failedAt = new Date().toISOString();
+    this._saveManifest();
+  }
+
   /**
    * Load a variant by opening its XISF in PixInsight.
+   * artifactId: full "runId/agent/variant_NN" or a short "variant_NN" (resolved for opts.agentName, default giga_orchestrator).
+   * opts: { agentName, viewId (rename target, default = the saved view id), replaceExisting (default false) }
    * @returns {object} metadata
    */
-  async loadVariant(ctx, artifactId) {
-    const parts = artifactId.split('/');
-    const agentName = parts[1];
-    const variantId = parts[2];
+  async loadVariant(ctx, artifactId, opts = {}) {
+    let agentName, variantId;
+    if (String(artifactId).indexOf('/') < 0) {
+      agentName = opts.agentName || 'giga_orchestrator';
+      variantId = String(artifactId);
+      if (!this.getVariantById(agentName, variantId)) throw new Error(`Variant not found: ${variantId} (agent ${agentName})`);
+    } else {
+      const parts = artifactId.split('/');
+      agentName = parts[1];
+      variantId = parts[2];
+    }
     const dir = path.join(this.agentDir(agentName), variantId);
     const metadata = JSON.parse(fs.readFileSync(path.join(dir, 'metadata.json'), 'utf-8'));
+    const targetId = opts.viewId || metadata.viewId;
+
+    // Never let PixInsight auto-suffix silently: refuse (or replace) when the target id is already open
+    const before = await ctx.listImages();
+    if (before.some(i => i.id === targetId)) {
+      if (opts.replaceExisting) {
+        await ctx.pjsr(`var w=ImageWindow.windowById('${targetId}');if(!w.isNull)w.forceClose();`);
+      } else {
+        throw new Error(`REFUSED: view ${targetId} already open — close it or pass view_id (or replace_existing=true)`);
+      }
+    }
 
     // Open XISF in PixInsight
     const r = await ctx.send('open_image', '__internal__', { filePath: metadata.xisfPath });
@@ -153,14 +199,24 @@ export class ArtifactStore {
 
     // Rename view to original ID if needed
     const loadedId = r.outputs?.id;
-    if (loadedId && loadedId !== metadata.viewId) {
+    if (loadedId && loadedId !== targetId) {
       await ctx.pjsr(`
         var w = ImageWindow.windowById('${loadedId}');
-        if (!w.isNull) w.mainView.id = '${metadata.viewId}';
+        if (!w.isNull) w.mainView.id = '${targetId}';
       `);
     }
 
-    return metadata;
+    return { ...metadata, loadedViewId: targetId };
+  }
+
+  /**
+   * WI-08: record the model/effort/usage an agent subprocess ran with (merged into
+   * manifest.agents[name]; does not clobber a promoted `winner`).
+   */
+  recordAgentRun(agentName, info) {
+    const prev = this.manifest.agents[agentName] || {};
+    this.manifest.agents[agentName] = { ...prev, ...info, recordedAt: new Date().toISOString() };
+    this._saveManifest();
   }
 
   /**
@@ -168,6 +224,7 @@ export class ArtifactStore {
    */
   promoteWinner(agentName, variantId, score) {
     this.manifest.agents[agentName] = {
+      ...(this.manifest.agents[agentName] || {}),
       winner: `${this.runId}/${agentName}/${variantId}`,
       score,
       promotedAt: new Date().toISOString()
@@ -195,7 +252,7 @@ export class ArtifactStore {
    */
   getWinner(agentName) {
     const winnerInfo = this.manifest.agents[agentName];
-    if (!winnerInfo) return null;
+    if (!winnerInfo || !winnerInfo.winner) return null;
 
     const parts = winnerInfo.winner.split('/');
     const variantId = parts[2];
@@ -246,6 +303,20 @@ export class ArtifactStore {
         return JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
       })
       .filter(Boolean);
+  }
+
+  /**
+   * Persist a gate-battery result (WI-01 run_quality_gates) into a variant's metadata.json
+   * under the `gates` key. list_variants shows it.
+   * @returns {object|null} updated metadata or null if the variant does not exist
+   */
+  saveVariantMetrics(agentName, variantId, gates) {
+    const metaPath = path.join(this.agentDir(agentName), variantId, 'metadata.json');
+    if (!fs.existsSync(metaPath)) return null;
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+    meta.gates = { ...gates, evaluatedAt: new Date().toISOString() };
+    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+    return meta;
   }
 
   /**
@@ -327,3 +398,35 @@ export class ArtifactStore {
     fs.writeFileSync(this.manifestPath, JSON.stringify(this.manifest, null, 2));
   }
 }
+
+/**
+ * WI-07a: pick the best saved variant when the agent never produced a passing finish.
+ * Preference: persisted run_quality_gates PASS (fewest warnings) > highest ledger
+ * scoreVariantDimensions sum > latest save. Variants without an existing XISF are skipped.
+ * @returns {object|null} variant metadata
+ */
+export function getBestVariant(store, agent = 'giga_orchestrator') {
+  const variants = (store.listVariants(agent) || []).filter(v => v && v.xisfPath && fs.existsSync(v.xisfPath));
+  if (variants.length === 0) return null;
+  const byNum = (v) => parseInt(String(v.variantId || '').replace(/\D/g, ''), 10) || 0;
+  const passing = variants.filter(v => v.gates && v.gates.pass === true);
+  if (passing.length) {
+    passing.sort((a, b) => (a.gates.warnings || 0) - (b.gates.warnings || 0) || byNum(b) - byNum(a));
+    return passing[0];
+  }
+  let best = null, bestScore = -Infinity;
+  for (const v of variants) {
+    const m = v.gates?.metrics || v.metrics;
+    if (!m) continue;
+    let sc = -Infinity;
+    try {
+      const dims = scoreVariantDimensions(m);
+      const vals = Object.values(dims).filter(x => typeof x === 'number' && isFinite(x));
+      if (vals.length) sc = vals.reduce((a, b) => a + b, 0);
+    } catch {}
+    if (sc > bestScore || (sc === bestScore && best && byNum(v) > byNum(best))) { best = v; bestScore = sc; }
+  }
+  if (best && bestScore > -Infinity) return best;
+  return variants.slice().sort((a, b) => byNum(b) - byNum(a))[0];
+}
+

@@ -107,6 +107,8 @@ export const HARD_CONSTRAINTS = {
   },
   channel_balanced(stats, brief) {
     if (!stats.perChannel) return { pass: true, detail: 'mono image' };
+    // null = explicitly disabled (false-colour narrowband palettes); undefined = legacy default
+    if (brief?.hardConstraints?.maxChannelImbalance === null) return { pass: true, detail: 'false-color palette — skipped' };
     const maxImbalance = brief?.hardConstraints?.maxChannelImbalance ?? 0.05;
     const { R, G, B } = stats.perChannel;
     const meds = [R.median, G.median, B.median];

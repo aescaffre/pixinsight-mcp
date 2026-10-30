@@ -17,12 +17,10 @@ const READ_ONLY_TOOLS = new Set([
   'check_saturation',
   'check_ringing',
   'check_star_quality',
-  'check_core_burning',
   'scan_burnt_regions',
   'check_sharpness',
   'list_open_images',
   'recall_memory',
-  'compute_scores',
   'measure_subject_detail',
 ]);
 
@@ -31,7 +29,6 @@ const QUALITY_GATE_TOOLS = new Set([
   'check_saturation',
   'check_ringing',
   'check_star_quality',
-  'check_core_burning',
   'scan_burnt_regions',
   'check_sharpness',
   'finish',
@@ -44,7 +41,7 @@ const QUALITY_GATE_TOOLS = new Set([
  * @param {string} tracePath - Absolute path to the trace.jsonl file
  * @returns {object[]} Parsed trace entries
  */
-function parseTraceFile(tracePath) {
+function parseTraceFile(tracePath, eventsOut) {
   if (!fs.existsSync(tracePath)) {
     return [];
   }
@@ -59,6 +56,8 @@ function parseTraceFile(tracePath) {
 
     try {
       const entry = JSON.parse(line);
+      if (entry.type === 'run_meta') continue; // WI-08 header line, not a tool call
+      if (entry.event) { if (eventsOut) eventsOut.push(entry); continue; } // WI-06 repair_engaged / repair_violation / repair_cleared
       // Normalize: ensure required fields have defaults
       entries.push({
         seq: entry.seq ?? i,
@@ -70,6 +69,12 @@ function parseTraceFile(tracePath) {
         durationMs: entry.durationMs ?? 0,
         resultSummary: entry.resultSummary ?? '',
         error: entry.error ?? null,
+        agent: entry.agent ?? 'giga_orchestrator',       // WI-25 (old traces are giga-only)
+        pid: entry.pid ?? null,                          // WI-25
+        model: entry.model ?? null,                      // WI-25
+        state: entry.state ?? null,                      // WI-06
+        repair_policy: entry.repair_policy ?? null,      // WI-06
+        failedGates: Array.isArray(entry.failedGates) ? entry.failedGates : null,  // WI-06
       });
     } catch (err) {
       // Skip malformed lines — could be truncated writes
@@ -323,13 +328,61 @@ function detectFinishOutcome(entries) {
 }
 
 /**
+ * Aggregate finish rejection reasons per gate (WI-06).
+ * Uses the structured failedGates written by the MCP server; legacy traces without
+ * failedGates fall back to a prefix match on the (truncated) resultSummary.
+ *
+ * @param {object[]} entries
+ * @returns {Object<string, number>} gate -> count of finish rejections that failed it
+ */
+function aggregateRejectReasons(entries) {
+  const out = {};
+  const bump = (g) => { out[g] = (out[g] || 0) + 1; };
+  const LEGACY = [
+    [/CORE PERCEPTUALLY BURNT/, 'core_contrast'], [/BURN SCAN FAILED/, 'burn_clip'], [/TOO MANY BRIGHT REGIONS/, 'bright_blocks'],
+    [/OVER-SATURATED/, 'saturation'], [/STARS TOO DIM/, 'stars_brightness'], [/STARS SEVERELY BLOATED/, 'stars_fwhm'],
+    [/TONAL PRESENCE SUBDUED/, 'tonal_presence'], [/IMAGE TOO DARK/, 'exposure'], [/BACKGROUND TOO NOISY/, 'noise'],
+    [/IFN\/DUST GATE/, 'dust_ifn'], [/PALETTE IMBALANCED/, 'palette'], [/AESTHETIC TOO LOW/, 'aesthetic'],
+  ];
+  for (const e of entries) {
+    if (e.tool !== 'finish') continue;
+    if (e.failedGates && e.failedGates.length) { for (const g of e.failedGates) bump(g.gate || g.tool || 'unknown'); continue; }
+    if (!(e.resultSummary || '').toUpperCase().includes('REJECTED')) continue;
+    for (const [re, gate] of LEGACY) if (re.test(e.resultSummary)) bump(gate);
+  }
+  return out;
+}
+
+/**
+ * WI-25: per-agent call statistics.
+ * @returns {Object<string,{calls:number,totalMs:number,errors:number,blocked:number}>}
+ */
+export function computePerAgent(entries) {
+  const out = {};
+  for (const e of entries) {
+    const a = out[e.agent || 'giga_orchestrator'] || (out[e.agent || 'giga_orchestrator'] = { calls: 0, totalMs: 0, errors: 0, blocked: 0 });
+    a.calls++;
+    a.totalMs += e.durationMs || 0;
+    if (e.error) {
+      if (/^BLOCKED/.test(String(e.error))) a.blocked++; else a.errors++;
+    }
+  }
+  return out;
+}
+
+/**
  * Analyze a trace.jsonl file and return a structured analysis of the pipeline run.
  *
  * @param {string} tracePath - Absolute path to the trace.jsonl file
  * @returns {object} Structured analysis object
  */
-export function analyzeTrace(tracePath) {
-  const entries = parseTraceFile(tracePath);
+export function analyzeTrace(tracePath, opts = {}) {
+  const repairEvents = [];
+  const allEntries = parseTraceFile(tracePath, repairEvents);
+  // WI-25: per-agent table covers every agent; branch/gate analysis defaults to the giga agent only
+  const perAgent = computePerAgent(allEntries);
+  const agent = opts.agent === undefined ? 'giga_orchestrator' : opts.agent;
+  const entries = agent ? allEntries.filter(e => e.agent === agent) : allEntries;
 
   // Handle empty trace
   if (entries.length === 0) {
@@ -341,9 +394,12 @@ export function analyzeTrace(tracePath) {
       qualityGates: [],
       retries: [],
       toolStats: {},
+      perAgent,
       winnerViewId: null,
       finishAttempts: 0,
       finishRejections: 0,
+      reject_reasons: {},
+      repairEvents: [],
       entries: [],
     };
   }
@@ -381,9 +437,12 @@ export function analyzeTrace(tracePath) {
     qualityGates,
     retries,
     toolStats,
+    perAgent,
     winnerViewId,
     finishAttempts,
     finishRejections,
+    reject_reasons: aggregateRejectReasons(entries),
+    repairEvents,
     entries,
   };
 }

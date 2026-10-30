@@ -26,11 +26,14 @@ When you find a winning scale (or a scale that ate signal), call \`save_memory\`
  * @param {object} brief - Processing brief
  * @returns {string} System prompt
  */
+export const GRADIENT_PROMPT_VERSION = 2;
+
 export function buildGradientAgentPrompt(brief) {
   const cls = brief.target.classification;
   const isGalaxy = cls.startsWith('galaxy');
   const isNebula = cls.includes('nebula');
-  const hasIFN = brief?.fieldContext?.hasIFN || isGalaxy; // galaxies often sit in faint IFN
+  const fc = brief?.target?.fieldCharacteristics || {};
+  const hasFaint = !!fc.hasIFN || !!fc.hasDust || isGalaxy || /reflection|dark_nebula|mixed_field/.test(cls) || !!brief?.processingProfile?.ifn;
 
   return `You are the GRADIENT Agent of an autonomous astrophotography processing system.
 
@@ -72,7 +75,7 @@ Tools, from safest to most aggressive:
    glow). It ABEs R, G, B independently then recombines. Start poly_degree=1 (large scale). Only
    escalate to 2, then 3, if the color-gradient score is still > 0.015 AND subject_detail held.
 3. \`run_abe\` with poly_degree — for a stubborn luminance ramp on a single view (e.g. L).
-A green cast is a COLOR gradient too — \`run_per_channel_abe\` removes it spatially, and SPCC (next phase) neutralizes any residual global green. You do not have SCNR here; do not reach for it.
+A green cast is a COLOR gradient too — \`run_per_channel_abe\` removes it spatially, and SPCC (next phase) neutralizes any residual global green. SCNR is intentionally unavailable to you: global green is SPCC's job in the next phase.
 
 ## THE LOOP (per view: RGB first, then L if present)
 1. \`recall_memory\` — did a prior run land a winning poly_degree for ${cls}? Start one step below it.
@@ -85,9 +88,10 @@ A green cast is a COLOR gradient too — \`run_per_channel_abe\` removes it spat
 6. \`save_memory\`: "${cls}: gradient scale = per_channel_abe poly_degree=N (score X→Y, subject_detail held/dropped)".
 7. Repeat for L (FILTER_L) — L is mono, so use \`run_abe\` poly_degree (no color), keep it gentle.
 
-${hasIFN ? `## FAINT SIGNAL PROTECTION (this field has faint extended structure)
-This target sits in faint IFN / extended halos. Protecting it OUTRANKS perfect flatness.
-- NEVER use poly_degree > 2 on the combined RGB unless subject_detail is unmistakably unharmed.
+${hasFaint ? `## FAINT SIGNAL PROTECTION (faint IFN / dust / extended halos)
+This target sits in faint IFN / dust / extended halos. Protecting it OUTRANKS perfect flatness.
+- NEVER use poly_degree > 2 on the combined RGB. Cap run_per_channel_abe escalation at poly_degree 2.
+- Before keeping ANY per-channel pass, run measure_subject_detail AND a preview; restore_from_clone if detail dropped.
 - A MILD residual gradient (score ~0.010) with intact IFN beats a perfectly flat but signal-stripped background.
 - If GC alone gets you under 0.012, consider stopping there.` : ''}
 ${isNebula ? `## NEBULA NOTE
@@ -102,8 +106,9 @@ Lean on low poly_degree and verify against the preview that you are removing sky
 - Leave the corrected images under their ORIGINAL view IDs (the combined RGB id, and FILTER_L).
 
 ## WHEN DONE
-End with a short summary: starting vs final color-gradient score for RGB (and L), the winning
-tool/scale, and whether subject_detail held. The corrected linear views stay in place for prep phase 2.
+End with a short summary, and make the LAST line exactly this fixed block (fill the values):
+\`GRADIENT RESULT: rgb <before>→<after> | l <before>→<after> | tool=<name> poly_degree=<n> | subject_detail=held|dropped\`
+(use "l n/a" when there is no L). The corrected linear views stay in place for prep phase 2.
 
 ${GLOBAL_RULES}`;
 }

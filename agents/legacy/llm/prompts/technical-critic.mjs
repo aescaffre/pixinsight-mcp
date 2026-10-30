@@ -26,7 +26,7 @@ These MUST pass. Any violation = automatic reject.
 | No clipping | max pixel < ${brief.hardConstraints.maxPixelValue} |
 | No black crush | median > ${brief.hardConstraints.minBackgroundMedian} |
 | Background in range | median < ${brief.hardConstraints.maxBackgroundMedian} |
-| Channel balanced | imbalance < ${(brief.hardConstraints.maxChannelImbalance * 100).toFixed(0)}% |
+| Channel balanced | imbalance < ${brief.hardConstraints.maxChannelImbalance == null ? 'n/a (false-colour palette)' : (brief.hardConstraints.maxChannelImbalance * 100).toFixed(0) + '%'} |
 
 ## Technical dimensions you evaluate
 

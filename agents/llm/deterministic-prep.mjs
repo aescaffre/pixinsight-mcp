@@ -18,35 +18,13 @@ import { setiStretch } from '../ops/stretch.mjs';
 import { runGC } from '../ops/gradient.mjs';
 import { createLumMask } from '../ops/masks.mjs';
 import { savePreview } from '../ops/preview.mjs';
+import { measureDetailBaseline } from '../ops/subject-metrics.mjs';
+import { measureBaselineTexture, recordPsfField } from '../ops/quality-gates.mjs';
 import { cloneImage, closeImage, purgeUndoHistory } from '../ops/image-mgmt.mjs';
+import { detectNarrowbandWorkflow, runNarrowbandPrep } from './narrowband-prep.mjs';
+import { CACHE_DIR, fileFingerprint } from './prep-cache-util.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
-const CACHE_DIR = path.join(os.homedir(), '.pixinsight-mcp', 'prep-cache');
-
-/**
- * Compute a fingerprint for a file using size + first/last 64KB.
- * Fast enough for multi-GB XISF files.
- */
-function fileFingerprint(filePath) {
-  if (!filePath?.trim() || !fs.existsSync(filePath)) return 'missing';
-  const stat = fs.statSync(filePath);
-  const hash = crypto.createHash('sha256');
-  hash.update(`${stat.size}:${stat.mtimeMs}:`);
-  const fd = fs.openSync(filePath, 'r');
-  const chunk = 65536;
-  const buf = Buffer.alloc(chunk);
-  // First 64KB
-  const readHead = fs.readSync(fd, buf, 0, chunk, 0);
-  hash.update(buf.subarray(0, readHead));
-  // Last 64KB
-  if (stat.size > chunk) {
-    const readTail = fs.readSync(fd, buf, 0, chunk, stat.size - chunk);
-    hash.update(buf.subarray(0, readTail));
-  }
-  fs.closeSync(fd);
-  return hash.digest('hex').slice(0, 16);
-}
-
 /**
  * Compute the cache key for a given config.
  * Combines: prep script hash + fingerprint of each input master.
@@ -250,9 +228,50 @@ async function autoCropViews(ctx, { targetName, hasL, log }) {
  * @param {object} config - Pipeline config
  * @param {object} opts - { outputDir, log }
  */
+/**
+ * Resolve BXT sharpen settings from the profile (WI-23). Sharpen runs only when
+ * correct_only === false; strength falls back to 0.70 (the baseline all approved
+ * images were produced with).
+ */
+export function resolveBxtOptions(brief) {
+  const b = brief?.processingProfile?.tools?.BXT || {};
+  const s = b.sharpen_nonstellar;
+  return {
+    correct_only: b.correct_only,
+    sharpen_nonstellar: (typeof s === 'number' && isFinite(s)) ? s : 0.70,
+  };
+}
+
+/** Number literal with at least 2 decimals (keeps the PJSR text identical to the legacy 0.70). */
+function fmtNum(x) {
+  const s = String(x);
+  if (!s.includes('.')) return s + '.00';
+  return /\.\d$/.test(s) ? s + '0' : s;
+}
+
+/** PJSR for the BXT sharpen step on a view, or null when the profile says correct-only. */
+export function bxtSharpenPjsr(viewId, bxt) {
+  if (!bxt || bxt.correct_only !== false) return null;
+  return `
+    var P=new BlurXTerminator;
+    P.correct_only=false;P.sharpen_nonstellar=${fmtNum(bxt.sharpen_nonstellar)};P.adjust_star_halos=0.00;
+    P.AI_file='';P.device=0;
+    P.executeOn(ImageWindow.windowById('${viewId}').mainView);
+  `;
+}
+
+/** Seti HDR params from the profile stretch block. */
+export function resolveHdrOptions(brief) {
+  const s = brief?.processingProfile?.stretch || {};
+  return { hdrAmount: s.hdr_amount ?? 0.25, hdrKnee: s.hdr_knee ?? 0.35 };
+}
+
 export async function runDeterministicPrep(ctx, config, opts = {}) {
   const log = opts.log || console.log;
   const F = config.files;
+  // Mono narrowband masters (SHO / HOO) have their own prep: no SPCC, unlinked
+  // per-channel stretch, palette composite. See narrowband-prep.mjs.
+  if (detectNarrowbandWorkflow(F)) return runNarrowbandPrep(ctx, config, opts);
   const targetName = F.targetName || 'Target';
   const hasL = !!(F.L?.trim());
   const hasHa = !!(F.Ha?.trim());
@@ -276,6 +295,9 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
   const nxtLinear = (typeof profileNxt.denoise_linear === 'number') ? profileNxt.denoise_linear : 0.30;
   const nxtPost = (typeof profileNxt.denoise_post_stretch === 'number') ? profileNxt.denoise_post_stretch : 0.25;
   log(`[PREP] NXT from profile: linear=${nxtLinear}, post-stretch=${nxtPost}`);
+  const bxt = resolveBxtOptions(brief);
+  const hdrOpts = resolveHdrOptions(brief);
+  log(`[PREP] BXT from profile: ${bxt.correct_only === false ? 'sharpen_nonstellar=' + bxt.sharpen_nonstellar : 'correct-only (no sharpen)'}; Seti HDR amount=${hdrOpts.hdrAmount} knee=${hdrOpts.hdrKnee}`);
 
   // ========================================================================
   // DISK SPACE CHECK — refuse to start if < 20 GB free
@@ -358,7 +380,9 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     views: {},
     stats: {},
     previews: {},
+    applied: [],   // WI-23 provenance: {step, view, params}
   };
+  const noteApplied = (step, view, params) => result.applied.push({ step, view, params });
 
   // ===== PHASE 1 (cacheable): open / align / combine RGB =====
   if (!phase1FromCache) {
@@ -441,7 +465,11 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
   const refDim = dims.R;
   // Skip alignment for pre-stretched Ha (user provides it already aligned/cropped)
   const haIsStretched = !!(F.haIsStretched);
-  const needsAlign = masters.filter(m => m.path?.trim() && dims[m.key] !== refDim && dims[m.key] !== 'missing' && m.key !== 'R' && !(m.key === 'Ha' && haIsStretched));
+  // config.files.forceAlign: register every channel to R even when dimensions match (borrowed
+  // masters integrated separately showed red/cyan star fringes on M101, 2026-10-29).
+  const forceAlign = !!F.forceAlign;
+  const needsAlign = masters.filter(m => m.path?.trim() && (forceAlign || dims[m.key] !== refDim) && dims[m.key] !== 'missing' && m.key !== 'R' && !(m.key === 'Ha' && haIsStretched));
+  if (forceAlign) log('  forceAlign: registering all channels to R (distortion correction ' + (F.distortionCorrection ? 'on' : 'off') + ')');
 
   if (needsAlign.length > 0) {
     log(`  Aligning ${needsAlign.map(m => m.key).join(', ')} to R...`);
@@ -466,7 +494,7 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
         P.outputDirectory='${tmpDir.replace(/'/g, "\\'")}';P.outputPrefix='aligned_';P.outputPostfix='';
         P.overwriteExistingFiles=true;P.onError=StarAlignment.prototype.Continue;
         P.useTriangles=true;P.polygonSides=5;P.sensitivity=0.50;P.noGUIMessages=true;
-        P.distortionCorrection=false;P.generateDrizzleData=false;
+        P.distortionCorrection=${F.distortionCorrection ? 'true' : 'false'};P.generateDrizzleData=false;   // config.files.distortionCorrection: true for borrowed/drizzled sets with field distortion (channel fringing on M101, 2026-10-29)
         P.executeGlobal();
       `);
 
@@ -474,17 +502,20 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
       const alignedPath = path.join(tmpDir, `aligned_${m.id}.xisf`);
       if (fs.existsSync(alignedPath)) {
         await ctx.pjsr(`var w=ImageWindow.windowById('${m.id}');if(!w.isNull)w.forceClose();`);
-        await ctx.send('open_image', '__internal__', { filePath: alignedPath });
-        // Find and rename
+        const opened = await ctx.send('open_image', '__internal__', { filePath: alignedPath });
+        // Rename the window the open call returned (PI 1.9.5 names aligned files 'ImageNN',
+        // so searching ids for 'aligned' found nothing and the combine then saw ImageNN views, 2026-10-29).
         const imgs2 = await ctx.listImages();
         for (const cm of imgs2.filter(i => i.id.includes('crop_mask'))) {
           await ctx.pjsr(`var w=ImageWindow.windowById('${cm.id}');if(!w.isNull)w.forceClose();`);
         }
-        const aligned = imgs2.find(i => i.id.includes('aligned'));
-        if (aligned && aligned.id !== m.id) {
-          await ctx.pjsr(`var w=ImageWindow.windowById('${aligned.id}');if(!w.isNull)w.mainView.id='${m.id}';`);
+        const openedId = opened.outputs?.id || imgs2.find(i => i.id.includes('aligned'))?.id;
+        if (openedId && openedId !== m.id) {
+          await ctx.pjsr(`var w=ImageWindow.windowById('${openedId}');if(!w.isNull)w.mainView.id='${m.id}';`);
         }
-        log(`    ${m.key} aligned OK`);
+        const chk = await ctx.pjsr(`ImageWindow.windowById('${m.id}').isNull ? 'MISSING' : 'OK'`);
+        if ((chk.outputs?.consoleOutput || '') !== 'OK') throw new Error(`alignment of ${m.key}: window '${m.id}' missing after rename (opened id: ${openedId})`);
+        log(`    ${m.key} aligned OK (${openedId} -> ${m.id})`);
       } else {
         log(`    WARNING: aligned file not found for ${m.key}`);
       }
@@ -546,6 +577,10 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
           tgt.mainView.beginProcess();
           tgt.keywords=src.keywords;
           tgt.copyAstrometricSolution(src);
+          // Old masters (PI 1.8.9 era) carry the solution as XISF properties only, no WCS
+          // keywords; SPCC on 1.9.5 then reports "no valid astrometric solution". Regenerate.
+          try { tgt.updateAstrometryMetadata(); } catch (e) {}
+          try { tgt.regenerateAstrometricSolution(); } catch (e) {}
           tgt.mainView.endProcess();
           ok = tgt.hasAstrometricSolution;
         }
@@ -603,6 +638,9 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     P.executeOn(ImageWindow.windowById('${targetName}').mainView);
   `).catch(() => log('  BN skipped'));
 
+  // WI-26 D: field-dependent PSF map on LINEAR data, before the BXT correct-only pass (advisory)
+  await recordPsfField(ctx, targetName, brief, 'before_bxt_correct', log);
+
   // BXT correct
   log('  BXT correct...');
   await pjsrOrDie(`
@@ -611,6 +649,8 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     P.AI_file='';P.device=0;
     P.executeOn(ImageWindow.windowById('${targetName}').mainView);
   `, 'BXT correct on RGB');
+  noteApplied('BXT correct', targetName, { correct_only: true });
+  await recordPsfField(ctx, targetName, brief, 'after_bxt_correct', log);
 
   // Ensure WCS astrometric solution for SPCC.
   // FAST PATH: the WCS was copied onto the combined pre-autocrop (and carried
@@ -639,6 +679,8 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
         tgt.keywords=src.keywords;
         if(src.hasAstrometricSolution){
           tgt.copyAstrometricSolution(src);
+          try { tgt.updateAstrometryMetadata(); } catch (e) {}
+          try { tgt.regenerateAstrometricSolution(); } catch (e) {}
           hasWCS = tgt.hasAstrometricSolution;
         }
         tgt.mainView.endProcess();
@@ -658,24 +700,51 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     // a process: must use Init()/SolveImage() (not executeOn), read pixel scale
     // from FITS keywords (XPIXSZ — NOT a hardcoded 1.88), persist via
     // metadata.SaveProperties/SaveKeywords, and check hasAstrometricSolution.
-    log('  No WCS in masters — plate solving with ImageSolver (script API)...');
+    log('  No WCS in masters — plate solving with ImageSolver (V8 script library)...');
+    // ImageSolver is a SCRIPT library compiled into the watcher only when MCP_WITH_SOLVER is
+    // defined (pjsr/pixinsight-mcp-watcher.js). V8 edition (ImageSolver 6.5.0):
+    // initialize(window) + solveImage(window); solveImage throws on failure and persists the
+    // solution itself. SEED SCALE: initialize() loads the user's last ImageSolver settings
+    // (their own 1520 mm scope) over the file's keywords, so a borrowed 459 mm dataset got a
+    // 4x wrong seed and never aligned (M101, 2026-10-29). We derive the seed from FOCALLEN/XPIXSZ
+    // (or config.files.pixelScale, arcsec/px) and bracket x2 / x0.5 / x4 / x0.25 if it fails.
+    const pixelScaleHint = Number(F.pixelScale) > 0 ? Number(F.pixelScale) : 0;
     const solveR = await ctx.pjsr(`
       var w = ImageWindow.windowById('${targetName}');
-      var P = new ImageSolver;
-      P.Init(w);                       // reads RA/DEC/FOCALLEN/XPIXSZ into P.metadata
-      P.metadata.useFocal = true;      // seed scale from focal+pixel size, refine on stars
-      try { P.solverCfg.catalogMode = 2; } catch (e) {}   // VizieR online
-      try { P.solverCfg.autoMagnitude = true; } catch (e) {}
-      try { P.solverCfg.tryExhaustiveInitialAlignment = true; } catch (e) {}
-      try { P.solverCfg.sensitivity = 0.6; } catch (e) {}
-      try { P.solverCfg.showStars = false; P.solverCfg.generateErrorImg = false; P.solverCfg.showDistortion = false; P.solverCfg.showSimplifiedSurfaces = false; } catch (e) {}
-      var ok = false;
-      try { ok = P.SolveImage(w); } catch (e) { ok = false; }
-      if (ok) { try { P.metadata.SaveProperties(w); } catch (e) {} try { P.metadata.SaveKeywords(w); } catch (e) {} }
-      w.hasAstrometricSolution ? 'SOLVED' : 'SOLVE_FAILED';
+      var out = 'SOLVE_FAILED';
+      if (typeof ImageSolver === 'undefined') {
+        out = 'SOLVER_UNAVAILABLE';
+      } else {
+        function kw(n) { for (var i = 0; i < w.keywords.length; i++) if (w.keywords[i].name === n) return parseFloat(String(w.keywords[i].value).replace(/'/g, '')); return NaN; }
+        var hint = ${pixelScaleHint};
+        var fl = kw('FOCALLEN'), px = kw('XPIXSZ');
+        var base = hint > 0 ? hint : ((fl > 0 && px > 0) ? 206.265 * px / fl : 0);
+        var seeds = base > 0 ? [base, base * 2, base * 0.5, base * 4, base * 0.25] : [];
+        var err = '', tried = [];
+        for (var k = 0; k < seeds.length && !w.hasAstrometricSolution; k++) {
+          var P = new ImageSolver;
+          try {
+            P.initialize(w);
+            try { P.metadata.useFocal = false; P.metadata.resolution = seeds[k] / 3600; } catch (e) {}
+            try { P.solverCfg.catalogMode = 2; P.solverCfg.autoMagnitude = true; P.solverCfg.tryExhaustiveInitialAlignment = true; } catch (e) {}
+            try { P.solverCfg.showStars = false; P.solverCfg.generateErrorImg = false; P.solverCfg.showDistortion = false; P.solverCfg.showSimplifiedSurfaces = false; } catch (e) {}
+            P.solveImage(w);
+          } catch (e) { err = String(e); }
+          tried.push(seeds[k].toFixed(3));
+        }
+        if (!seeds.length) {
+          try { var P0 = new ImageSolver; P0.initialize(w); P0.solveImage(w); } catch (e) { err = String(e); }
+          tried.push('header-only');
+        }
+        out = (w.hasAstrometricSolution ? 'SOLVED' : 'SOLVE_FAILED') + ' seeds=' + tried.join('/') + (err && !w.hasAstrometricSolution ? ' ' + err : '');
+      }
+      out;
     `);
     const solved = (solveR.outputs?.consoleOutput || '').includes('SOLVED');
-    log('  Plate solve: ' + (solved ? 'SUCCESS' : 'FAILED (SPCC may not work)'));
+    const solveOut = (solveR.outputs?.consoleOutput || solveR.error?.message || '').split('\n')[0];
+    log('  Plate solve: ' + (solved ? 'SUCCESS' : (solveOut.includes('SOLVER_UNAVAILABLE')
+      ? 'SOLVER_UNAVAILABLE (define MCP_WITH_SOLVER in the watcher to enable the fallback) — SPCC may not work'
+      : 'FAILED (' + solveOut + ') — SPCC may not work')));
   }
 
   // SPCC with equipment-specific filters + QE from equipment.json
@@ -692,6 +761,7 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
   // Write curve data to temp file (too large for inline PJSR)
   const spccCurvesModule = await import('../../scripts/spcc-curves.mjs');
   const spccDataPath = '/tmp/spcc-curves-prep.json';
+  const spccLogPath = '/tmp/spcc-prep-console.log';
   fs.writeFileSync(spccDataPath, JSON.stringify(spccCurvesModule.default));
 
   const spccR = await ctx.pjsr(`
@@ -716,23 +786,41 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     P.psfMinSNR=20;
     P.psfChannelSearchTolerance=2;
     P.psfAllowClusteredSources=true;
-    var ret=P.executeOn(ImageWindow.windowById('${targetName}').mainView);
-    ret?'SPCC_OK':'SPCC_FAILED';
+    // No graphs/star maps: SPCC renders them in a WebView, which failed with
+    // 'LoadWebViewContent(): API function error (0x40240000)' on M101 (2026-10-29) and failed the process.
+    P.generateGraphs=false;P.generateStarMaps=false;P.generateTextFiles=false;
+    // Capture the PI console so a failure reports its real cause (catalog, stars, WCS, network).
+    var logFile='${spccLogPath}';
+    var ret=false, err='';
+    try { console.beginLog(logFile); } catch(e) {}
+    try { ret=P.executeOn(ImageWindow.windowById('${targetName}').mainView); } catch(e) { err=String(e); }
+    if (!ret) {
+      // Retry once after regenerating the astrometric metadata (properties-only solutions).
+      try { var tw=ImageWindow.windowById('${targetName}'); tw.mainView.beginProcess(); try { tw.updateAstrometryMetadata(); } catch(e1) {} try { tw.regenerateAstrometricSolution(); } catch(e2) {} tw.mainView.endProcess(); } catch(e3) {}
+      try { console.writeln('SPCC retry after astrometry regeneration'); ret=P.executeOn(ImageWindow.windowById('${targetName}').mainView); } catch(e) { err=String(e); }
+    }
+    try { console.endLog(); } catch(e) {}
+    var tail='';
+    try { var ls=File.readLines(logFile); tail=ls.slice(Math.max(0,ls.length-25)).join('\\n'); } catch(e) {}
+    (ret?'SPCC_OK':'SPCC_FAILED') + (err?' exception='+err:'') + '\\n' + tail;
   `);
   const spccOut = spccR.outputs?.consoleOutput || '';
-  log('  ' + spccOut);
-  if (!spccOut.includes('SPCC_OK')) {
-    // SPCC can fail when WCS/plate solve is missing (common with drizzled data).
-    // Fall through — the agent can handle color calibration manually, or
+  const spccOk = spccOut.includes('SPCC_OK');
+  log('  ' + (spccOk ? 'SPCC_OK' : spccOut.split('\n')[0]));
+  noteApplied('SPCC', targetName, { ok: spccOk });
+  if (!spccOk) {
+    // Fall through — the agent can run run_spcc / manual color calibration, and
     // BackgroundNeutralization below provides basic balance.
-    log('  WARNING: SPCC failed (likely missing WCS). Falling back to background neutralization only.');
+    const tail = spccOut.split('\n').slice(1).filter(l => l.trim()).slice(-12);
+    log('  WARNING: SPCC failed. Falling back to background neutralization only. PI console tail:');
+    for (const l of tail) log('    | ' + l.replace(/\x1b\[[0-9;]*m/g, ''));
     log('  The agent can run run_spcc or manual color calibration later if needed.');
   }
 
   // AUTOCROP (moved here, post-SPCC): SPCC needed a valid WCS on the full-frame
   // combined; cropping drops the solution. Now trim the black + low-coverage edges
   // off RGB + L (both still linear, pre-NXT/SXT/stretch — keeps them aligned).
-  if (F.autoCropBorder) {
+  if (F.autoCropBorder || F.forceAlign) {   // forced registration leaves empty bands along the edges: always trim them
     log('\n[PREP] Auto-trimming black + low-coverage edges (post-SPCC)...');
     await autoCropViews(ctx, { targetName, hasL, log });
   }
@@ -744,15 +832,17 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     P.denoise=${nxtLinear};P.detail=0.15;
     P.executeOn(ImageWindow.windowById('${targetName}').mainView);
   `, 'NXT linear on RGB');
+  noteApplied('NXT linear', targetName, { denoise: nxtLinear, detail: 0.15 });
 
   // BXT sharpen (aggressive nonstellar for small galaxy detail)
-  log('  BXT sharpen (nonstellar=0.70)...');
-  await pjsrOrDie(`
-    var P=new BlurXTerminator;
-    P.correct_only=false;P.sharpen_nonstellar=0.70;P.adjust_star_halos=0.00;
-    P.AI_file='';P.device=0;
-    P.executeOn(ImageWindow.windowById('${targetName}').mainView);
-  `, 'BXT sharpen on RGB');
+  const bxtRgbPjsr = bxtSharpenPjsr(targetName, bxt);
+  if (bxtRgbPjsr) {
+    log(`  BXT sharpen (nonstellar=${bxt.sharpen_nonstellar})...`);
+    await pjsrOrDie(bxtRgbPjsr, 'BXT sharpen on RGB');
+    noteApplied('BXT sharpen', targetName, { correct_only: false, sharpen_nonstellar: bxt.sharpen_nonstellar, adjust_star_halos: 0 });
+  } else {
+    log('  BXT sharpen skipped (profile correct_only)');
+  }
 
   // SXT — extract stars from linear RGB
   log('  SXT (linear)...');
@@ -762,6 +852,7 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     P.AI_file='';P.device=0;
     P.executeOn(ImageWindow.windowById('${targetName}').mainView);
   `, 'SXT on RGB');
+  noteApplied('SXT linear', targetName, { stars: true, unscreen: false, overlap: 0.20 });
   // Find star image
   const postSxt = await ctx.listImages();
   const starView = postSxt.find(i => i.id.includes('stars'));
@@ -772,7 +863,8 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
 
   // Seti stretch RGB (target from processing profile)
   log(`  Seti stretch RGB (target=${rgbTarget}, headroom=${headroom})...`);
-  await setiStretch(ctx, targetName, { targetMedian: rgbTarget, hdrAmount: 0.25, hdrKnee: 0.35, hdrHeadroom: headroom });
+  await setiStretch(ctx, targetName, { targetMedian: rgbTarget, hdrAmount: hdrOpts.hdrAmount, hdrKnee: hdrOpts.hdrKnee, hdrHeadroom: headroom });
+  noteApplied('SetiStretch', targetName, { targetMedian: rgbTarget, hdrAmount: hdrOpts.hdrAmount, hdrKnee: hdrOpts.hdrKnee, hdrHeadroom: headroom });
 
   // NXT post-stretch (from profile)
   log(`  NXT post-stretch (${nxtPost})...`);
@@ -781,6 +873,7 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     P.denoise=${nxtPost};P.detail=0.15;
     P.executeOn(ImageWindow.windowById('${targetName}').mainView);
   `, 'NXT post-stretch on RGB');
+  noteApplied('NXT post-stretch', targetName, { denoise: nxtPost, detail: 0.15 });
 
   result.views.rgb = targetName;
   result.stats.rgb = await getStats(ctx, targetName);
@@ -819,14 +912,17 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
       P.denoise=${nxtLinear};P.detail=0.15;
       P.executeOn(ImageWindow.windowById('FILTER_L').mainView);
     `, 'NXT linear on L');
+    noteApplied('NXT linear', 'FILTER_L', { denoise: nxtLinear, detail: 0.15 });
 
     // BXT sharpen on L (aggressive nonstellar)
-    log('  BXT sharpen on L (nonstellar=0.70)...');
-    await pjsrOrDie(`
-      var P=new BlurXTerminator;
-      P.correct_only=false;P.sharpen_nonstellar=0.70;P.adjust_star_halos=0.00;P.AI_file='';P.device=0;
-      P.executeOn(ImageWindow.windowById('FILTER_L').mainView);
-    `, 'BXT sharpen on L');
+    const bxtLPjsr = bxtSharpenPjsr('FILTER_L', bxt);
+    if (bxtLPjsr) {
+      log(`  BXT sharpen on L (nonstellar=${bxt.sharpen_nonstellar})...`);
+      await pjsrOrDie(bxtLPjsr, 'BXT sharpen on L');
+      noteApplied('BXT sharpen', 'FILTER_L', { correct_only: false, sharpen_nonstellar: bxt.sharpen_nonstellar, adjust_star_halos: 0 });
+    } else {
+      log('  BXT sharpen on L skipped (profile correct_only)');
+    }
 
     // SXT on L (starless)
     log('  SXT on L (linear, starless)...');
@@ -835,6 +931,7 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
       P.stars=true;P.unscreen=false;P.overlap=0.20;P.AI_file='';P.device=0;
       P.executeOn(ImageWindow.windowById('FILTER_L').mainView);
     `, 'SXT on L');
+    noteApplied('SXT linear', 'FILTER_L', { stars: true, unscreen: false, overlap: 0.20 });
     // Close L stars (we only use RGB stars)
     const postLSxt = await ctx.listImages();
     const lStars = postLSxt.find(i => i.id.includes('FILTER_L') && i.id.includes('stars'));
@@ -844,7 +941,8 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
 
     // Seti stretch L (brighter to extract faint detail, with headroom for HDRMT)
     log(`  Seti stretch L (target=${lTarget.toFixed(2)}, headroom=${Math.max(headroom, 0.05).toFixed(2)})...`);
-    await setiStretch(ctx, 'FILTER_L', { targetMedian: lTarget, hdrAmount: 0.25, hdrKnee: 0.35, hdrHeadroom: Math.max(headroom, 0.05) });
+    await setiStretch(ctx, 'FILTER_L', { targetMedian: lTarget, hdrAmount: hdrOpts.hdrAmount, hdrKnee: hdrOpts.hdrKnee, hdrHeadroom: Math.max(headroom, 0.05) });
+    noteApplied('SetiStretch', 'FILTER_L', { targetMedian: lTarget, hdrAmount: hdrOpts.hdrAmount, hdrKnee: hdrOpts.hdrKnee, hdrHeadroom: Math.max(headroom, 0.05) });
 
     result.views.l = 'FILTER_L';
     result.stats.l = await getStats(ctx, 'FILTER_L');
@@ -932,6 +1030,7 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
         P.correct_only=true;P.adjust_star_halos=0.00;P.AI_file='';P.device=0;
         P.executeOn(ImageWindow.windowById('FILTER_Ha').mainView);
       `, 'BXT correct on Ha');
+      noteApplied('BXT correct', 'FILTER_Ha', { correct_only: true });
 
       log('  NXT linear on Ha (0.20)...');
       await pjsrOrDie(`
@@ -939,13 +1038,16 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
         P.denoise=0.20;P.detail=0.15;
         P.executeOn(ImageWindow.windowById('FILTER_Ha').mainView);
       `, 'NXT linear on Ha');
+      noteApplied('NXT linear', 'FILTER_Ha', { denoise: 0.20, detail: 0.15 });
 
-      log('  BXT sharpen on Ha (nonstellar=0.70)...');
-      await pjsrOrDie(`
-        var P=new BlurXTerminator;
-        P.correct_only=false;P.sharpen_nonstellar=0.70;P.adjust_star_halos=0.00;P.AI_file='';P.device=0;
-        P.executeOn(ImageWindow.windowById('FILTER_Ha').mainView);
-      `, 'BXT sharpen on Ha');
+      const bxtHaPjsr = bxtSharpenPjsr('FILTER_Ha', bxt);
+      if (bxtHaPjsr) {
+        log(`  BXT sharpen on Ha (nonstellar=${bxt.sharpen_nonstellar})...`);
+        await pjsrOrDie(bxtHaPjsr, 'BXT sharpen on Ha');
+        noteApplied('BXT sharpen', 'FILTER_Ha', { correct_only: false, sharpen_nonstellar: bxt.sharpen_nonstellar, adjust_star_halos: 0 });
+      } else {
+        log('  BXT sharpen on Ha skipped (profile correct_only)');
+      }
 
       log('  SXT on Ha (linear)...');
       await pjsrOrDie(`
@@ -953,6 +1055,7 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
         P.stars=true;P.unscreen=false;P.overlap=0.20;P.AI_file='';P.device=0;
         P.executeOn(ImageWindow.windowById('FILTER_Ha').mainView);
       `, 'SXT on Ha');
+      noteApplied('SXT linear', 'FILTER_Ha', { stars: true, unscreen: false, overlap: 0.20 });
       const postHaSxt = await ctx.listImages();
       const haStars = postHaSxt.find(i => i.id.includes('FILTER_Ha') && i.id.includes('stars'));
       if (haStars) {
@@ -960,7 +1063,8 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
       }
 
       log(`  Seti stretch Ha (target=${haTarget.toFixed(2)}, headroom=${headroom})...`);
-      await setiStretch(ctx, 'FILTER_Ha', { targetMedian: haTarget, hdrAmount: 0.25, hdrKnee: 0.35, hdrHeadroom: headroom });
+      await setiStretch(ctx, 'FILTER_Ha', { targetMedian: haTarget, hdrAmount: hdrOpts.hdrAmount, hdrKnee: hdrOpts.hdrKnee, hdrHeadroom: headroom });
+      noteApplied('SetiStretch', 'FILTER_Ha', { targetMedian: haTarget, hdrAmount: hdrOpts.hdrAmount, hdrKnee: hdrOpts.hdrKnee, hdrHeadroom: headroom });
     }
 
     result.views.ha = 'FILTER_Ha';
@@ -977,7 +1081,22 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
   // bloat when the agent stretched again (FWHM 13.5px on M81).
   if (result.views.stars) {
     log('\n[PREP] Step 7: Star layer kept LINEAR (agent will stretch via stretch_stars tool)');
+    result.stats.stars = await getStats(ctx, result.views.stars);
+    if ((result.stats.stars?.median ?? 0) >= 0.001) {
+      process.stderr.write(`[PREP] WARNING: star layer median=${result.stats.stars.median.toExponential(2)} >= 0.001 — it may not be linear; stretch_stars may refuse it.\n`);
+    }
   }
+
+  // Detail baseline for the finish detail-gain advisory (best effort, never fatal).
+  try {
+    log('\n[PREP] Measuring detail baseline (credible/weber) on final prep views...');
+    result.baselineDetail = await measureDetailBaseline(ctx, { rgb: result.views.rgb, l: result.views.l }, { runDir: opts.runDir, log });
+    if (brief) { brief._baselineDetail = result.baselineDetail; brief._hasL = !!result.views.l; }
+  } catch (e) { log(`  [PREP] baseline detail failed: ${e.message}`); }
+
+  // WI-26 C: deterministic highlight-texture baseline on the SXT-starless stretched RGB / L / Ha
+  // (one locateSubjectROI; stores brief._roi + brief._baselineTexture, writes baseline-texture.json).
+  result.baselineTexture = await measureBaselineTexture(ctx, { rgb: result.views.rgb, l: result.views.l, ha: result.views.ha }, { runDir: opts.runDir, brief, log });
 
   // Note: only PHASE 1 (open/align/combine) is cached — see above. The gradient
   // phase and everything after it run fresh each time and are not cached.
@@ -990,6 +1109,11 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
   if (result.views.l) log(`  L: ${result.views.l} (median=${result.stats.l?.median.toFixed(4)})`);
   if (result.views.ha) log(`  Ha: ${result.views.ha} (median=${result.stats.ha?.median.toFixed(4)})`);
   if (result.views.stars) log(`  Stars: ${result.views.stars}`);
+  if (brief?._psfPrep) {
+    result.psf = brief._psfPrep;
+    const pa = brief._psfPrep.after_bxt_correct || brief._psfPrep.before_bxt_correct;
+    if (pa) log(`  PSF field: verdict=${pa.verdict ?? 'n/a'}${pa.crop_box ? `, crop_box x ${pa.crop_box.x0}-${pa.crop_box.x1} y ${pa.crop_box.y0}-${pa.crop_box.y1}` : ''} (advisory; crop box is for the user's crop, never the starless deliverable)`);
+  }
   log('  All working assets ready for creative agents.\n');
 
   return result;

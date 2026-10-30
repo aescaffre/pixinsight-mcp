@@ -26,7 +26,10 @@ that sends PJSR commands to PixInsight via file-based IPC (`~/.pixinsight-mcp/br
    - **HaLRGB** (with luminance): enable lum branch steps + `lrgb_combine`
    - **LRGB** (no Ha): set `files.Ha` to `""`, disable `ha_sxt`, `ha_stretch`, `ha_curves`, `ha_ghs`, `ha_inject`. Pipeline auto-detects `hasHa` and skips Ha file opening/cloning.
    - **RGB only** (no Ha, no L): set `files.Ha` and `files.L` to `""`, disable Ha + lum branch steps
-5. **Open PixInsight** — Start PixInsight with the PJSR watcher script loaded.
+   - **SHO / HOO narrowband** (mono S/H/O, false-color Hubble palette): set `files.S`, `files.Ha`, `files.O` (no R/G/B), `"palette": "SHO"`, `"starless": true`.
+     The agentic pipeline detects the workflow and runs `narrowband-prep.mjs`: no SPCC, unlinked per-channel stretch, star-residual repair, and classic SHO + hue shift + SCNR.
+     See [Narrowband SHO](reference/narrowband-sho.md).
+5. **Open PixInsight** — Start PixInsight, then run `pjsr/pixinsight-mcp-watcher.js` from Script > Script Editor. The watcher runs on PJSR's V8 runtime (`#engine v8`, PI >= 1.9.5): the console banner must print `Engine: V8 ...` (and `~/.pixinsight-mcp/bridge/watcher-state.json` reports `engine: "v8"`). Never add `#engine sm`: the legacy SpiderMonkey runtime's GC aborts PI 1.9.5 on arm64. ES2025 is allowed inside the watcher file; the command snippets sent from Node still use ES5 style by convention (V8 runs them fine; `Process.prototype.CONST` is rewritten to `Process.CONST` by the watcher).
 6. **Run** — `node scripts/run-pipeline.mjs --config path/to/config.json`
 7. **Iterate** — Review JPEG previews at each step. Adjust params in config. Re-run.
 
@@ -182,6 +185,8 @@ Gives HDRMT working room in bright galaxy cores. L headroom=0.10, RGB headroom=0
 | GC method | `gc.method` | "auto"/"abe"/"gc" | "auto" compares ABE vs GC and picks best |
 | ABE polynomial | `gc.polyDegree` | 2-4 | 2-3 for galaxies (higher eats signal) |
 
+> Two gradient phases: (1) the procedural prep GC above; (2) the agentic gradient sub-agent (giga-run Phase 1.5) on LINEAR combined RGB/L: run_gradient_correction, then run_per_channel_abe poly_degree 1-2 (cap 2 on faint IFN/dust/halo fields), run_abe default 2; run_scnr is excluded for it (`AGENT_TOOL_EXCLUDES`). It ends with a `GRADIENT RESULT:` line, persisted to `<run>/gradient-result.md`. Cache hash is salted with `GRADIENT_PROMPT_VERSION` (now 2).
+
 ### LHE / HDRMT Masks
 | What to adjust | Parameter | Range | Notes |
 |----------------|-----------|-------|-------|
@@ -211,6 +216,24 @@ Gives HDRMT working room in bright galaxy cores. L headroom=0.10, RGB headroom=0
 |----------------|-----------|-------|-------|
 | G channel factor | `channel_boost.G` | 0.90-1.0 | 0.94 for Astronomik filters — reduces green cast |
 | B channel factor | `channel_boost.B` | 1.0-1.15 | 1.12 for Astronomik filters — compensates blue deficit |
+
+## Gate Calibration Harness (WI-01)
+- Gate constants live in `agents/llm/gate-contract.mjs` (BURN_CLIP, NOISE_*_HARD, CONTRAST_GATE, ...); `gateThreshold(profile, key, default)` reads optional per-class overrides from `processing-profiles.json` and ignores any override whose enclosing object lacks a `_calibration` string. `buildGateTable(brief)` lists every gate with BLOCKING/WARNING/SKIPPED.
+- The finish gate battery is `evaluateFinishGates(ctx, store, brief, viewId, agentName, opts)` in `agents/llm/tools.mjs`; the agent can call it read-only with the `run_quality_gates` tool (public in every state; aesthetic critic off by default).
+- Gate 11 (aesthetic critic, RUBRIC_VERSION 2) is ADVISORY: the rubric is built per target by `buildCritiqueRubric(context)` (starless skips the STARS axis; narrowband judges palette balance, not natural colour; galaxies favour muted saturation). It blocks only if the profile sets `aesthetic_gate:{blocking:true,min_score,_calibration}` and the deliverable is neither starless nor narrowband; set that only after >=8 user-rated pairs per class. Every verdict is logged to `<run>/critiques/calibration.jsonl`; rate with `node agents/llm/rate-critique.mjs --run <id> --label <finish_variant_xx> --rate N` and check agreement with `--report` (Spearman rho per class).
+- Registry of user-approved / rejected images: `agents/calibration/approved-images.json`. Run `node scripts/backtest-gates.mjs [--id a,b] [--class X] [--critic] [--dry]` BEFORE merging any threshold change; exit 1 = an approved image hit a blocking failure (the threshold is wrong), exit 2 = a rejected image passes every blocking gate. Output: `agents/calibration/last-backtest.json`.
+- `giga-run.mjs --approve` copies the exported XISF to `~/.pixinsight-mcp/approved/<class>/` and appends an 'approved' registry entry (survives run pruning; ledger champions repoint to it).
+- **Per-agent model flags (WI-08)**: `giga-run.mjs --model-<agent> <alias> --effort-<agent> <low|medium|high|xhigh|max>` with `<agent>` in `giga|gradient|core|critic`. Resolution: CLI > `config.models.<agent>` ({model,effort,fallbackModel,maxTurns}) > defaults in `agents/llm/agent-models.mjs` (giga/gradient/core = `inherit` + fallback sonnet; critic = `opus`). `inherit` omits `--model` (uses ~/.claude/settings.json). engine-max also passes `--effort`, `--fallback-model` and `--max-turns ceil(1.5*maxTurns)` (outer safety net). Requested vs actual models (`modelUsage`) are recorded in `manifest.json.agents.<name>`, in the `run_meta` first line of `trace.jsonl`, and on ledger champions; a WARNING is logged when the actual model family differs from the request (fallback fired). Example: `--dry-run --model-gradient sonnet` prints the resolved table.
+- `npm test` runs `test/gate-contract.test.mjs`.
+- Baseline 2026-10-28 (pacman_lift5, ngc7023_iter03, ngc7023_best_of_both): no blocking failures; iter03 median FWHM is exactly 12.0 (= the non-galaxy hard limit, zero margin).
+
+## Natural-look intent and per-class `look` block (WI-03)
+- `aestheticIntent.colorSaturation` is `'muted' | 'moderate' | 'vivid'`. Default: `moderate` for galaxies except `galaxy_cluster`, `vivid` otherwise; override with `config.aesthetic.colorSaturation` or `opts.colorSaturation`.
+- `agents/processing-profiles.json` has a `look` block per class (`s_curve_midpoint`, `target_p90`, `max_p90`, `saturation_stages`, galaxies also `detail_gain_target/max`), all marked `_calibration: 'PROVISIONAL — back-test pending'` until `scripts/backtest-gates.mjs` confirms them on the approved images.
+- Under `moderate`/`muted` the giga prompt renders Branch C as "NATURAL BROADBAND" (single S-curve bracket around `look.s_curve_midpoint`, P90 judged at composition); `vivid` text is unchanged (emission/SHO/PNe render is byte-identical).
+- Gate 7 / `check_saturation`: warn above `look.target_p90`, FAIL above `look.max_p90` (classes without `look`: warn above `saturation.max_p90`, fail above +0.10). Helpers: `saturationThresholds(brief)`, `evaluateSaturationGate(p90S, brief)` in `agents/llm/tools.mjs`.
+- Ledger `color_richness` for galaxy classes = `1-|P90-target|/target` (closeness to the profile target, not "more is better").
+- `scripts/relevel-legacy-universal.mjs` (dry run by default, `--apply` backs up) moves target-specific legacy memory out of `universal`.
 
 ## Common Issues
 
@@ -310,7 +333,48 @@ Update the diagram when the pipeline structure changes (new steps added/removed,
 ## Reference Files
 
 - [PJSR Process Parameters](reference/pjsr-processes.md) — LHE, HDRMT, MorphologicalTransformation, LRGBCombination, Convolution, SCNR
-- [PJSR Gotchas](reference/pjsr-gotchas.md) — File I/O, eval quirks, crop masks, ECMAScript 5 constraints
+- [PJSR Gotchas](reference/pjsr-gotchas.md) — V8 runtime (#engine v8) + breaking-changes checklist, File I/O, eval quirks, crop masks, ES5-style convention for command snippets
 - [Xterminator Tools](reference/xterminator-tools.md) — SXT, NXT, BXT parameter reference
 - [GHS Stretch](reference/ghs-stretch.md) — GHS formula, PixelMath implementation, multi-pass strategy
+- [Narrowband SHO/HOO](reference/narrowband-sho.md) — palettes, hue shift, star-residual repair on aberrated fields, chroma mottle, validated PACMAN recipe
 - [Processing Knowledge](reference/processing-knowledge.md) — Equipment settings, quality assessment, lessons learned
+
+## Agent engine hygiene (WI-07a)
+- Turn budget is enforced MCP-side for every agent (argv[5] = maxTurns). At 0 turns remaining only a per-agent whitelist runs (giga: finish/save_variant/...; core: restore_from_clone; gradient: measurements) and others get `BUDGET EXHAUSTED`. Blocked calls (state/repair/budget) consume a turn (`recordBlockedCall`).
+- `claude -p` is spawned with stdin ignored (no 3 s stall) and the system prompt via `--append-system-prompt-file` (saved under `<run>/prompts/`).
+- MaxAgent result carries `timedOut`, `maxTurnsHit`, `exitCode`, `signal`. giga-run writes `run-summary.json` status: finished | recovered | timed_out | max_turns | crashed.
+- No passing finish -> `getBestVariant()` (gate-PASS > ledger dimension score > latest) writes final-selection.json with `recovered:true, gates_passed:false` so export and the core post-pass still run. Treat such output as unverified.
+
+## Giga state machine (WI-05)
+- States: assess -> generate_candidates -> compose -> finalize (+ repair, returns to the state it was entered from).
+- Pure measurement tools (measure_dust_coverage, check_noise, measure_color_gradient, get_image_dimensions, measure_uniformity, list_open_images, save_memory, recall_memory, run_quality_gates) are public in every state.
+- generate_candidates -> compose: call `begin_composition` (needs >=2 saved variants; required for starless SHO runs) or lrgb_combine / star_protected_blend. Branch coverage is ADVISORY only.
+- A REJECTED `finish` keeps the agent in compose (masks, detail, HDRMT, L-IFN/dust tools remain available); only a PASSED finish enters finalize (terminal; finalize is a superset of compose).
+- Blocked calls consume turn budget. `--base-run` warm starts begin directly in compose.
+
+## L incorporation (WI-13)
+- `inject_luminance {view_id, l_view_id=FILTER_L, weight 0.10-0.50 (0.20), mask_view_id?}` (category lrgb): CIE-Y ratio blend; returns the L/RGB median ratio, pre/post stats and p90S. Use when the ratio is > 2x (weight 0.20-0.30 for 2-3x, 0.15-0.20 for >3x); `lrgb_combine` prints an ADVISORY line above 2.0x. Galaxy weight cap 0.25 (profile `tools.LRGB.max_inject_weight`). Available in generate_candidates, compose and finalize.
+- Finish Gate 10 (l_usage) is provenance-based: `brief._lUsage` gets {tool, viewId, seq} from lrgb_combine, inject_luminance, inject_l_ifn and from run_pixelmath referencing FILTER_L or a clone of it (`brief._lRoots`, recorded on clone_image). Both survive MCP restarts via the agent-state snapshot. trace.jsonl is a fallback only when `_lUsage` is undefined. An unrelated PixelMath plus get_image_stats(FILTER_L) no longer counts as L usage.
+
+## Repair engine (WI-06)
+- `finish` REJECTED results end with `GATES_JSON: {"viewId":..,"failedGates":[{gate,tool,failedMetrics,reason,verify,repairable,...}]}`. The MCP server parses it, engages the first repairable policy (`findRepairPolicy(g.tool, ...)`) on that view in ANY state, and appends the policy guidance.
+- Active policy = forbids-only enforcement (`checkRepairForbids`: forbiddenTools + forbiddenPatterns, incl. `test(args, prov, ctx)` matchers). Blocked calls are traced as `repair_violation` and consume budget. Policies end on a verify-tool PASS, an accepted finish, or `maxRepairTurns` by seq.
+- Provenance is `lastModifier` for every image-modifying tool (+ `lastComposition`, history of 5). Synthetic policy keys: `finish:core_contrast|noise|dust|palette|exposure|l_missing`.
+- Trace entries carry `state`, `repair_policy`, `failedGates`; separate `event` lines (`repair_engaged|repair_violation|repair_cleared`); `analyzeTrace().reject_reasons` = {gate: count}.
+
+## Masks, 1:1 crops and post-op metrics (WI-15)
+- `mask_ops {mask_id, output_id?, invert, dilate_px, erode_px, blur_sigma, clip_low, clip_high, gamma, multiply_with}` (category masks, public in every state): shape a mono mask with PI processes only. `create_luminance_mask` gained `range:[lo,hi]` and `invert`; `create_zone_masks` gained `blur_sigma` (number or {core,shell,halo}) and is PixelMath-based (60 MP safe). Both report mean/coverage with EMPTY/FULL flags.
+- `save_and_show_preview` accepts `region` (full | center | subject | corner_tl/tr/bl/br | {x,y,w,h}), `crop_size` (1024), `scale` (1.0): native-resolution crop saved as `<label>__<region>_1to1.jpg`, result gives the crop rect in full-image coordinates plus median/MAD inside the crop. Judge noise, star shape and mottle only on 1:1 crops (full frame is ~0.2x on 60 MP). Shared helper: `renderCropJpeg` in agents/llm/vision.mjs (also used by the aesthetic critic).
+- Post-op lines (no opt-out): `run_nxt` -> bgNoise/dustNoise vs HARD 0.022/0.040 (skipped on linear data), `run_curves` S/RGB -> subject P90 saturation vs the finish thresholds, `run_bxt` (sharpen) -> medianFWHM/starsFound, `ha_inject_luminance` -> stats + R/G/B max with burn warning. A separate check is only needed after run_pixelmath or lrgb_combine.
+
+## Giga prompt structure (WI-09)
+`agents/llm/prompts/giga-orchestrator.mjs` no longer has Phase 0-9 scaffolding. Sections: RUNTIME STATES (mirrors `STATE_TOOLS`; `finish` is a probe, a REJECTED finish stays in compose), one GATE TABLE rendered from `gate-contract.buildGateTable(brief)` (every threshold in the prose refers to it; aesthetic row shows the real ADVISORY status), missions (intake, branches A-D, critic pass, composition, ranking, gradient+SCNR, validation, finalization). Rules:
+- Branch B is "FAINT STRUCTURE REVEAL"; the dust contract is rendered from `profile.ifn` (Gate 3e fails only when greyed AND crushed AND warm). Order: run_scnr -> inject_l_ifn (outer-field mask via create_luminance_mask + mask_ops) -> lift_dust -> run_nxt -> measure_dust_coverage + check_noise. `hasDustField = hasIFN || !!profile.ifn`; taxonomy `hasDust` is data only (no consumer yet).
+- L incorporation is a ratio-routed decision (medL/medRGB <= 2 and LRGB not avoided -> lrgb_combine; else inject_luminance weight 0.15-0.30, galaxies <= 0.25; PNe may use the additive PixelMath form or SYNTH_L). Both routes satisfy the L-usage gate.
+- PNe: continuous clamp is mandatory pre-star; HDRMT is an optional TRY through a donut mask in the branch phase (M97 +173%, M27 winner used none); never global, never through small-blur zone masks.
+- Ranking: run_quality_gates -> compare_to_reference (top 3, sequential, only if a reference is registered) -> vision_aesthetic_critic (top 2, flaws are fix-or-rebut, score not used for ranking) -> metrics tie-break. Previews are a named-artifact veto only.
+- Finish rationale starts with `KNOWN FLAWS:`; `finish` takes optional `remaining_flaws[]` and persists gates/critic/reference/warnings into final-selection.json; giga-run prints a "Critical summary" block first and appends it to trace-summary.md.
+- Tests: `test/prompt-render.test.mjs` (all `*_agentic.json` renders, size ratchet 41600 chars, golden snapshots, banned phrases) and `test/prompt-state-consistency.test.mjs` (backticked tools exist, are not internal/hidden, are allowed in the mapped state; `tool(name=value)` keys match input_schema). Lower the ratchet when the prompt shrinks.
+
+## New advisory tools (WI-26)
+`measure_color_gradient` (now with band + corner fields; use on the final image too), `measure_chroma_noise`, `measure_psf_field` (linear data), `run_per_channel_abe` accepts `mask_view_id`. Finish Gate 13 (banding) and chroma-noise warnings are advisory. Details: reference/processing-knowledge.md "WI-26 advisory metrics".

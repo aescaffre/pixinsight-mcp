@@ -175,7 +175,7 @@ ${isNebula ? '- Nebulae: expect to land around 0.70-0.78. Emission color is the 
 ## Hard constraints
 - Max pixel value < ${brief.hardConstraints.maxPixelValue}
 - Background median between ${brief.hardConstraints.minBackgroundMedian} and ${brief.hardConstraints.maxBackgroundMedian}
-- Channel imbalance < ${(brief.hardConstraints.maxChannelImbalance * 100).toFixed(0)}%
+- Channel imbalance < ${brief.hardConstraints.maxChannelImbalance == null ? 'n/a (false-colour palette)' : (brief.hardConstraints.maxChannelImbalance * 100).toFixed(0) + '%'}
 
 ## You MUST
 - Run Phase A steps exactly once each, in order, no experimentation

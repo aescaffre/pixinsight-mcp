@@ -1,0 +1,1231 @@
+{
+  "generatedAt": "2026-10-29T19:12:27.702Z",
+  "args": {
+    "dry": false,
+    "critic": false,
+    "class": null,
+    "only": null,
+    "id": null
+  },
+  "exitCode": 0,
+  "crashed": false,
+  "uncoveredBlockingGates": [
+    "highlight_texture",
+    "l_usage",
+    "aesthetic",
+    "reference",
+    "star_retention"
+  ],
+  "results": [
+    {
+      "id": "pacman_lift5",
+      "verdict": "approved",
+      "classification": "emission_nebula",
+      "path": "/Volumes/Extension/PACMAN/output/claude/final/NGC281_SHO_starless_iteration_01_haloLift5.xisf",
+      "status": "ok",
+      "seconds": 63.3,
+      "failedGates": [],
+      "failures": [],
+      "warnings": [
+        "STARLESS deliverable: star gates skipped (stars are added later).",
+        "Palette OK: subject 24.8% of frame | red 0.2% gold 87.3% yellow 3.1% green 2.5% cyan 3.4% blue 3.5% magenta 0.0% | warm 90.6% cool 6.9% | palette balanced",
+        "RINGING WARNING: RINGING DETECTED: 6 oscillation(s) (limit: 0) around brightest region at [6048,3168], max amplitude=0.0848",
+        "BRIGHT REGIONS: 187 block(s) (0.8%) above 0.80, within limit (2%). Core may look bright — verify internal structure is still visible.",
+        "Core contrast moderate (relContrast=0.055, ratio=0.32); structure could be more visible in the bright center.",
+        "(advisory) BACKGROUND GRADIENT/BANDING: colour gradient score=0.0174 > 0.012. band at column 5: apply_mask with an inverted outer-field mask then a masked run_pixelmath/run_curves per channel (or run_gradient_correction on the final) to flatten the band, OR redo the last lift_dust/inject_l_ifn with a gentler taper; do NOT re-run the linear gradient stage.",
+        "Saturation high: P90=0.785 (profile target: 0.75, fails above 0.95). Consider reducing saturation slightly for more natural appearance."
+      ],
+      "metrics": {
+        "stars": null,
+        "backgroundFloor": {
+          "bgLevel": 0.061667,
+          "p10": 0.057838,
+          "blackBlockFraction": 0
+        },
+        "core": {
+          "coreRelContrast": 0.054767,
+          "ratio": 0.315135,
+          "coreFraction": 0.036883,
+          "pass": true
+        },
+        "detail": {
+          "subjectBrightness": 0.397385,
+          "contrastRatio": 6.252525,
+          "detailScore": 0.011188,
+          "detailCredible": 0.008526,
+          "detailWeber": 0.103522,
+          "noiseDominated": false
+        },
+        "saturation": {
+          "p90S": 0.785184,
+          "subjectPixelCount": 250395
+        },
+        "dust": null,
+        "noise": {
+          "bgNoise": 0.010989,
+          "dustNoise": 0.020315
+        },
+        "tonal": {
+          "separation": 3.22008,
+          "roi_confidence": "high"
+        },
+        "texture": {
+          "verdict": "ok_advisory",
+          "pass": true
+        },
+        "palette": {
+          "summary": "subject 24.8% of frame | red 0.2% gold 87.3% yellow 3.1% green 2.5% cyan 3.4% blue 3.5% magenta 0.0% | warm 90.6% cool 6.9% | palette balanced",
+          "cool": 0.069051
+        }
+      },
+      "imageStats": {
+        "median": 0.06839355081319809,
+        "max": 0.9926117062568665
+      },
+      "gateStatus": {
+        "stars_brightness": "SKIPPED",
+        "stars_fwhm": "SKIPPED",
+        "star_field": "SKIPPED",
+        "palette": "BLOCKING",
+        "ringing": "WARNING",
+        "burn_clip": "BLOCKING",
+        "bright_blocks": "BLOCKING",
+        "core_contrast": "BLOCKING",
+        "dust_ifn": "SKIPPED",
+        "noise": "BLOCKING",
+        "subject_brightness": "BLOCKING",
+        "subject_contrast": "BLOCKING",
+        "subject_detail": "BLOCKING",
+        "exposure": "BLOCKING",
+        "background_floor": "BLOCKING",
+        "star_retention": "SKIPPED",
+        "saturation": "BLOCKING",
+        "tonal_presence": "BLOCKING",
+        "highlight_texture": "WARNING",
+        "l_usage": "NOT_RUN",
+        "aesthetic": "NOT_RUN",
+        "reference": "NOT_RUN"
+      }
+    },
+    {
+      "id": "pacman_iter01",
+      "verdict": "superseded",
+      "classification": "emission_nebula",
+      "path": "/Volumes/Extension/PACMAN/output/claude/final/NGC281_SHO_starless_iteration_01.xisf",
+      "status": "ok",
+      "seconds": 53.8,
+      "failedGates": [],
+      "failures": [],
+      "warnings": [
+        "STARLESS deliverable: star gates skipped (stars are added later).",
+        "Palette OK: subject 14.0% of frame | red 0.1% gold 79.3% yellow 6.0% green 3.9% cyan 5.2% blue 5.5% magenta 0.0% | warm 85.4% cool 10.7% | palette balanced",
+        "RINGING WARNING: RINGING DETECTED: 7 oscillation(s) (limit: 0) around brightest region at [6048,3168], max amplitude=0.0797",
+        "BRIGHT REGIONS: 181 block(s) (0.8%) above 0.80, within limit (2%). Core may look bright — verify internal structure is still visible.",
+        "Core contrast moderate (relContrast=0.058, ratio=0.40); structure could be more visible in the bright center.",
+        "(advisory) BACKGROUND GRADIENT/BANDING: colour gradient score=0.0198 > 0.012. band at column 3: apply_mask with an inverted outer-field mask then a masked run_pixelmath/run_curves per channel (or run_gradient_correction on the final) to flatten the band, OR redo the last lift_dust/inject_l_ifn with a gentler taper; do NOT re-run the linear gradient stage."
+      ],
+      "metrics": {
+        "stars": null,
+        "backgroundFloor": {
+          "bgLevel": 0.062637,
+          "p10": 0.058069,
+          "blackBlockFraction": 0
+        },
+        "core": {
+          "coreRelContrast": 0.057895,
+          "ratio": 0.395864,
+          "coreFraction": 0.036765,
+          "pass": true
+        },
+        "detail": {
+          "subjectBrightness": 0.374577,
+          "contrastRatio": 5.913516,
+          "detailScore": 0.009972,
+          "detailCredible": 0.006592,
+          "detailWeber": 0.08979,
+          "noiseDominated": false
+        },
+        "saturation": {
+          "p90S": 0.696904,
+          "subjectPixelCount": 142730
+        },
+        "dust": null,
+        "noise": {
+          "bgNoise": 0.009059,
+          "dustNoise": 0.009161
+        },
+        "tonal": {
+          "separation": 4.032036,
+          "roi_confidence": "high"
+        },
+        "texture": {
+          "verdict": "ok_advisory",
+          "pass": true
+        },
+        "palette": {
+          "summary": "subject 14.0% of frame | red 0.1% gold 79.3% yellow 6.0% green 3.9% cyan 5.2% blue 5.5% magenta 0.0% | warm 85.4% cool 10.7% | palette balanced",
+          "cool": 0.107134
+        }
+      },
+      "imageStats": {
+        "median": 0.06717218955357869,
+        "max": 0.9805722236633301
+      },
+      "gateStatus": {
+        "stars_brightness": "SKIPPED",
+        "stars_fwhm": "SKIPPED",
+        "star_field": "SKIPPED",
+        "palette": "BLOCKING",
+        "ringing": "WARNING",
+        "burn_clip": "BLOCKING",
+        "bright_blocks": "BLOCKING",
+        "core_contrast": "BLOCKING",
+        "dust_ifn": "SKIPPED",
+        "noise": "BLOCKING",
+        "subject_brightness": "BLOCKING",
+        "subject_contrast": "BLOCKING",
+        "subject_detail": "BLOCKING",
+        "exposure": "BLOCKING",
+        "background_floor": "BLOCKING",
+        "star_retention": "SKIPPED",
+        "saturation": "BLOCKING",
+        "tonal_presence": "BLOCKING",
+        "highlight_texture": "WARNING",
+        "l_usage": "NOT_RUN",
+        "aesthetic": "NOT_RUN",
+        "reference": "NOT_RUN"
+      }
+    },
+    {
+      "id": "ngc7023_iter03",
+      "verdict": "approved",
+      "classification": "reflection_nebula",
+      "path": "/Volumes/Extension/NGC 7023/masters/agentic/NGC7023_iter03.xisf",
+      "status": "ok",
+      "seconds": 26.7,
+      "failedGates": [],
+      "failures": [],
+      "warnings": [
+        "STAR FIELD (advisory, provisional): star field: 60 compact stars (rejected: 1 knots, 0 saturated, 53 blends); FWHM centre 16.3px (n=26) / edge 20.2px (n=34); ellipticity centre n/a / edge n/a; abs prominence 0.791, local ratio 10.9x [ADVISORY: centre FWHM 16.3px > 8px]",
+        "(advisory) star density 271.0/Mpx (star-retention floor not calibrated for this profile).",
+        "STAR QUALITY WARNING: Stars colorless: diversity=0.007 (limit: 0.05)",
+        "RINGING WARNING: RINGING DETECTED: 40 oscillation(s) (limit: 0) around brightest region at [2912,2080], max amplitude=0.2166",
+        "BRIGHT REGIONS: 39 block(s) (0.4%) above 0.80, within limit (1%). Core may look bright — verify internal structure is still visible.",
+        "Slight grain (bgNoise=0.0179, dustNoise=0.0205). A light final NXT pass could help.",
+        "Image darker than target: median=0.0794 vs target=0.2. May be OK for small subjects in large fields, but verify outer structure is visible."
+      ],
+      "metrics": {
+        "stars": {
+          "starBgContrast": 10.881916,
+          "medianFWHM": 12,
+          "starsFound": 100,
+          "starsPerMpx": 270.992134
+        },
+        "backgroundFloor": {
+          "bgLevel": 0.077174,
+          "p10": 0.074537,
+          "blackBlockFraction": 0
+        },
+        "core": {
+          "coreRelContrast": 0.452333,
+          "ratio": 0.650049,
+          "coreFraction": 0.005265,
+          "pass": true
+        },
+        "detail": {
+          "subjectBrightness": 0.355079,
+          "contrastRatio": 4.609926,
+          "detailScore": 0.111167,
+          "detailCredible": 0.103442,
+          "detailWeber": 1.323642,
+          "noiseDominated": false
+        },
+        "saturation": {
+          "p90S": 0.513465,
+          "subjectPixelCount": 34937
+        },
+        "dust": {
+          "pass": true,
+          "dustMeanSat": 0.304281,
+          "fieldP95": 0.194203,
+          "dustCoverage": 0.266716
+        },
+        "noise": {
+          "bgNoise": 0.017851,
+          "dustNoise": 0.020519
+        },
+        "tonal": {
+          "separation": 3.862075,
+          "roi_confidence": "high"
+        },
+        "texture": null,
+        "palette": null
+      },
+      "imageStats": {
+        "median": 0.07942109555006027,
+        "max": 0.9495783448219299
+      },
+      "gateStatus": {
+        "stars_brightness": "BLOCKING",
+        "stars_fwhm": "BLOCKING",
+        "star_field": "WARNING",
+        "palette": "SKIPPED",
+        "ringing": "WARNING",
+        "burn_clip": "BLOCKING",
+        "bright_blocks": "BLOCKING",
+        "core_contrast": "BLOCKING",
+        "dust_ifn": "BLOCKING",
+        "noise": "BLOCKING",
+        "subject_brightness": "BLOCKING",
+        "subject_contrast": "BLOCKING",
+        "subject_detail": "BLOCKING",
+        "exposure": "BLOCKING",
+        "background_floor": "BLOCKING",
+        "star_retention": "WARNING",
+        "saturation": "BLOCKING",
+        "tonal_presence": "BLOCKING",
+        "highlight_texture": "SKIPPED",
+        "l_usage": "NOT_RUN",
+        "aesthetic": "NOT_RUN",
+        "reference": "NOT_RUN"
+      }
+    },
+    {
+      "id": "ngc7023_best_of_both",
+      "verdict": "approved",
+      "classification": "reflection_nebula",
+      "path": "/Users/aescaffre/.pixinsight-mcp/approved/reflection_nebula/NGC7023_efe2138e_v08.xisf",
+      "status": "ok",
+      "seconds": 29.2,
+      "failedGates": [],
+      "failures": [],
+      "warnings": [
+        "STAR FIELD (advisory, provisional): star field: 60 compact stars (rejected: 0 knots, 0 saturated, 41 blends); FWHM centre 11.4px (n=30) / edge 13.4px (n=30); ellipticity centre 0.09 / edge 0.04; abs prominence 0.744, local ratio 7.9x [ADVISORY: centre FWHM 11.4px > 8px]",
+        "(advisory) star density 297.4/Mpx (star-retention floor not calibrated for this profile).",
+        "STAR QUALITY WARNING: Stars colorless: diversity=0.007 (limit: 0.05)",
+        "RINGING WARNING: RINGING DETECTED: 31 oscillation(s) (limit: 0) around brightest region at [2912,2080], max amplitude=0.0880",
+        "BRIGHT REGIONS: 26 block(s) (0.3%) above 0.80, within limit (1%). Core may look bright — verify internal structure is still visible.",
+        "Slight grain (bgNoise=0.0170, dustNoise=0.0259). A light final NXT pass could help.",
+        "(advisory) BACKGROUND GRADIENT/BANDING: colour gradient score=0.0396 > 0.012; column band at index 5 (B, amp=0.0128, step=0.0156). band at column 5: apply_mask with an inverted outer-field mask then a masked run_pixelmath/run_curves per channel (or run_gradient_correction on the final) to flatten the band, OR redo the last lift_dust/inject_l_ifn with a gentler taper; do NOT re-run the linear gradient stage.",
+        "[ADVISORY detail] detail is noise-dominated (detailRaw/detailCredible > 2.5) (star-rejected sampling on the final).",
+        "Image darker than target: median=0.0930 vs target=0.2. May be OK for small subjects in large fields, but verify outer structure is visible.",
+        "Saturation high: P90=0.570 (profile limit: 0.55, fails above 0.65). Consider reducing saturation slightly for more natural appearance."
+      ],
+      "metrics": {
+        "stars": {
+          "starBgContrast": 9.255425,
+          "medianFWHM": 11,
+          "starsFound": 100,
+          "starsPerMpx": 297.373835
+        },
+        "backgroundFloor": {
+          "bgLevel": 0.081413,
+          "p10": 0.061707,
+          "blackBlockFraction": 0
+        },
+        "core": {
+          "coreRelContrast": 0.366514,
+          "ratio": 0.917795,
+          "coreFraction": 0.012373,
+          "pass": true
+        },
+        "detail": {
+          "subjectBrightness": 0.439667,
+          "contrastRatio": 5.246284,
+          "detailScore": 0.016327,
+          "detailCredible": 0.006082,
+          "detailWeber": 0.077447,
+          "noiseDominated": true
+        },
+        "saturation": {
+          "p90S": 0.570347,
+          "subjectPixelCount": 33871
+        },
+        "dust": {
+          "pass": true,
+          "dustMeanSat": 0.335198,
+          "fieldP95": 0.334603,
+          "dustCoverage": 0.400989
+        },
+        "noise": {
+          "bgNoise": 0.017046,
+          "dustNoise": 0.025865
+        },
+        "tonal": {
+          "separation": 4.70486,
+          "roi_confidence": "high"
+        },
+        "texture": null,
+        "palette": null
+      },
+      "imageStats": {
+        "median": 0.09298499052723248,
+        "max": 0.9434742331504822
+      },
+      "gateStatus": {
+        "stars_brightness": "BLOCKING",
+        "stars_fwhm": "BLOCKING",
+        "star_field": "WARNING",
+        "palette": "SKIPPED",
+        "ringing": "WARNING",
+        "burn_clip": "BLOCKING",
+        "bright_blocks": "BLOCKING",
+        "core_contrast": "BLOCKING",
+        "dust_ifn": "BLOCKING",
+        "noise": "BLOCKING",
+        "subject_brightness": "BLOCKING",
+        "subject_contrast": "BLOCKING",
+        "subject_detail": "BLOCKING",
+        "exposure": "BLOCKING",
+        "background_floor": "BLOCKING",
+        "star_retention": "WARNING",
+        "saturation": "BLOCKING",
+        "tonal_presence": "BLOCKING",
+        "highlight_texture": "SKIPPED",
+        "l_usage": "NOT_RUN",
+        "aesthetic": "NOT_RUN",
+        "reference": "NOT_RUN"
+      }
+    },
+    {
+      "id": "ngc3628_candidate",
+      "verdict": "approved",
+      "classification": "galaxy_edge_on",
+      "path": "/Volumes/Extension/NGC3628/agentic/output/NGC3628_giga_v3.xisf",
+      "status": "ok",
+      "seconds": 29.2,
+      "failedGates": [],
+      "failures": [],
+      "warnings": [
+        "STAR FIELD (advisory, provisional): star field: 60 compact stars (rejected: 6 knots, 0 saturated, 9 blends); FWHM centre 9.8px (n=35) / edge 9.9px (n=25); ellipticity centre 0.03 / edge 0.02; abs prominence 0.709, local ratio 12.5x [ADVISORY: centre FWHM 9.8px > 8px]",
+        "(advisory) star density 87.3/Mpx (star-retention floor not calibrated for this profile).",
+        "BRIGHT REGIONS: 5 block(s) (0.1%) above 0.80, within limit (3%). Core may look bright — verify internal structure is still visible.",
+        "relC advisory: structured core (struct 85%, halo 0.6%) — relContrast=0.099 is below 0.1 but the core has real structure, so this is a warning, not a failure."
+      ],
+      "metrics": {
+        "stars": {
+          "starBgContrast": 13.44909,
+          "medianFWHM": 9.5,
+          "starsFound": 100,
+          "starsPerMpx": 87.327693
+        },
+        "backgroundFloor": {
+          "bgLevel": 0.055903,
+          "p10": 0.041359,
+          "blackBlockFraction": 0
+        },
+        "core": {
+          "coreRelContrast": 0.099439,
+          "ratio": 0.851182,
+          "coreFraction": 0.008249,
+          "pass": true
+        },
+        "detail": {
+          "subjectBrightness": 0.318558,
+          "contrastRatio": 5.681305,
+          "detailScore": 0.00403,
+          "detailCredible": 0.003627,
+          "detailWeber": 0.034486,
+          "noiseDominated": false
+        },
+        "saturation": {
+          "p90S": 0.37224,
+          "subjectPixelCount": 23787
+        },
+        "dust": null,
+        "noise": {
+          "bgNoise": 0.004277,
+          "dustNoise": 0.004431
+        },
+        "tonal": {
+          "separation": 3.111344,
+          "roi_confidence": "high"
+        },
+        "texture": {
+          "verdict": "low_advisory",
+          "pass": true
+        },
+        "palette": null
+      },
+      "imageStats": {
+        "median": 0.05512548238039017,
+        "max": 0.9800000190734863
+      },
+      "gateStatus": {
+        "stars_brightness": "BLOCKING",
+        "stars_fwhm": "WARNING",
+        "star_field": "WARNING",
+        "palette": "SKIPPED",
+        "ringing": "SKIPPED",
+        "burn_clip": "BLOCKING",
+        "bright_blocks": "BLOCKING",
+        "core_contrast": "BLOCKING",
+        "dust_ifn": "SKIPPED",
+        "noise": "BLOCKING",
+        "subject_brightness": "BLOCKING",
+        "subject_contrast": "BLOCKING",
+        "subject_detail": "BLOCKING",
+        "exposure": "BLOCKING",
+        "background_floor": "BLOCKING",
+        "star_retention": "WARNING",
+        "saturation": "BLOCKING",
+        "tonal_presence": "BLOCKING",
+        "highlight_texture": "WARNING",
+        "l_usage": "NOT_RUN",
+        "aesthetic": "NOT_RUN",
+        "reference": "NOT_RUN"
+      }
+    },
+    {
+      "id": "ngc4490_giga_rejected",
+      "verdict": "rejected",
+      "classification": "galaxy_spiral",
+      "path": "/Users/aescaffre/agentic ngc4490/agentic/NGC4490_giga.xisf",
+      "status": "ok",
+      "seconds": 29.2,
+      "failedGates": [
+        "core_contrast",
+        "noise"
+      ],
+      "failures": [
+        "CORE PERCEPTUALLY BURNT: *** FAILS CORE GATE (WHITE BURN) *** 46.8% of the bright core is white-clipped + desaturated (limit 15%). The center reads as a blown white patch even if gradient energy passes. Compress the core pedestal (continuous_clamp) and recover color/structure so the center is not white. (Diagnostic) core flatter than shell: ratio=0.48 (core 0.458 vs shell 0.964).",
+        "BACKGROUND TOO NOISY: *** FAILS NOISE GATE (dark sky) *** Background grain too high: bgNoise=0.1031 (hard gate 0.022, goal 0.015). Apply ONE light NoiseXTerminator pass (denoise 0.25–0.35); do not over-smooth (core-contrast still needs resolved detail). Re-check after."
+      ],
+      "warnings": [
+        "STAR FIELD (advisory, provisional): star field: 60 compact stars (rejected: 0 knots, 0 saturated, 60 blends); FWHM centre 9.9px (n=42) / edge 11.4px (n=18); ellipticity centre n/a / edge n/a; abs prominence 0.747, local ratio 7.5x [ADVISORY: centre FWHM 9.9px > 8px]",
+        "(advisory) star density 96.2/Mpx (star-retention floor not calibrated for this profile).",
+        "STAR QUALITY WARNING: Stars colorless: diversity=0.000 (limit: 0.05) (advisory for galaxies — HII knots inflate FWHM)",
+        "BRIGHT REGIONS: 117 block(s) (1.3%) above 0.80, within limit (3%). Core may look bright — verify internal structure is still visible.",
+        "(advisory) BACKGROUND GRADIENT/BANDING: colour gradient score=0.0208 > 0.012. band at column 7: apply_mask with an inverted outer-field mask then a masked run_pixelmath/run_curves per channel (or run_gradient_correction on the final) to flatten the band, OR redo the last lift_dust/inject_l_ifn with a gentler taper; do NOT re-run the linear gradient stage.",
+        "[ADVISORY detail] detail is noise-dominated (detailRaw/detailCredible > 2.5) (star-rejected sampling on the final).",
+        "Subject covers only 0.0% of image — outer halo/faint structure may be invisible. Consider shadow-lifting curves through inverted mask.",
+        "Saturation high: P90=0.621 (profile target: 0.40, fails above 0.85). Consider reducing saturation slightly for more natural appearance."
+      ],
+      "metrics": {
+        "stars": {
+          "starBgContrast": 7.497452,
+          "medianFWHM": 10.5,
+          "starsFound": 100,
+          "starsPerMpx": 96.166625
+        },
+        "backgroundFloor": {
+          "bgLevel": 0.117822,
+          "p10": 0.110584,
+          "blackBlockFraction": 0
+        },
+        "core": {
+          "coreRelContrast": 0.458139,
+          "ratio": 0.47537,
+          "coreFraction": 0.002285,
+          "pass": false
+        },
+        "detail": {
+          "subjectBrightness": 0.719298,
+          "contrastRatio": 6.097712,
+          "detailScore": 0.213688,
+          "detailCredible": 0.071801,
+          "detailWeber": 0.427661,
+          "noiseDominated": true
+        },
+        "saturation": {
+          "p90S": 0.621148,
+          "subjectPixelCount": 27105
+        },
+        "dust": null,
+        "noise": {
+          "bgNoise": 0.103079,
+          "dustNoise": 0.107587
+        },
+        "tonal": {
+          "separation": 3.108512,
+          "roi_confidence": "low"
+        },
+        "texture": {
+          "verdict": "ok_advisory",
+          "pass": true
+        },
+        "palette": null
+      },
+      "imageStats": {
+        "median": 0.11394061644872029,
+        "max": 0.8624069094657898
+      },
+      "gateStatus": {
+        "stars_brightness": "BLOCKING",
+        "stars_fwhm": "WARNING",
+        "star_field": "WARNING",
+        "palette": "SKIPPED",
+        "ringing": "SKIPPED",
+        "burn_clip": "BLOCKING",
+        "bright_blocks": "BLOCKING",
+        "core_contrast": "BLOCKING",
+        "dust_ifn": "SKIPPED",
+        "noise": "BLOCKING",
+        "subject_brightness": "BLOCKING",
+        "subject_contrast": "BLOCKING",
+        "subject_detail": "BLOCKING",
+        "exposure": "BLOCKING",
+        "background_floor": "BLOCKING",
+        "star_retention": "WARNING",
+        "saturation": "BLOCKING",
+        "tonal_presence": "BLOCKING",
+        "highlight_texture": "WARNING",
+        "l_usage": "NOT_RUN",
+        "aesthetic": "NOT_RUN",
+        "reference": "NOT_RUN"
+      }
+    },
+    {
+      "id": "m97_giga_approved",
+      "verdict": "superseded",
+      "classification": "planetary_nebula",
+      "path": "/Users/aescaffre/M97_2nd/master/claude/agentic/M97_giga.xisf",
+      "status": "ok",
+      "seconds": 21.7,
+      "failedGates": [],
+      "failures": [],
+      "warnings": [
+        "STAR FIELD (advisory, provisional): star field: 60 compact stars (rejected: 1 knots, 0 saturated, 7 blends); FWHM centre 13.0px (n=34) / edge 15.7px (n=26); ellipticity centre 0.03 / edge 0.05; abs prominence 0.757, local ratio 19.9x [ADVISORY: centre FWHM 13.0px > 8px]",
+        "(advisory) star density 24.5/Mpx (star-retention floor not calibrated for this profile).",
+        "STAR QUALITY WARNING: Stars colorless: diversity=0.017 (limit: 0.05)",
+        "RINGING WARNING: RINGING DETECTED: 12 oscillation(s) (limit: 0) around brightest region at [4960,864], max amplitude=0.5666",
+        "BRIGHT REGIONS: 36 block(s) (0.4%) above 0.80, within limit (3%). Core may look bright — verify internal structure is still visible.",
+        "Core contrast moderate (relContrast=0.181, ratio=0.30); structure could be more visible in the bright center.",
+        "Subject covers only 0.7% of image — outer halo/faint structure may be invisible. Consider shadow-lifting curves through inverted mask.",
+        "Image darker than target: median=0.0400 vs target=0.11. May be OK for small subjects in large fields, but verify outer structure is visible."
+      ],
+      "metrics": {
+        "stars": {
+          "starBgContrast": 19.105322,
+          "medianFWHM": 8,
+          "starsFound": 100,
+          "starsPerMpx": 24.475726
+        },
+        "backgroundFloor": {
+          "bgLevel": 0.039195,
+          "p10": 0.036322,
+          "blackBlockFraction": 0
+        },
+        "core": {
+          "coreRelContrast": 0.18054,
+          "ratio": 0.304104,
+          "coreFraction": 0.00501,
+          "pass": true
+        },
+        "detail": {
+          "subjectBrightness": 0.474457,
+          "contrastRatio": 12.125156,
+          "detailScore": 0.016348,
+          "detailCredible": 0.015209,
+          "detailWeber": 0.226125,
+          "noiseDominated": false
+        },
+        "saturation": {
+          "p90S": 0.675751,
+          "subjectPixelCount": 8283
+        },
+        "dust": null,
+        "noise": {
+          "bgNoise": 0.007208,
+          "dustNoise": 0.006939
+        },
+        "tonal": {
+          "separation": 3.642206,
+          "roi_confidence": "medium"
+        },
+        "texture": null,
+        "palette": null
+      },
+      "imageStats": {
+        "median": 0.03995139275987943,
+        "max": 0.9474342465400696
+      },
+      "gateStatus": {
+        "stars_brightness": "BLOCKING",
+        "stars_fwhm": "BLOCKING",
+        "star_field": "WARNING",
+        "palette": "SKIPPED",
+        "ringing": "WARNING",
+        "burn_clip": "BLOCKING",
+        "bright_blocks": "BLOCKING",
+        "core_contrast": "BLOCKING",
+        "dust_ifn": "SKIPPED",
+        "noise": "BLOCKING",
+        "subject_brightness": "BLOCKING",
+        "subject_contrast": "BLOCKING",
+        "subject_detail": "BLOCKING",
+        "exposure": "BLOCKING",
+        "background_floor": "BLOCKING",
+        "star_retention": "WARNING",
+        "saturation": "BLOCKING",
+        "tonal_presence": "BLOCKING",
+        "highlight_texture": "SKIPPED",
+        "l_usage": "NOT_RUN",
+        "aesthetic": "NOT_RUN",
+        "reference": "NOT_RUN"
+      }
+    },
+    {
+      "id": "ngc4490_rgb_accepted",
+      "verdict": "approved",
+      "classification": "galaxy_spiral",
+      "path": "/Users/aescaffre/agentic ngc4490/RGB.xisf",
+      "status": "ok",
+      "seconds": 11.6,
+      "failedGates": [],
+      "failures": [],
+      "warnings": [
+        "STAR FIELD (advisory, provisional): star field: 60 compact stars (rejected: 39 knots, 46 saturated, 18 blends); FWHM centre 6.9px (n=45) / edge 6.7px (n=15); ellipticity centre 0.10 / edge 0.12; abs prominence 0.505, local ratio 9.9x",
+        "(advisory) star density 34.2/Mpx (star-retention floor not calibrated for this profile).",
+        "STAR QUALITY WARNING: Stars colorless: diversity=0.000 (limit: 0.05) (advisory for galaxies — HII knots inflate FWHM)",
+        "BRIGHT REGIONS: 29 block(s) (1.9%) above 0.80, within limit (3%). Core may look bright — verify internal structure is still visible.",
+        "Core contrast moderate (relContrast=0.231, ratio=0.99); structure could be more visible in the bright center.",
+        "(advisory) BACKGROUND GRADIENT/BANDING: colour gradient score=0.0247 > 0.012. band at column 5: apply_mask with an inverted outer-field mask then a masked run_pixelmath/run_curves per channel (or run_gradient_correction on the final) to flatten the band, OR redo the last lift_dust/inject_l_ifn with a gentler taper; do NOT re-run the linear gradient stage.",
+        "Saturation high: P90=0.464 (profile target: 0.40, fails above 0.85). Consider reducing saturation slightly for more natural appearance."
+      ],
+      "metrics": {
+        "stars": {
+          "starBgContrast": 17.19731,
+          "medianFWHM": 12,
+          "starsFound": 100,
+          "starsPerMpx": 34.207382
+        },
+        "backgroundFloor": {
+          "bgLevel": 0.055707,
+          "p10": 0.045662,
+          "blackBlockFraction": 0
+        },
+        "core": {
+          "coreRelContrast": 0.23118,
+          "ratio": 0.993337,
+          "coreFraction": 0.006867,
+          "pass": true
+        },
+        "detail": {
+          "subjectBrightness": 0.416342,
+          "contrastRatio": 7.481275,
+          "detailScore": 0.027994,
+          "detailCredible": 0.030733,
+          "detailWeber": 0.147487,
+          "noiseDominated": false
+        },
+        "saturation": {
+          "p90S": 0.46367,
+          "subjectPixelCount": 4621
+        },
+        "dust": null,
+        "noise": {
+          "bgNoise": 0.003803,
+          "dustNoise": 0.003896
+        },
+        "tonal": {
+          "separation": 3.751533,
+          "roi_confidence": "high"
+        },
+        "texture": {
+          "verdict": "ok_advisory",
+          "pass": true
+        },
+        "palette": null
+      },
+      "imageStats": {
+        "median": 0.0591178455700477,
+        "max": 1
+      },
+      "gateStatus": {
+        "stars_brightness": "BLOCKING",
+        "stars_fwhm": "WARNING",
+        "star_field": "WARNING",
+        "palette": "SKIPPED",
+        "ringing": "SKIPPED",
+        "burn_clip": "BLOCKING",
+        "bright_blocks": "BLOCKING",
+        "core_contrast": "BLOCKING",
+        "dust_ifn": "SKIPPED",
+        "noise": "BLOCKING",
+        "subject_brightness": "BLOCKING",
+        "subject_contrast": "BLOCKING",
+        "subject_detail": "BLOCKING",
+        "exposure": "BLOCKING",
+        "background_floor": "BLOCKING",
+        "star_retention": "WARNING",
+        "saturation": "BLOCKING",
+        "tonal_presence": "BLOCKING",
+        "highlight_texture": "WARNING",
+        "l_usage": "NOT_RUN",
+        "aesthetic": "NOT_RUN",
+        "reference": "NOT_RUN"
+      }
+    },
+    {
+      "id": "m97_v8_approved",
+      "verdict": "approved",
+      "classification": "planetary_nebula",
+      "path": "/Users/aescaffre/.pixinsight-mcp/approved/planetary_nebula/M97_f543876a_v8.xisf",
+      "status": "ok",
+      "seconds": 22.7,
+      "failedGates": [],
+      "failures": [],
+      "warnings": [
+        "STAR FIELD (advisory, provisional): star field: 60 compact stars (rejected: 0 knots, 2 saturated, 15 blends); FWHM centre 13.4px (n=32) / edge 18.1px (n=28); ellipticity centre 0.02 / edge 0.03; abs prominence 0.726, local ratio 7.7x [ADVISORY: centre FWHM 13.4px > 8px]",
+        "(advisory) star density 36.3/Mpx (star-retention floor not calibrated for this profile).",
+        "RINGING WARNING: RINGING DETECTED: 22 oscillation(s) (limit: 0) around brightest region at [4960,864], max amplitude=0.4478",
+        "BRIGHT REGIONS: 69 block(s) (0.7%) above 0.80, within limit (3%). Core may look bright — verify internal structure is still visible.",
+        "Core contrast moderate (relContrast=0.221, ratio=0.54); structure could be more visible in the bright center.",
+        "Slight grain (bgNoise=0.0220, dustNoise=0.0227). A light final NXT pass could help.",
+        "(advisory) BACKGROUND GRADIENT/BANDING: colour gradient score=0.0166 > 0.012. band at column 6: apply_mask with an inverted outer-field mask then a masked run_pixelmath/run_curves per channel (or run_gradient_correction on the final) to flatten the band, OR redo the last lift_dust/inject_l_ifn with a gentler taper; do NOT re-run the linear gradient stage.",
+        "Subject covers only 0.7% of image — outer halo/faint structure may be invisible. Consider shadow-lifting curves through inverted mask."
+      ],
+      "metrics": {
+        "stars": {
+          "starBgContrast": 7.13038,
+          "medianFWHM": 10,
+          "starsFound": 100,
+          "starsPerMpx": 36.309207
+        },
+        "backgroundFloor": {
+          "bgLevel": 0.10631,
+          "p10": 0.10297,
+          "blackBlockFraction": 0
+        },
+        "core": {
+          "coreRelContrast": 0.220786,
+          "ratio": 0.542421,
+          "coreFraction": 0.005561,
+          "pass": true
+        },
+        "detail": {
+          "subjectBrightness": 0.473217,
+          "contrastRatio": 4.453384,
+          "detailScore": 0.024061,
+          "detailCredible": 0.014394,
+          "detailWeber": 0.137687,
+          "noiseDominated": false
+        },
+        "saturation": {
+          "p90S": 0.64663,
+          "subjectPixelCount": 6624
+        },
+        "dust": null,
+        "noise": {
+          "bgNoise": 0.02198,
+          "dustNoise": 0.022665
+        },
+        "tonal": {
+          "separation": 3.365033,
+          "roi_confidence": "medium"
+        },
+        "texture": null,
+        "palette": null
+      },
+      "imageStats": {
+        "median": 0.10846564546227455,
+        "max": 1
+      },
+      "gateStatus": {
+        "stars_brightness": "BLOCKING",
+        "stars_fwhm": "BLOCKING",
+        "star_field": "WARNING",
+        "palette": "SKIPPED",
+        "ringing": "WARNING",
+        "burn_clip": "BLOCKING",
+        "bright_blocks": "BLOCKING",
+        "core_contrast": "BLOCKING",
+        "dust_ifn": "SKIPPED",
+        "noise": "BLOCKING",
+        "subject_brightness": "BLOCKING",
+        "subject_contrast": "BLOCKING",
+        "subject_detail": "BLOCKING",
+        "exposure": "BLOCKING",
+        "background_floor": "BLOCKING",
+        "star_retention": "WARNING",
+        "saturation": "BLOCKING",
+        "tonal_presence": "BLOCKING",
+        "highlight_texture": "SKIPPED",
+        "l_usage": "NOT_RUN",
+        "aesthetic": "NOT_RUN",
+        "reference": "NOT_RUN"
+      }
+    },
+    {
+      "id": "ngc4490_v8_candidate",
+      "verdict": "candidate",
+      "classification": "galaxy_spiral",
+      "path": "/Users/aescaffre/agentic ngc4490/agentic/2026-10-29_v8/NGC4490_giga.xisf",
+      "status": "ok",
+      "seconds": 28.2,
+      "failedGates": [],
+      "failures": [],
+      "warnings": [
+        "STAR FIELD (advisory, provisional): star field: 60 compact stars (rejected: 3 knots, 0 saturated, 19 blends); FWHM centre 14.0px (n=35) / edge 14.6px (n=25); ellipticity centre 0.02 / edge 0.03; abs prominence 0.740, local ratio 11.7x [ADVISORY: centre FWHM 14.0px > 8px]",
+        "(advisory) star density 58.1/Mpx (star-retention floor not calibrated for this profile).",
+        "STAR QUALITY WARNING: Stars colorless: diversity=0.033 (limit: 0.05) (advisory for galaxies — HII knots inflate FWHM)",
+        "BRIGHT REGIONS: 13 block(s) (0.1%) above 0.80, within limit (3%). Core may look bright — verify internal structure is still visible.",
+        "Core contrast moderate (relContrast=0.184, ratio=0.46); structure could be more visible in the bright center.",
+        "Subject covers only 1.0% of image — outer halo/faint structure may be invisible. Consider shadow-lifting curves through inverted mask."
+      ],
+      "metrics": {
+        "stars": {
+          "starBgContrast": 11.405107,
+          "medianFWHM": 11,
+          "starsFound": 100,
+          "starsPerMpx": 58.073273
+        },
+        "backgroundFloor": {
+          "bgLevel": 0.067782,
+          "p10": 0.060739,
+          "blackBlockFraction": 0
+        },
+        "core": {
+          "coreRelContrast": 0.183785,
+          "ratio": 0.457281,
+          "coreFraction": 0.005491,
+          "pass": true
+        },
+        "detail": {
+          "subjectBrightness": 0.369044,
+          "contrastRatio": 5.445377,
+          "detailScore": 0.01683,
+          "detailCredible": 0.013985,
+          "detailWeber": 0.216357,
+          "noiseDominated": false
+        },
+        "saturation": {
+          "p90S": 0.296523,
+          "subjectPixelCount": 9480
+        },
+        "dust": null,
+        "noise": {
+          "bgNoise": 0.010418,
+          "dustNoise": 0.01077
+        },
+        "tonal": {
+          "separation": 3.427058,
+          "roi_confidence": "medium"
+        },
+        "texture": {
+          "verdict": "ok_advisory",
+          "pass": true
+        },
+        "palette": null
+      },
+      "imageStats": {
+        "median": 0.0681211178501447,
+        "max": 0.9935590028762817
+      },
+      "gateStatus": {
+        "stars_brightness": "BLOCKING",
+        "stars_fwhm": "WARNING",
+        "star_field": "WARNING",
+        "palette": "SKIPPED",
+        "ringing": "SKIPPED",
+        "burn_clip": "BLOCKING",
+        "bright_blocks": "BLOCKING",
+        "core_contrast": "BLOCKING",
+        "dust_ifn": "SKIPPED",
+        "noise": "BLOCKING",
+        "subject_brightness": "BLOCKING",
+        "subject_contrast": "BLOCKING",
+        "subject_detail": "BLOCKING",
+        "exposure": "BLOCKING",
+        "background_floor": "BLOCKING",
+        "star_retention": "WARNING",
+        "saturation": "BLOCKING",
+        "tonal_presence": "BLOCKING",
+        "highlight_texture": "WARNING",
+        "l_usage": "NOT_RUN",
+        "aesthetic": "NOT_RUN",
+        "reference": "NOT_RUN"
+      }
+    },
+    {
+      "id": "ngc3628_v8_candidate",
+      "verdict": "candidate",
+      "classification": "galaxy_spiral",
+      "path": "/Volumes/Extension/NGC3628/agentic/output/2026-10-29_v8/NGC3628_giga.xisf",
+      "status": "ok",
+      "seconds": 28.2,
+      "failedGates": [],
+      "failures": [],
+      "warnings": [
+        "STAR FIELD (advisory, provisional): star field: 60 compact stars (rejected: 17 knots, 0 saturated, 11 blends); FWHM centre 13.6px (n=33) / edge 13.9px (n=27); ellipticity centre 0.03 / edge 0.04; abs prominence 0.689, local ratio 8.7x [ADVISORY: centre FWHM 13.6px > 8px]",
+        "(advisory) star density 140.4/Mpx (star-retention floor not calibrated for this profile).",
+        "STAR QUALITY WARNING: Stars bloated: median FWHM=15.00px (limit: 12px) (advisory for galaxies — HII knots inflate FWHM)",
+        "BRIGHT REGIONS: 42 block(s) (0.4%) above 0.80, within limit (3%). Core may look bright — verify internal structure is still visible.",
+        "relC advisory: structured core (struct 81%, halo 1.9%) — relContrast=0.069 is below 0.1 but the core has real structure, so this is a warning, not a failure.",
+        "Slight grain (bgNoise=0.0153, dustNoise=0.0173). A light final NXT pass could help.",
+        "(advisory) BACKGROUND GRADIENT/BANDING: colour gradient score=0.0331 > 0.012. band at column 4: apply_mask with an inverted outer-field mask then a masked run_pixelmath/run_curves per channel (or run_gradient_correction on the final) to flatten the band, OR redo the last lift_dust/inject_l_ifn with a gentler taper; do NOT re-run the linear gradient stage."
+      ],
+      "metrics": {
+        "stars": {
+          "starBgContrast": 9.850106,
+          "medianFWHM": 15,
+          "starsFound": 100,
+          "starsPerMpx": 140.37368
+        },
+        "backgroundFloor": {
+          "bgLevel": 0.07872,
+          "p10": 0.051078,
+          "blackBlockFraction": 0
+        },
+        "core": {
+          "coreRelContrast": 0.068647,
+          "ratio": 0.561428,
+          "coreFraction": 0.010163,
+          "pass": true
+        },
+        "detail": {
+          "subjectBrightness": 0.437439,
+          "contrastRatio": 5.511419,
+          "detailScore": 0.006462,
+          "detailCredible": 0.003724,
+          "detailWeber": 0.041588,
+          "noiseDominated": false
+        },
+        "saturation": {
+          "p90S": 0.3562,
+          "subjectPixelCount": 25822
+        },
+        "dust": null,
+        "noise": {
+          "bgNoise": 0.015266,
+          "dustNoise": 0.017251
+        },
+        "tonal": {
+          "separation": 4.490252,
+          "roi_confidence": "high"
+        },
+        "texture": {
+          "verdict": "ok_advisory",
+          "pass": true
+        },
+        "palette": null
+      },
+      "imageStats": {
+        "median": 0.07880121593674023,
+        "max": 0.9392889142036438
+      },
+      "gateStatus": {
+        "stars_brightness": "BLOCKING",
+        "stars_fwhm": "WARNING",
+        "star_field": "WARNING",
+        "palette": "SKIPPED",
+        "ringing": "SKIPPED",
+        "burn_clip": "BLOCKING",
+        "bright_blocks": "BLOCKING",
+        "core_contrast": "BLOCKING",
+        "dust_ifn": "SKIPPED",
+        "noise": "BLOCKING",
+        "subject_brightness": "BLOCKING",
+        "subject_contrast": "BLOCKING",
+        "subject_detail": "BLOCKING",
+        "exposure": "BLOCKING",
+        "background_floor": "BLOCKING",
+        "star_retention": "WARNING",
+        "saturation": "BLOCKING",
+        "tonal_presence": "BLOCKING",
+        "highlight_texture": "WARNING",
+        "l_usage": "NOT_RUN",
+        "aesthetic": "NOT_RUN",
+        "reference": "NOT_RUN"
+      }
+    },
+    {
+      "id": "pacman_v8_candidate",
+      "verdict": "candidate",
+      "classification": "emission_nebula",
+      "path": "/Volumes/Extension/PACMAN/output/claude/agentic/2026-10-29_v8/NGC281_giga.xisf",
+      "status": "ok",
+      "seconds": 52.3,
+      "failedGates": [
+        "bright_blocks",
+        "background_floor"
+      ],
+      "failures": [
+        "TOO MANY BRIGHT REGIONS: 541 blocks (2.3%) above 0.80 (limit: 2%). Extended structure is losing detail. Apply continuous_clamp (min_clamp=0.75, max_clamp=0.90) to recover detail in bright areas.",
+        "BACKGROUND CRUSHED TO BLACK: sky level 0.0443 < floor 0.05 (sky level 0.0443 (p10 0.0389, p90 0.1028), black background blocks 0.0% of 12322). FIX UPSTREAM: lift the shadows with a curves point just above the sky level (e.g. [0.01->0.03]) or reduce black-point clipping in the last stretch/clamp/rolloff; do not brighten the subject."
+      ],
+      "warnings": [
+        "STARLESS deliverable: star gates skipped (stars are added later).",
+        "Palette OK: subject 9.1% of frame | red 0.8% gold 49.8% yellow 5.9% green 6.5% cyan 12.5% blue 24.4% magenta 0.3% | warm 56.4% cool 36.8% | palette balanced",
+        "RINGING WARNING: RINGING DETECTED: 62 oscillation(s) (limit: 0) around brightest region at [4832,2784], max amplitude=0.1208",
+        "Core contrast moderate (relContrast=0.255, ratio=0.86); structure could be more visible in the bright center.",
+        "Slight grain (bgNoise=0.0196, dustNoise=0.0308). A light final NXT pass could help.",
+        "(advisory) BACKGROUND GRADIENT/BANDING: colour gradient score=0.0550 > 0.012. band at column 3: apply_mask with an inverted outer-field mask then a masked run_pixelmath/run_curves per channel (or run_gradient_correction on the final) to flatten the band, OR redo the last lift_dust/inject_l_ifn with a gentler taper; do NOT re-run the linear gradient stage.",
+        "Image darker than target: median=0.0551 vs target=0.12. May be OK for small subjects in large fields, but verify outer structure is visible.",
+        "Saturation high: P90=0.845 (profile target: 0.75, fails above 0.95). Consider reducing saturation slightly for more natural appearance."
+      ],
+      "metrics": {
+        "stars": null,
+        "backgroundFloor": {
+          "bgLevel": 0.04426,
+          "p10": 0.038856,
+          "blackBlockFraction": 0
+        },
+        "core": {
+          "coreRelContrast": 0.254931,
+          "ratio": 0.855061,
+          "coreFraction": 0.022669,
+          "pass": true
+        },
+        "detail": {
+          "subjectBrightness": 0.44332,
+          "contrastRatio": 9.652065,
+          "detailScore": 0.095355,
+          "detailCredible": 0.084924,
+          "detailWeber": 0.461984,
+          "noiseDominated": false
+        },
+        "saturation": {
+          "p90S": 0.844641,
+          "subjectPixelCount": 101998
+        },
+        "dust": null,
+        "noise": {
+          "bgNoise": 0.019603,
+          "dustNoise": 0.030796
+        },
+        "tonal": {
+          "separation": 6.540742,
+          "roi_confidence": "high"
+        },
+        "texture": {
+          "verdict": "ok_advisory",
+          "pass": true
+        },
+        "palette": {
+          "summary": "subject 9.1% of frame | red 0.8% gold 49.8% yellow 5.9% green 6.5% cyan 12.5% blue 24.4% magenta 0.3% | warm 56.4% cool 36.8% | palette balanced",
+          "cool": 0.368252
+        }
+      },
+      "imageStats": {
+        "median": 0.0551283173263073,
+        "max": 0.9399999976158142
+      },
+      "gateStatus": {
+        "stars_brightness": "SKIPPED",
+        "stars_fwhm": "SKIPPED",
+        "star_field": "SKIPPED",
+        "palette": "BLOCKING",
+        "ringing": "WARNING",
+        "burn_clip": "BLOCKING",
+        "bright_blocks": "BLOCKING",
+        "core_contrast": "BLOCKING",
+        "dust_ifn": "SKIPPED",
+        "noise": "BLOCKING",
+        "subject_brightness": "BLOCKING",
+        "subject_contrast": "BLOCKING",
+        "subject_detail": "BLOCKING",
+        "exposure": "BLOCKING",
+        "background_floor": "BLOCKING",
+        "star_retention": "SKIPPED",
+        "saturation": "BLOCKING",
+        "tonal_presence": "BLOCKING",
+        "highlight_texture": "WARNING",
+        "l_usage": "NOT_RUN",
+        "aesthetic": "NOT_RUN",
+        "reference": "NOT_RUN"
+      }
+    },
+    {
+      "id": "ngc7023_v8_candidate",
+      "verdict": "candidate",
+      "classification": "reflection_nebula",
+      "path": "/Volumes/Extension/NGC7023/masters/agentic/NGC7023_giga.xisf",
+      "status": "ok",
+      "seconds": 28.2,
+      "failedGates": [
+        "stars_fwhm"
+      ],
+      "failures": [
+        "STARS SEVERELY BLOATED: FWHM=18.5px (hard limit: 12px). Stars are unacceptably large. Re-stretch stars with higher setiMidtone (0.25+) or fewer iterations, apply stronger rolloff, or reduce star_protected_blend strength."
+      ],
+      "warnings": [
+        "STAR FIELD (advisory, provisional): star field: 60 compact stars (rejected: 6 knots, 0 saturated, 37 blends); FWHM centre 10.2px (n=60) / edge n/apx (n=0); ellipticity centre 0.21 / edge n/a; abs prominence 0.428, local ratio 2.0x [ADVISORY: centre FWHM 10.2px > 8px]",
+        "(advisory) star density 277.6/Mpx (star-retention floor not calibrated for this profile).",
+        "STAR QUALITY WARNING: Stars bloated: median FWHM=18.50px (limit: 12px); Stars colorless: diversity=0.019 (limit: 0.05)",
+        "RINGING WARNING: RINGING DETECTED: 14 oscillation(s) (limit: 0) around brightest region at [2848,2080], max amplitude=0.1804",
+        "BRIGHT REGIONS: 38 block(s) (0.4%) above 0.80, within limit (1%). Core may look bright — verify internal structure is still visible.",
+        "relC advisory: structured core (struct 91%, halo 0.6%) — relContrast=0.213 is below 0.35 but the core has real structure, so this is a warning, not a failure.",
+        "Slight grain (bgNoise=0.0165, dustNoise=0.0234). A light final NXT pass could help.",
+        "(advisory) BACKGROUND GRADIENT/BANDING: colour gradient score=0.0326 > 0.012. band at column 5: apply_mask with an inverted outer-field mask then a masked run_pixelmath/run_curves per channel (or run_gradient_correction on the final) to flatten the band, OR redo the last lift_dust/inject_l_ifn with a gentler taper; do NOT re-run the linear gradient stage.",
+        "Image darker than target: median=0.0934 vs target=0.2. May be OK for small subjects in large fields, but verify outer structure is visible."
+      ],
+      "metrics": {
+        "stars": {
+          "starBgContrast": 8.636511,
+          "medianFWHM": 18.5,
+          "starsFound": 100,
+          "starsPerMpx": 277.642248
+        },
+        "backgroundFloor": {
+          "bgLevel": 0.08953,
+          "p10": 0.075082,
+          "blackBlockFraction": 0
+        },
+        "core": {
+          "coreRelContrast": 0.213288,
+          "ratio": 0.676713,
+          "coreFraction": 0.015313,
+          "pass": true
+        },
+        "detail": {
+          "subjectBrightness": 0.467234,
+          "contrastRatio": 5.162094,
+          "detailScore": 0.037361,
+          "detailCredible": 0.032948,
+          "detailWeber": 0.236297,
+          "noiseDominated": false
+        },
+        "saturation": {
+          "p90S": 0.52499,
+          "subjectPixelCount": 47055
+        },
+        "dust": {
+          "pass": true,
+          "dustMeanSat": 0.29963,
+          "fieldP95": 0.379175,
+          "dustCoverage": 0.289392
+        },
+        "noise": {
+          "bgNoise": 0.016547,
+          "dustNoise": 0.023362
+        },
+        "tonal": {
+          "separation": 4.456259,
+          "roi_confidence": "high"
+        },
+        "texture": null,
+        "palette": null
+      },
+      "imageStats": {
+        "median": 0.09341148287057877,
+        "max": 0.964780867099762
+      },
+      "gateStatus": {
+        "stars_brightness": "BLOCKING",
+        "stars_fwhm": "BLOCKING",
+        "star_field": "WARNING",
+        "palette": "SKIPPED",
+        "ringing": "WARNING",
+        "burn_clip": "BLOCKING",
+        "bright_blocks": "BLOCKING",
+        "core_contrast": "BLOCKING",
+        "dust_ifn": "BLOCKING",
+        "noise": "BLOCKING",
+        "subject_brightness": "BLOCKING",
+        "subject_contrast": "BLOCKING",
+        "subject_detail": "BLOCKING",
+        "exposure": "BLOCKING",
+        "background_floor": "BLOCKING",
+        "star_retention": "WARNING",
+        "saturation": "BLOCKING",
+        "tonal_presence": "BLOCKING",
+        "highlight_texture": "SKIPPED",
+        "l_usage": "NOT_RUN",
+        "aesthetic": "NOT_RUN",
+        "reference": "NOT_RUN"
+      }
+    }
+  ]
+}

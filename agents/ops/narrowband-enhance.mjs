@@ -448,97 +448,89 @@ export async function continuousClamp(ctx, viewId, opts = {}) {
  * @param {object} thresholds - { core_clip, shell_clip, halo_clip }
  * @returns {object} { coreId, shellId, haloId }
  */
-export async function createZoneMasks(ctx, viewId, thresholds = {}) {
-  const coreClip = thresholds.core_clip ?? 0.40;
-  const shellClip = thresholds.shell_clip ?? 0.15;
-  const haloClip = thresholds.halo_clip ?? 0.04;
-
-  const r = await ctx.pjsr(`
+export function buildZoneMasksPjsr(viewId, cfg) {
+  const { coreClip, shellClip, haloClip, sigma } = cfg;
+  const clamp1 = (e) => `min(1,${e})`;
+  return `
     var src = ImageWindow.windowById('${viewId}');
     if (src.isNull) throw new Error('createZoneMasks: view not found: ${viewId}');
     var img = src.mainView.image;
-    var isColor = img.isColor;
+    var w = img.width, h = img.height;
+    var LUM = img.isColor ? '(0.2126*${viewId}[0]+0.7152*${viewId}[1]+0.0722*${viewId}[2])' : '${viewId}';
 
-    // Create luminance if color
-    function getLum(x, y) {
-      if (isColor) {
-        return 0.2126 * img.sample(x, y, 0) + 0.7152 * img.sample(x, y, 1) + 0.0722 * img.sample(x, y, 2);
-      }
-      return img.sample(x, y);
-    }
-
-    var w = img.width;
-    var h = img.height;
-
-    // Close existing masks
     var ids = ['mask_core', 'mask_shell', 'mask_halo'];
     for (var i = 0; i < ids.length; i++) {
       var ow = ImageWindow.windowById(ids[i]);
       if (!ow.isNull) ow.forceClose();
     }
-
-    // Create 3 mono images
-    var coreW = new ImageWindow(w, h, 1, 32, true, false, 'mask_core');
-    var shellW = new ImageWindow(w, h, 1, 32, true, false, 'mask_shell');
-    var haloW = new ImageWindow(w, h, 1, 32, true, false, 'mask_halo');
-
-    var coreImg = coreW.mainView.image;
-    var shellImg = shellW.mainView.image;
-    var haloImg = haloW.mainView.image;
-
-    var bgMedian = img.median();
-    var bgMAD = img.MAD();
-
-    coreW.mainView.beginProcess();
-    shellW.mainView.beginProcess();
-    haloW.mainView.beginProcess();
-
-    for (var y = 0; y < h; y++) {
-      for (var x = 0; x < w; x++) {
-        var lum = getLum(x, y);
-        // Core: bright central region
-        coreImg.setSample(lum > ${coreClip} ? Math.min(1, (lum - ${coreClip}) / (1 - ${coreClip})) : 0, x, y);
-        // Shell: medium brightness (between shell_clip and core_clip)
-        shellImg.setSample(lum > ${shellClip} && lum <= ${coreClip} ? Math.min(1, (lum - ${shellClip}) / (${coreClip} - ${shellClip})) : 0, x, y);
-        // Halo: faint outer structure (between halo_clip and shell_clip)
-        haloImg.setSample(lum > ${haloClip} && lum <= ${shellClip} ? Math.min(1, (lum - ${haloClip}) / (${shellClip} - ${haloClip})) : 0, x, y);
+    var exprs = [
+      'iif(' + LUM + '>${coreClip}, ${clamp1(`(' + LUM + '-${coreClip})/(1-${coreClip})`)}, 0)',
+      'iif(' + LUM + '>${shellClip} && ' + LUM + '<=${coreClip}, ${clamp1(`(' + LUM + '-${shellClip})/(${coreClip}-${shellClip})`)}, 0)',
+      'iif(' + LUM + '>${haloClip} && ' + LUM + '<=${shellClip}, ${clamp1(`(' + LUM + '-${haloClip})/(${shellClip}-${haloClip})`)}, 0)'
+    ];
+    var sig = [${sigma.core}, ${sigma.shell}, ${sigma.halo}];
+    var made = [];
+    try {
+      for (var k = 0; k < 3; k++) {
+        var mw = new ImageWindow(w, h, 1, 32, true, false, ids[k]);
+        made.push(mw);
+        var PM = new PixelMath;
+        PM.expression = exprs[k];
+        PM.useSingleExpression = true;
+        PM.createNewImage = false;
+        PM.use64BitWorkingImage = true;
+        PM.truncate = true; PM.truncateLower = 0; PM.truncateUpper = 1;
+        PM.executeOn(mw.mainView);
+        if (sig[k] > 0) {
+          var conv = new Convolution;
+          conv.mode = Convolution.prototype.Parametric;
+          conv.shape = 2; conv.aspectRatio = 1; conv.rotationAngle = 0;
+          conv.sigma = sig[k];
+          conv.executeOn(mw.mainView);
+        }
       }
+    } catch (e) {
+      for (var j = 0; j < made.length; j++) made[j].forceClose();
+      throw e;
     }
-
-    coreW.mainView.endProcess();
-    shellW.mainView.endProcess();
-    haloW.mainView.endProcess();
-
-    // Blur masks for smooth transitions
-    var conv = new Convolution;
-    conv.mode = Convolution.prototype.Parametric;
-    conv.shape = 2;
-    conv.aspectRatio = 1;
-    conv.rotationAngle = 0;
-    conv.sigma = 8;
-    conv.executeOn(coreW.mainView);
-    conv.sigma = 12;
-    conv.executeOn(shellW.mainView);
-    conv.sigma = 20;
-    conv.executeOn(haloW.mainView);
-
-    coreW.show();
-    shellW.show();
-    haloW.show();
-
+    var out = [];
+    for (var m = 0; m < 3; m++) {
+      var mi = made[m].mainView.image;
+      var step = Math.max(1, Math.floor(Math.sqrt(w * h / 1000000)));
+      var n = 0, on = 0;
+      for (var y = 0; y < h; y += step) for (var x = 0; x < w; x += step) { n++; if (mi.sample(x, y, 0) > 0.5) on++; }
+      out.push({ mean: mi.mean(), coverage: n ? on / n : 0 });
+      made[m].show();
+    }
     JSON.stringify({
-      coreId: 'mask_core',
-      shellId: 'mask_shell',
-      haloId: 'mask_halo',
-      thresholds: { core: ${coreClip}, shell: ${shellClip}, halo: ${haloClip} }
+      coreId: 'mask_core', shellId: 'mask_shell', haloId: 'mask_halo',
+      thresholds: { core: ${coreClip}, shell: ${shellClip}, halo: ${haloClip} },
+      blur: { core: sig[0], shell: sig[1], halo: sig[2] },
+      stats: { core: out[0], shell: out[1], halo: out[2] }
     });
-  `);
+  `;
+}
+
+export async function createZoneMasks(ctx, viewId, thresholds = {}) {
+  const coreClip = thresholds.core_clip ?? 0.40;
+  const shellClip = thresholds.shell_clip ?? 0.15;
+  const haloClip = thresholds.halo_clip ?? 0.04;
+  const bs = thresholds.blur_sigma;
+  const sigma = (bs && typeof bs === 'object')
+    ? { core: bs.core ?? 8, shell: bs.shell ?? 12, halo: bs.halo ?? 20 }
+    : (typeof bs === 'number' ? { core: bs, shell: bs, halo: bs } : { core: 8, shell: 12, halo: 20 });
+
+  const r = await ctx.pjsr(buildZoneMasksPjsr(viewId, { coreClip, shellClip, haloClip, sigma }));
 
   if (r.status === 'error') {
     throw new Error('createZoneMasks failed: ' + (r.error?.message || 'unknown'));
   }
-
-  return JSON.parse(r.outputs?.consoleOutput || '{}');
+  const out = JSON.parse(r.outputs?.consoleOutput || '{}');
+  for (const z of ['core', 'shell', 'halo']) {
+    const st = out.stats?.[z];
+    if (st) st.flag = st.mean < 0.01 ? 'EMPTY' : (st.mean > 0.95 ? 'FULL' : '');
+  }
+  return out;
 }
 
 /**
