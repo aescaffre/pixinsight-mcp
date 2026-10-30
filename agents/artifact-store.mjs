@@ -406,8 +406,14 @@ export class ArtifactStore {
  * @returns {object|null} variant metadata
  */
 export function getBestVariant(store, agent = 'giga_orchestrator') {
-  const variants = (store.listVariants(agent) || []).filter(v => v && v.xisfPath && fs.existsSync(v.xisfPath));
-  if (variants.length === 0) return null;
+  const all = (store.listVariants(agent) || []).filter(v => v && v.xisfPath && fs.existsSync(v.xisfPath));
+  if (all.length === 0) return null;
+  // Never export a STAR LAYER as the final (IC5146 d1746166, 2026-10-30: the fallback picked
+  // D_stars_reduced). Prefer composites (stage compose/final/merge), then any non-star variant.
+  const isStar = v => /star/i.test(String(v.stage || '')) || /star/i.test(String(v.viewId || v.view_id || ''));
+  const nonStar = all.filter(v => !isStar(v));
+  const composites = nonStar.filter(v => /comp|final|merge|finali/i.test(String(v.stage || '')));
+  const variants = composites.length ? composites : (nonStar.length ? nonStar : all);
   const byNum = (v) => parseInt(String(v.variantId || '').replace(/\D/g, ''), 10) || 0;
   const passing = variants.filter(v => v.gates && v.gates.pass === true);
   if (passing.length) {

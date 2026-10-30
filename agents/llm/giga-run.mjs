@@ -355,7 +355,13 @@ The corrected views MUST stay under these exact IDs. Do NOT stretch, denoise, ru
       } catch (e) { console.log(`  gradient-result persist skipped: ${e.message}`); }
       console.log('--- Gradient Agent done — handing flattened linear views to prep phase 2 ---');
 
-      if (gHash) {
+      const gradFailed = !gradResult || gradResult.exitCode && gradResult.exitCode !== 0 || (gradResult.num_turns ?? gradResult.turns ?? 1) === 0;
+      if (gradFailed) {
+        // Do NOT cache an uncorrected snapshot as a "gradient solution" (M101 47c5c3f6, 2026-10-30:
+        // the agent died in 5 s after a Claude model switch and the raw views were cached).
+        console.log(`  WARNING: gradient agent failed (exit ${gradResult?.exitCode}, ${gradResult?.num_turns ?? 0} turns) — views NOT gradient-corrected; snapshot NOT cached.`);
+      }
+      if (gHash && !gradFailed) {
         try { console.log('  Windows after gradient phase: ' + (await ctx.listImages()).map(i => i.id).join(', ')); } catch { /* */ }
         try { await saveGradientSolution(ctx, gHash, targetName, hasL); console.log(`  Gradient solution cached: ${gHash.slice(0, 12)}`); }
         catch (e) { console.log(`  Gradient cache save skipped: ${e.message}`); }
