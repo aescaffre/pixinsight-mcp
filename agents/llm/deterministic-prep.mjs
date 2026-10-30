@@ -153,7 +153,14 @@ const WCS_CLEAR = `
 
 async function autoCropViews(ctx, { targetName, hasL, log }) {
   const measureIds = [targetName].concat(hasL ? ['FILTER_L'] : []);
-  const cropIds = measureIds;
+  // Crop the narrowband channels with the SAME box, or they stay offset from RGB/L by the trim
+  // (Ha was 148x444 px off on IC5146, 2026-10-30; one agent compensated by hand, one did not).
+  const cropIds = measureIds.slice();
+  try {
+    const present = await ctx.pjsr(`['FILTER_Ha','FILTER_S','FILTER_O'].filter(function(id){ var w = ImageWindow.windowById(id); var t = ImageWindow.windowById('${targetName}'); return !w.isNull && !t.isNull && w.mainView.image.width === t.mainView.image.width && w.mainView.image.height === t.mainView.image.height; }).join(',')`);
+    for (const id of String(present.outputs?.consoleOutput || '').split(',').filter(Boolean)) cropIds.push(id);
+    if (cropIds.length > measureIds.length) log(`  autocrop also trims: ${cropIds.slice(measureIds.length).join(', ')}`);
+  } catch { /* */ }
   const boxes = [];
   for (const id of measureIds) {
     const r = await ctx.pjsr(`
@@ -715,9 +722,22 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
       if (typeof ImageSolver === 'undefined') {
         out = 'SOLVER_UNAVAILABLE';
       } else {
-        function kw(n) { for (var i = 0; i < w.keywords.length; i++) if (w.keywords[i].name === n) return parseFloat(String(w.keywords[i].value).replace(/'/g, '')); return NaN; }
+        function kwOf(win, n) { for (var i = 0; i < win.keywords.length; i++) if (win.keywords[i].name === n) return parseFloat(String(win.keywords[i].value).replace(/'/g, '')); return NaN; }
+        function kw(n) { return kwOf(w, n); }
+        // The combined image has no RA/DEC/FOCALLEN keywords when the masters carry no WCS, and then
+        // ImageSolver.initialize() falls back to its SAVED settings, i.e. the centre of the LAST target it
+        // solved (IC5146 got M101's coordinates on 2026-10-30 and failed). Read the seed from the R master.
+        var mRA = kw('RA'), mDEC = kw('DEC'), mFL = kw('FOCALLEN'), mPX = kw('XPIXSZ');
+        if (!(mRA >= 0) || !(mDEC > -91)) {
+          var mf = '${(F.R || F.L || '').replace(/'/g, "\\'")}';
+          if (mf && File.exists(mf)) {
+            var ma = ImageWindow.open(mf); var mw = ma[0];
+            mRA = kwOf(mw, 'RA'); mDEC = kwOf(mw, 'DEC'); if (!(mFL > 0)) mFL = kwOf(mw, 'FOCALLEN'); if (!(mPX > 0)) mPX = kwOf(mw, 'XPIXSZ');
+            for (var mi = 0; mi < ma.length; mi++) ma[mi].forceClose();
+          }
+        }
         var hint = ${pixelScaleHint};
-        var fl = kw('FOCALLEN'), px = kw('XPIXSZ');
+        var fl = mFL, px = mPX;
         var base = hint > 0 ? hint : ((fl > 0 && px > 0) ? 206.265 * px / fl : 0);
         var seeds = base > 0 ? [base, base * 2, base * 0.5, base * 4, base * 0.25] : [];
         var err = '', tried = [];
@@ -726,6 +746,7 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
           try {
             P.initialize(w);
             try { P.metadata.useFocal = false; P.metadata.resolution = seeds[k] / 3600; } catch (e) {}
+            if (mRA >= 0 && mDEC > -91) { try { P.metadata.ra = mRA; P.metadata.dec = mDEC; } catch (e) {} }
             try { P.solverCfg.catalogMode = 2; P.solverCfg.autoMagnitude = true; P.solverCfg.tryExhaustiveInitialAlignment = true; } catch (e) {}
             try { P.solverCfg.showStars = false; P.solverCfg.generateErrorImg = false; P.solverCfg.showDistortion = false; P.solverCfg.showSimplifiedSurfaces = false; } catch (e) {}
             P.solveImage(w);
@@ -736,7 +757,7 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
           try { var P0 = new ImageSolver; P0.initialize(w); P0.solveImage(w); } catch (e) { err = String(e); }
           tried.push('header-only');
         }
-        out = (w.hasAstrometricSolution ? 'SOLVED' : 'SOLVE_FAILED') + ' seeds=' + tried.join('/') + (err && !w.hasAstrometricSolution ? ' ' + err : '');
+        out = (w.hasAstrometricSolution ? 'SOLVED' : 'SOLVE_FAILED') + ' seeds=' + tried.join('/') + ' centre=' + (mRA >= 0 ? mRA.toFixed(3) + ',' + mDEC.toFixed(3) : 'saved-settings') + (err && !w.hasAstrometricSolution ? ' ' + err : '');
       }
       out;
     `);

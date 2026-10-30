@@ -97,6 +97,7 @@ for (let i = 0; i < args.length; i++) {
   else if (args[i] === '--core-specialist') opts.coreSpecialist = true;   // C-tier phase 1
   else if (args[i] === '--post-pass-only' && args[i + 1]) { opts.postPassOnly = args[++i]; opts.coreSpecialist = true; }   // WI-27: run ONLY the core-specialist post-pass on an existing run
   else if (args[i] === '--dry-run') opts.dryRun = true;
+  else if (args[i] === '--prep-only') opts.prepOnly = true;   // run prep (align/gradient/solve/SPCC/stretch), report, exit before the agents
   else if (args[i] === '--resume-agent' && args[i + 1]) opts.resumeAgent = args[++i];   // WI-07b
   else if (args[i] === '--approve') {   // WI-01: copy the final XISF to ~/.pixinsight-mcp/approved/<class>/ + register it
     opts.approve = true;
@@ -398,6 +399,11 @@ The corrected views MUST stay under these exact IDs. Do NOT stretch, denoise, ru
   // ================================================================
   // PHASE 2+: Creative agent (LLM via Claude Max)
   // ================================================================
+  if (opts.prepOnly) {
+    console.log('\n--- PREP-ONLY: stopping before the creative agent ---');
+    try { console.log('  Views: ' + (await ctx.listImages()).map(i => `${i.id} ${i.width}x${i.height}`).join(', ')); } catch { /* */ }
+    process.exit(0);
+  }
   console.log('\n--- Phase 2+: Creative Agent via Claude Max ---');
 
   // Build system prompt

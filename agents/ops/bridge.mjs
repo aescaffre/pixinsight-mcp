@@ -46,13 +46,22 @@ async function getExecSync() {
 }
 
 export async function isAlive() {
-  try {
-    const execSync = await getExecSync();
-    const out = execSync("ps aux | grep '[P]ixInsight.app' | wc -l", { timeout: 5000 }).toString().trim();
-    return parseInt(out, 10) > 0;
-  } catch {
-    return false;
+  // Declare PixInsight dead only on a CONFIRMED absence. The old check ran `ps aux | grep` with a
+  // 5 s timeout and returned false on timeout; under a heavy 100 MP operation (swap thrashing) ps
+  // exceeded it, the run was aborted as "crashed" and the queue then killed a healthy PixInsight
+  // (IC5146 babad074, 2026-10-30). Now: pgrep, 15 s timeout, 3 confirmations, timeouts = alive.
+  const execSync = await getExecSync();
+  for (let i = 0; i < 3; i++) {
+    try {
+      execSync('pgrep -x PixInsight', { timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'] });
+      return true;                       // exit 0: process found
+    } catch (e) {
+      if (e && (e.code === 'ETIMEDOUT' || e.signal === 'SIGTERM')) return true;   // slow system, not dead
+      // pgrep exit 1 = no match; confirm twice more before declaring a crash
+    }
+    await new Promise(r => setTimeout(r, 2000));
   }
+  return false;
 }
 
 /**

@@ -133,6 +133,16 @@
       "verdict": "candidate",
       "source": "Claude 2026-10-29 (informational: measured by the harness, never affects exit codes)",
       "notes": "run fed7b3ff 2026-10-29: critic 6.4; star gate waived under emergency budget (FWHM 16.5). User has NOT judged it."
+    },
+    {
+      "id": "ic5146_blend70_approved",
+      "path": "/Users/aescaffre/.pixinsight-mcp/approved/mixed_field/IC5146_blend70.xisf",
+      "classification": "mixed_field",
+      "narrowband": false,
+      "starless": false,
+      "verdict": "approved",
+      "source": "user 2026-10-30: \"let's keep the 70%\" (Cocoon / IC5146, borrowed 459 mm data)",
+      "notes": "Manual blend: base = run aa7f6d68 (orange-red core with dark lanes, neutral grey dark nebula) + 70% of run db02b10f's field-Ha excess (k = 0.7*min(1,max(0,dR-dB)/0.06)). Shows faint red Ha filaments across the field without painting the dust lanes. BACKTEST PENDING."
     }
   ],
   "uncalibrated": [],
