@@ -61,7 +61,9 @@ export async function closeImage(ctx, viewId) {
         try { var mk = ws[i].mask; if (mk && !mk.isNull && mk.mainView.id === w.mainView.id) ws[i].removeMask(); } catch (e) {}
       }
       processEvents();
+      try { w.hide(); } catch (eH) {} processEvents(); msleep(150); processEvents();
       w.forceClose();
+      processEvents();
     }
   `);
 }

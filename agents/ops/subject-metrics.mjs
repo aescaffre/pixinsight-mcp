@@ -1165,6 +1165,28 @@ export async function compareToReference(ctx, viewId, referencePath, opts = {}) 
       var fR = faintFraction(b);
       out.faint_target = fT; out.faint_ref = fR; out.coverage_delta = fR - fT;
 
+      // STRUCTURE (2026-10-30), geometry-free and scale-relative so a downscaled screenshot reference
+      // compares fairly with a 100 MP target. Global colour/brightness matching alone pulled a run
+      // toward a flat muddy average (IC5146 4af9697f): these capture contrast the eye cares about.
+      //   dark_depth  = (P50 - P5) / P50 of luminance  -> how far dark nebulae sit below the field
+      //   lc_med/p90  = local contrast |L - mean(L at +-4 steps)| / P50, step = width/400
+      function structureStats(img) {
+        __mark('structure loop');
+        var st = Math.max(1, Math.floor(img.width / 400)), k = 4 * st, Ls = [], lc = [];
+        for (var y = k; y < img.height - k; y += st) for (var x = k; x < img.width - k; x += st) {
+          var L = lumAt(img, x, y); Ls.push(L);
+          var m = (lumAt(img, x - k, y) + lumAt(img, x + k, y) + lumAt(img, x, y - k) + lumAt(img, x, y + k)) / 4;
+          lc.push(Math.abs(L - m));
+        }
+        Ls.sort(function (p, q) { return p - q; }); lc.sort(function (p, q) { return p - q; });
+        function pc(a2, f) { return a2.length ? a2[Math.min(a2.length - 1, Math.floor(f * a2.length))] : 0; }
+        var p50 = Math.max(1e-4, pc(Ls, 0.5));
+        return { depth: (p50 - pc(Ls, 0.05)) / p50, lcMed: pc(lc, 0.5) / p50, lcP90: pc(lc, 0.9) / p50 };
+      }
+      var sT = structureStats(a), sR = structureStats(b);
+      out.dark_depth_target = sT.depth; out.dark_depth_ref = sR.depth; out.dark_depth_delta = sR.depth - sT.depth;
+      out.lc_ratio = sR.lcMed > 0 ? sT.lcMed / sR.lcMed : null; out.lc_p90_ratio = sR.lcP90 > 0 ? sT.lcP90 / sR.lcP90 : null;
+
       // MS-SSIM last: both images at a common ~${targetWidth}px width. The reference window is ours
       // and is resampled in place; the target is only ever duplicated, never touched.
       __mark('ms-ssim resample (new 60 MP window + Resample)');
@@ -1237,7 +1259,8 @@ export async function compareToReference(ctx, viewId, referencePath, opts = {}) 
     `palette_l1=${f3(data.palette_l1)} (saturated subject: target ${f3(data.sat_frac_target)}, ref ${f3(data.sat_frac_ref)}); ` +
     `lab_emd=${f1(data.lab_emd)} (chroma-only a*b*); lum_cdf_dist=${f3(data.lum_cdf_dist)}; ` +
     `ms_ssim=${data.aspect_ok ? f3(data.ms_ssim) : 'n/a (aspect mismatch)'}; ` +
-    `coverage_delta=${f3(data.coverage_delta)} (faint target=${f3(data.faint_target)}, ref=${f3(data.faint_ref)})`;
+    `coverage_delta=${f3(data.coverage_delta)} (faint target=${f3(data.faint_target)}, ref=${f3(data.faint_ref)}); ` +
+    `dark_depth target=${f3(data.dark_depth_target)} ref=${f3(data.dark_depth_ref)}; local_contrast ratio=${f3(data.lc_ratio)} (p90 ${f3(data.lc_p90_ratio)}; 1.0 = same as reference)`;
   return data;
 }
 

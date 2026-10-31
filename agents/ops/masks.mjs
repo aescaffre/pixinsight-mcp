@@ -136,7 +136,9 @@ export async function closeMask(ctx, maskId) {
       var ws = ImageWindow.windows;
       for (var i = 0; i < ws.length; i++) { try { var mk = ws[i].mask; if (mk && !mk.isNull && mk.mainView.id === mw.mainView.id) ws[i].removeMask(); } catch (e) {} }
       processEvents();
+      try { mw.hide(); } catch (eH) {} processEvents(); msleep(150); processEvents();   // flush UI events first (PI 1.9.5 crash, 2026-10-31)
       mw.forceClose();
+      processEvents();
     }
   `);
 }

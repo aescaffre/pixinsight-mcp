@@ -189,6 +189,20 @@ function pickRegistryReference(targetName, classification) {
   } catch { return ''; }
 }
 
+/**
+ * Per-run reference targets (config.files.referenceGates): { max_palette_l1, max_lab_emd,
+ * max_coverage_delta, max_bg_cast_delta, blocking, note }. Used when the user supplies a rendering
+ * the run must reach (friend's IC5146/LDN15/M101, 2026-10-30). Carries a _calibration note so
+ * gateThreshold() honours it.
+ */
+function applyReferenceGates(profile, rg) {
+  if (!rg || typeof rg !== 'object') return profile;
+  const p = JSON.parse(JSON.stringify(profile || {}));
+  p.reference = { ...(p.reference || {}), ...rg, _calibration: rg.note || 'per-run reference targets from config.files.referenceGates (user-supplied target rendering)' };
+  delete p.reference.note;
+  return p;
+}
+
 export function generateBrief(config, opts = {}) {
   const targetName = config.files?.targetName || config.name || 'Unknown';
   const classification = opts.classification || classifyFromName(targetName);
@@ -300,6 +314,6 @@ export function generateBrief(config, opts = {}) {
       maxIterationsPerAgent: opts.maxIterationsPerAgent || 8
     },
     softGoals: opts.softGoals || [],
-    processingProfile: buildProfile(classification, isNarrowband)
+    processingProfile: applyReferenceGates(buildProfile(classification, isNarrowband), config.files?.referenceGates)
   };
 }

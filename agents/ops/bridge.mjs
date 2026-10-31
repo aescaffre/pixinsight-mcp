@@ -254,7 +254,7 @@ export function createBridgeContext(opts = {}) {
     const id = String(viewId).replace(/'/g, "\\'");
     return pjsr(
       `var w = ImageWindow.windowById('${id}');` +
-      `if (!w.isNull) { var ws = ImageWindow.windows; for (var i = 0; i < ws.length; i++) { try { var mk = ws[i].mask; if (mk && !mk.isNull && mk.mainView.id === w.mainView.id) ws[i].removeMask(); } catch (e) {} } try { w.purge(); } catch (e) {} processEvents(); w.forceClose(); }` +
+      `if (!w.isNull) { var ws = ImageWindow.windows; for (var i = 0; i < ws.length; i++) { try { var mk = ws[i].mask; if (mk && !mk.isNull && mk.mainView.id === w.mainView.id) ws[i].removeMask(); } catch (e) {} } try { w.purge(); } catch (e) {} try { w.hide(); } catch (e) {} processEvents(); msleep(150); processEvents(); w.forceClose(); processEvents(); }` +
       `processEvents(); msleep(${Math.max(0, settleMs | 0)}); processEvents();`
     );
   }

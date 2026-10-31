@@ -33,7 +33,7 @@ test('galaxy_spiral moderate: natural broadband branch C, no vivid bracket', () 
   assert.ok(p.includes('NATURAL BROADBAND'));
   assert.ok(!p.includes('0.65 → 0.75 → 0.85'));
   assert.ok(p.includes('P90 target 0.4'));
-  assert.ok(p.includes('0.50 (restrained)'));
+  assert.ok(p.includes('0.58 (target)') && p.includes('(push)'));   // 2026-10-31: two-candidate brackets
   assert.ok(p.includes('equally disqualifying'));
 });
 
