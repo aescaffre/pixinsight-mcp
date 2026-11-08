@@ -78,6 +78,7 @@ export async function loadBaseRunAsPrep(ctx, baseRunId, targetName, opts = {}) {
   // Carry the base run's prep detail baseline (prep-metrics.json) so the finish detail-gain advisory still has a reference.
   const baseline = readDetailBaseline(path.join(home, '.pixinsight-mcp', 'runs', baseRunId));
   if (baseline) prepResult.baselineDetail = baseline;
+  try { const pm = JSON.parse(fs.readFileSync(path.join(home, '.pixinsight-mcp', 'runs', baseRunId, 'prep-metrics.json'), 'utf8')); if (pm.inventory) prepResult.inventory = pm.inventory; } catch { /* no inventory in the base run */ }
   return { prepResult, selection };
 }
 

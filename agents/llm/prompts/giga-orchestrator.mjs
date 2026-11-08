@@ -241,6 +241,7 @@ Do NOT apply destructive global curves to force the full separation on a tiny su
 ## QUALITY RULES — HARD GATES (target-agnostic)
 
 These are enforced by automated code. The \`finish\` tool runs the quality gates automatically.
+UNATTENDED: nobody answers questions during a run. Never end your turn to ask; decide (most defensible option), record it in remaining_flaws, continue to finish.
 You CANNOT complete until the BLOCKING rows pass. Fix issues proactively — don't wait for finish to reject.
 
 ### GATE TABLE (single source of truth for every threshold in this prompt)
@@ -354,6 +355,9 @@ Prep is done by deterministic prep from the processing profile (stretch median $
 # ======================================================================
 # MISSION: BRANCH GENERATION (generate_candidates state)
 # ======================================================================
+
+## STAGED METRIC ORDER (measured impact of each operation)
+Order by how many metrics an operation moves; call \`stage_checkpoint\` after each stage: 1. **tone** (curves/stretch move 7-8 metrics; black point; masked outer-zone lift: outer +230%, core/sky untouched, saturation -17%) 2. **local_contrast** (LHE/HDRMT move 5-6; HDRMT: mottle +57%, core -24%) 3. **detail_noise** (sharpen + denoise together; USM grain +50%; keep fine detail >= prep) 4. **colour** (moves only saturation/chroma noise, so after tone; judged on the ARMS) 5. stars. A finish failure on a metric that passed its checkpoint names the drifting stage: fix that stage, not downstream.
 
 ## METRIC-DRIVEN ITERATION
 Before starting branches, call \`measure_subject_detail\` on the baseline to get starting metrics.
@@ -586,13 +590,13 @@ Never say only "looks good." Say things like:
 
 Combine branch winners into final compositions.
 
-${isNarrowband ? `Tools: sho_combine, sho_hue_saturation, lift_faint_halo, body_edge_contrast, shell_detail_enhance, run_curves, run_pixelmath, lrgb_combine (FILTER_Ha as L), check_tonal_presence, create_luminance_mask, create_zone_masks, mask_ops, apply_mask, neutralize_palette_background, measure_palette_balance, save_variant, get_image_stats, measure_subject_detail${isStarless ? '' : ', stretch_stars, check_star_layer_integrity, star_protected_blend'}` : `Tools: lrgb_combine, inject_luminance, run_curves, run_pixelmath, lift_dust, inject_l_ifn, star_protected_blend, check_star_layer_integrity, check_tonal_presence, create_luminance_mask, create_zone_masks, mask_ops, apply_mask, save_variant, get_image_stats, measure_subject_detail`}
+${isNarrowband ? `Tools: sho_combine, sho_hue_saturation, ${brief.processingProfile?.faint_halo?.lift === false ? 'compress_outer_haze' : 'lift_faint_halo, body_edge_contrast'}, shell_detail_enhance, run_curves, run_pixelmath, lrgb_combine (FILTER_Ha as L), check_tonal_presence, create_luminance_mask, create_zone_masks, mask_ops, apply_mask, neutralize_palette_background, measure_palette_balance, save_variant, get_image_stats, measure_subject_detail${isStarless ? '' : ', stretch_stars, check_star_layer_integrity, star_protected_blend'}` : `Tools: lrgb_combine, inject_luminance, run_curves, run_pixelmath, lift_dust, inject_l_ifn, star_protected_blend, check_star_layer_integrity, check_tonal_presence, create_luminance_mask, create_zone_masks, mask_ops, apply_mask, save_variant, get_image_stats, measure_subject_detail`}
 
 Required: at least 2 composition variants (balanced + the one that best serves the intent; a third only if both fail):
 - COMP_balanced — safe combination of all branch winners
 - COMP_boldcolor — emphasizes color branch winner more
 - COMP_edge — pushes everything toward the edge candidates
-${isNarrowband ? narrowbandCompList(isHOO) : isPN ? '- COMP_synth_L — use SYNTH_L (built in Branch C) instead of broadband L' : '- COMP_boldIFN — emphasizes IFN branch winner more'}${champMergeCandidate}
+${isNarrowband ? narrowbandCompList(isHOO, brief.processingProfile?.faint_halo?.lift === false) : isPN ? '- COMP_synth_L — use SYNTH_L (built in Branch C) instead of broadband L' : '- COMP_boldIFN — emphasizes IFN branch winner more'}${champMergeCandidate}
 
 ${isPN ? `
 **PLANETARY NEBULA COMPOSITION:**
@@ -769,6 +773,14 @@ Gate (blocking at finish): green ≤ ${((pal.max_green_frac ?? 0.10) * 100).toFi
 `;
 }
 
+/** Final-touch step of the palette branch: lift the faint halo, unless the class profile forbids it. */
+function faintHaloStep(brief, isHOO) {
+  const fh = brief.processingProfile?.faint_halo;
+  if (fh?.lift === false) return `**FINAL TOUCH (USER-APPROVED on the Veil, "haze75"):** do NOT lift the faint outer nebulosity on this class. ${fh.reason} On a clone, compress_outer_haze (strength ${fh.compress_strength}). Filaments and the bright body must stay unchanged; verify at 1:1 (\`save_and_show_preview(..., region="subject")\`) that no mask edge shows.`;
+  if (isHOO) return `**FINAL TOUCH (approved on the PACMAN SHO look):** on a clone, lift_faint_halo then body_edge_contrast. The faint outer Ha nebulosity is real signal that the curve crushed; revealing it as a cloud around the body is wanted. Verify at 1:1 (\`save_and_show_preview(..., region="subject")\`) that revealed structure is real (smooth cloud forms, not blotchy noise). Keep subject coverage growth, saturation P90 ≤ 0.85.`;
+  return `**USER-APPROVED FINAL TOUCH (PACMAN "really perfect"):** on a clone, lift_faint_halo then body_edge_contrast. The faint outer Ha nebulosity is real signal that the curve crushed; revealing it as gold cloud around the body is what the user wants. Verify at 1:1 (\`save_and_show_preview(..., region="subject")\`) that revealed structure is real (smooth cloud forms, not blotchy noise). Keep subject coverage growth, saturation P90 ≤ 0.85.`;
+}
+
 /** Branch C body for SHO/HOO: the PACMAN-approved palette recipe (SHO steps are verbatim). */
 function buildPaletteBranch(brief, isHOO) {
   if (isHOO) {
@@ -780,7 +792,7 @@ function buildPaletteBranch(brief, isHOO) {
 5. Optional sho_hue_saturation: red/orange boost and cyan/blue +0.10 (+0.25 on blue clipped the OIII core in SHO tests). Then shell_detail_enhance at MODERATE strength (medium 0.6 / large 0.4; full strength amplifies grain) + NXT 0.35.
 6. Inspect a 1:1 crop of the OIII core (\`save_and_show_preview(view_id, label, region="subject")\`): color MOTTLE from the weak OIII channel → chroma_smooth (sigma 8). NXT color mode does not reach that scale.
 7. neutralize_palette_background LAST (chroma blur can shift the sky again).
-8. **FINAL TOUCH (approved on the PACMAN SHO look):** on a clone, lift_faint_halo then body_edge_contrast. The faint outer Ha nebulosity is real signal that the curve crushed; revealing it as a cloud around the body is wanted. Verify at 1:1 (\`save_and_show_preview(..., region="subject")\`) that revealed structure is real (smooth cloud forms, not blotchy noise). Keep subject coverage growth, saturation P90 ≤ 0.85.
+8. ${faintHaloStep(brief, true)}
 9. Luminance option: if the palette mix softens structure, lrgb_combine with FILTER_Ha (or create_synthetic_luminance 0.7 Ha + 0.3 O) as L, lightness ≤ 0.5.
 `;
   }
@@ -793,7 +805,7 @@ function buildPaletteBranch(brief, isHOO) {
 6. sho_hue_saturation (validated: gold +0.30, red +0.15, green −0.45, cyan/blue +0.10 — +0.25 on blue clipped the OIII core). Then shell_detail_enhance at MODERATE strength (medium 0.6 / large 0.4; full strength amplifies grain) + NXT 0.35.
 7. Inspect a 1:1 crop of the OIII core (\`save_and_show_preview(view_id, label, region="subject")\`): orange/blue COLOR MOTTLE from the weak gained SII → chroma_smooth (sigma 8). NXT color mode does not reach that scale.
 8. neutralize_palette_background LAST (the hue shift rotates greenish sky noise to gold → brown sky; chroma blur can shift it again).
-9. **USER-APPROVED FINAL TOUCH (PACMAN "really perfect"):** on a clone, lift_faint_halo then body_edge_contrast. The faint outer Ha nebulosity is real signal that the curve crushed; revealing it as gold cloud around the body is what the user wants. Verify at 1:1 (\`save_and_show_preview(..., region="subject")\`) that revealed structure is real (smooth cloud forms, not blotchy noise). Keep subject coverage growth, saturation P90 ≤ 0.85.
+9. ${faintHaloStep(brief, false)}
 10. Luminance option: if the palette mix softens structure, lrgb_combine with FILTER_Ha (or create_synthetic_luminance 0.7 Ha + 0.3 O) as L, lightness ≤ 0.5.
 `;
 }
@@ -805,11 +817,11 @@ Open the linear Ha star layer from the path listed in the header (open_image), \
 `;
 }
 
-function narrowbandCompList(isHOO) {
+function narrowbandCompList(isHOO, noHaloLift = false) {
   return isHOO
     ? `- COMP_palette_hoo — the best hoo_o_weight / o_gain palette variant (hoo_o_weight 0.5 / 0.65 / 0.8 bracket winner)
 - COMP_synthL — Ha (or 0.7 Ha + 0.3 O) as L via lrgb_combine, lightness ≤ 0.5
-- COMP_halo_lift — palette winner + lift_faint_halo / body_edge_contrast`
+- ${noHaloLift ? 'COMP_haze_down — palette winner + compress_outer_haze' : 'COMP_halo_lift — palette winner + lift_faint_halo / body_edge_contrast'}`
     : `- COMP_palette_foraxx — the best foraxx variant (o_gain / h_gain from the bracket)
 - COMP_palette_sho — the best sho variant (with sho_hue_shift)
 - COMP_synthL — Ha (or 0.7 Ha + 0.3 O) as L via lrgb_combine, lightness ≤ 0.5

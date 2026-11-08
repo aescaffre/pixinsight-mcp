@@ -269,3 +269,144 @@ export function cornerStats(u) {
   }
   return { cornerLumDelta, cornerChroma };
 }
+
+// ---------------------------------------------------------------------------
+// LUMINANCE SKY TILT (mono or colour). measureColorGradient refuses mono views and
+// measureUniformity reports an absolute corner stddev, so a linear L with a 0.34 %-of-sky
+// tilt read "flat" (3.2e-5) on M74 (2026-11-07) — and the STRETCH amplified it ~15x into a
+// visible one-sided ramp that the main agent then "fixed" with GradientCorrection on stretched
+// data, cutting the galaxy's faint envelope on one side. Judge tilt in the units the eye sees:
+// fit a plane to sky cells (subject cells rejected as positive residuals) and push the plane's
+// frame-corner values through the same auto-stretch the pipeline uses (target 0.10).
+// ---------------------------------------------------------------------------
+
+/** Pure: midtone transfer function. */
+export function mtf(m, x) {
+  if (x <= 0) return 0; if (x >= 1) return 1;
+  return ((m - 1) * x) / ((2 * m - 1) * x - m);
+}
+
+/** Pure: auto-stretch parameters (same formula as preview.mjs autoStretch). */
+export function autoStretchParams(median, mad, targetBg = 0.10) {
+  const c0 = Math.max(0, median - 2.8 * mad);
+  const x = (1 > c0) ? (median - c0) / (1 - c0) : 0.5;
+  const m = (x <= 0 || x >= 1) ? 0.5 : x * (1 - targetBg) / (x * (1 - 2 * targetBg) + targetBg);
+  return { c0, m };
+}
+
+/**
+ * Pure: robust plane fit v = a + b*u + c*w over cells {u, w, v} (u, w in [-0.5, 0.5]).
+ * Iteratively rejects positive outliers (subject / halo cells) above k robust sigmas and
+ * symmetric outliers above 2k. Returns {a, b, c, used, rejected, sigma, ppPlane}.
+ */
+export function fitSkyPlane(cells, { iters = 8, k = 2.5 } = {}) {
+  let keep = cells.filter(c => Number.isFinite(c.v));
+  let fit = null;
+  for (let it = 0; it < iters; it++) {
+    if (keep.length < 6) break;
+    // normal equations 3x3
+    let S = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], T = [0, 0, 0];
+    for (const c of keep) {
+      const r = [1, c.u, c.w];
+      for (let i = 0; i < 3; i++) { T[i] += r[i] * c.v; for (let j = 0; j < 3; j++) S[i][j] += r[i] * r[j]; }
+    }
+    const sol = solve3(S, T); if (!sol) break;
+    const [a, b, cc] = sol;
+    const res = cells.map(c => c.v - (a + b * c.u + cc * c.w));
+    const kr = keep.map(c => c.v - (a + b * c.u + cc * c.w)).map(Math.abs).sort((x, y) => x - y);
+    const sigma = Math.max(1.4826 * kr[Math.floor(kr.length / 2)], 1e-9);
+    fit = { a, b, c: cc, sigma };
+    const next = cells.filter((c, i) => Number.isFinite(c.v) && res[i] <= k * sigma && res[i] >= -2 * k * sigma);
+    if (next.length === keep.length && next.every((c, i) => c === keep[i])) { keep = next; break; }
+    keep = next;
+  }
+  if (!fit) return null;
+  const corners = [[-0.5, -0.5], [0.5, -0.5], [-0.5, 0.5], [0.5, 0.5]].map(([u, w]) => fit.a + fit.b * u + fit.c * w);
+  return { ...fit, used: keep.length, rejected: cells.length - keep.length, corners, ppPlane: Math.max(...corners) - Math.min(...corners) };
+}
+
+function solve3(A, y) {
+  const M = A.map((r, i) => [...r, y[i]]);
+  for (let i = 0; i < 3; i++) {
+    let p = i; for (let r = i + 1; r < 3; r++) if (Math.abs(M[r][i]) > Math.abs(M[p][i])) p = r;
+    if (Math.abs(M[p][i]) < 1e-15) return null;
+    [M[i], M[p]] = [M[p], M[i]];
+    for (let r = 0; r < 3; r++) if (r !== i) { const f = M[r][i] / M[i][i]; for (let j = i; j < 4; j++) M[r][j] -= f * M[i][j]; }
+  }
+  return [M[0][3] / M[0][0], M[1][3] / M[1][1], M[2][3] / M[2][2]];
+}
+
+/** Pure: verdict from a plane fit + whole-image stats, in auto-stretched (target 0.10) units. */
+export function lumTiltVerdict(fit, median, mad, targetBg = 0.10) {
+  const { c0, m } = autoStretchParams(median, mad, targetBg);
+  const st = fit.corners.map(v => mtf(m, (v - c0) / (1 - c0)));
+  const ppStretched = Math.max(...st) - Math.min(...st);
+  const rel = fit.a > 0 ? fit.ppPlane / fit.a : null;
+  const verdict = ppStretched < 0.008 ? 'FLAT' : ppStretched <= 0.015 ? 'MILD' : 'VISIBLE TILT';
+  return { ppLinear: fit.ppPlane, relToSky: rel, ppStretched, verdict, stretchedCorners: st };
+}
+
+/**
+ * Measure the large-scale luminance tilt of a (linear or stretched) view: grid cell medians,
+ * robust sky-plane fit, verdict in auto-stretched units (pass stretched=true if the view is
+ * already non-linear: the verdict then uses the plane directly).
+ */
+export async function measureLumTilt(ctx, viewId, { cols = 12, rows = 8, stretched = false } = {}) {
+  const r = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}');
+    if (w.isNull) throw new Error('measureLumTilt: not found: ${viewId}');
+    var img = w.mainView.image; var W = img.width, H = img.height;
+    var cols = ${cols}, rows = ${rows};
+    var cw = Math.floor(W / cols), ch = Math.floor(H / rows);
+    var box = Math.max(24, Math.floor(Math.min(cw, ch) * 0.6));
+    var cells = [];
+    for (var gy = 0; gy < rows; gy++) for (var gx = 0; gx < cols; gx++) {
+      var x0 = gx * cw + Math.floor((cw - box) / 2), y0 = gy * ch + Math.floor((ch - box) / 2);
+      img.selectedRect = new Rect(x0, y0, x0 + box, y0 + box);
+      var s = 0, n = img.isColor ? 3 : 1;
+      for (var c = 0; c < n; c++) { img.selectedChannel = c; s += img.median(); }
+      img.resetChannelSelection();
+      cells.push([(x0 + box / 2) / W - 0.5, (y0 + box / 2) / H - 0.5, s / n]);
+    }
+    img.resetSelections();
+    var n2 = img.isColor ? 3 : 1, med = 0, mad = 0;
+    for (var c = 0; c < n2; c++) { img.selectedChannel = c; med += img.median(); mad += img.MAD(); }
+    img.resetChannelSelection();
+    JSON.stringify({ W: W, H: H, cells: cells, median: med / n2, mad: mad / n2 });
+  `);
+  if (r.status === 'error') return { error: r.error?.message || 'measureLumTilt failed' };
+  const o = JSON.parse(r.outputs?.consoleOutput?.trim() || '{}');
+  // Empty cells (outside a drizzle/registration footprint: median exactly 0 or far below the frame median) are NOT
+  // sky: M101 friend crop 2026-11-08 — four zero L corners read as a 31 %-of-sky "tilt"; subtracting it created a
+  // real 14 % ramp. Drop them before fitting, and refuse when too few valid cells remain.
+  const all = o.cells.map(([u, w, v]) => ({ u, w, v }));
+  const floor = Math.max(1e-6, 0.5 * (o.median || 0));
+  const valid = all.filter(c => c.v > floor);
+  const emptyCells = all.length - valid.length;
+  if (valid.length < 0.6 * all.length) return { error: `only ${valid.length}/${all.length} cells hold data (empty/zero footprint) — tilt not measurable`, emptyCells };
+  const fit = fitSkyPlane(valid);
+  if (!fit) return { error: 'not enough sky cells for a plane fit', emptyCells };
+  if (fit.used < 12) return { error: `only ${fit.used} sky cells after subject rejection — tilt not measurable`, emptyCells };
+  const v = stretched
+    ? { ppLinear: fit.ppPlane, relToSky: fit.a > 0 ? fit.ppPlane / fit.a : null, ppStretched: fit.ppPlane, verdict: fit.ppPlane < 0.008 ? 'FLAT' : fit.ppPlane <= 0.015 ? 'MILD' : 'VISIBLE TILT' }
+    : lumTiltVerdict(fit, o.median, o.mad);
+  const dir = Math.abs(fit.b) >= Math.abs(fit.c) ? (fit.b > 0 ? 'brighter to the right' : 'brighter to the left') : (fit.c > 0 ? 'brighter to the bottom' : 'brighter to the top');
+  return { ...v, direction: dir, plane: { a: fit.a, b: fit.b, c: fit.c }, skyCells: fit.used, rejectedCells: fit.rejected, emptyCells, width: o.W, height: o.H, median: o.median, mad: o.mad };
+}
+
+/**
+ * Subtract the fitted sky plane's TILT (zero-mean: the sky level and the subject are untouched;
+ * a 3-parameter plane fitted to sky cells cannot follow the subject or its faint envelope).
+ */
+export async function subtractSkyPlane(ctx, viewId, tilt) {
+  const { b, c } = tilt.plane; const W = tilt.width, H = tilt.height;
+  const expr = `max(0, $T - (${b.toExponential(8)}*((x()+0.5)/${W}-0.5) + ${c.toExponential(8)}*((y()+0.5)/${H}-0.5)))`;
+  const r = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}');
+    if (w.isNull) throw new Error('subtractSkyPlane: not found: ${viewId}');
+    var P = new PixelMath; P.expression = '${expr}'; P.useSingleExpression = true;
+    P.createNewImage = false; P.rescale = false; P.truncate = true; P.executeOn(w.mainView); 'ok';
+  `);
+  if (r.status === 'error') throw new Error(r.error?.message || 'subtractSkyPlane failed');
+  return { expression: expr };
+}

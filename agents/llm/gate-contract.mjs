@@ -184,6 +184,27 @@ export function buildGateTable(brief) {
     'stars.min_density_per_mpx', null);
   const { maxP90, failAt: satFailAt } = saturationLimits(profile);
   add('saturation', 'check_saturation', +satFailAt.toFixed(2), `subject P90 saturation <= max_p90 (${maxP90}) + ${SAT_HARD_MARGIN}`, 'BLOCKING', emergency);
+  const satFloor = profile?.saturation?.min_p50;
+  if (Number.isFinite(satFloor)) add('saturation_floor', 'check_saturation', satFloor, `subject MEDIAN saturation >= ${satFloor} (not washed out)`, 'BLOCKING', emergency);
+  const tsc = profile?.texture_scale || {};
+  if (Number.isFinite(tsc.min_fine_blob)) add('fine_detail', 'finish (measureScaleBands)', tsc.min_fine_blob, `disc fine(0.7-3px)/blob(3-6px) detail ratio >= ${tsc.min_fine_blob}${Number.isFinite(tsc.max_fine_blob) ? ` and <= ${tsc.max_fine_blob}` : ''} (no watercolour smoothing, no crunchy over-sharpening)`, 'BLOCKING', emergency);
+  if (Number.isFinite(tsc.max_mid_mottle)) add('disc_mottle', 'finish (measureDiscMottle)', tsc.max_mid_mottle, `mid-disc blob-scale relative contrast <= ${tsc.max_mid_mottle}`, tsc.mottle_blocking === true ? 'BLOCKING' : 'WARNING', tsc.mottle_blocking === true ? emergency : 'Advisory: margin vs references is thin.');
+  const oac = profile?.outer_arms || {};
+  if (Number.isFinite(oac.min_net_contrast)) add('outer_arms', 'finish (prep signal inventory zones)', oac.min_net_contrast, `outer zone (${Number.isFinite(oac.r_min_px) ? `r ${oac.r_min_px}-${oac.r_max_px}px` : '0.8-1.0 x the radius where the prep data is still >= 5 sigma'}) reads >= ${oac.min_net_contrast} above sky, net of sky spread`, 'BLOCKING', emergency);
+  const cpc = profile?.core_preservation || {};
+  if (Number.isFinite(cpc.min_ratio_vs_prep)) add('core_preservation', 'finish (prep signal inventory zones)', cpc.min_ratio_vs_prep, `core/disc brightness index >= x${cpc.min_ratio_vs_prep} of the prep index (no whole-disc lift)`, 'BLOCKING', emergency);
+  if (Number.isFinite(cpc.min_core_structure)) add('core_structure', 'finish (measureZoneStructure)', cpc.min_core_structure, `core fine structure (r < 0.2 x detection radius) >= ${cpc.min_core_structure} (no bright featureless core)`, 'BLOCKING', emergency);
+  if (Number.isFinite(tsc.min_ratio_vs_prep)) add('fine_detail', 'finish (measureScaleBands vs prep)', tsc.min_ratio_vs_prep, `disc fine/blob >= x${tsc.min_ratio_vs_prep} of the prep ratio (keep the knots the data has)`, 'BLOCKING', emergency);
+  const sfl = profile?.saturation?.min_arm_p50;
+  if (Number.isFinite(sfl)) add('saturation_floor', 'finish (measureZoneStructure arms)', sfl, `ARM pixels median saturation >= ${sfl} (inter-arm gaps do not count; replaces the subject-median floor when a prep inventory exists)`, 'BLOCKING', emergency);
+  const envc = profile?.envelope || {};
+  if (Number.isFinite(cpc.max_core_spectrum)) add('core_cooked', 'finish (measureCoreSpectrum)', cpc.max_core_spectrum, `core texture spectrum fine/coarse <= ${cpc.max_core_spectrum} (no cell/worm core from small-radius local contrast)`, 'BLOCKING', emergency);
+  const agc = profile?.arm_gaps || {};
+  if (Number.isFinite(agc.min_depth)) add('arm_gap_depth', 'finish (measureArmGapDepth)', agc.min_depth, `arm/gap depth >= ${agc.min_depth} (gaps between the arms stay dark: no haze)`, 'BLOCKING', emergency);
+  const hkc = profile?.ha_knots || {};
+  if (Number.isFinite(hkc.min_pink_frac)) add('ha_knots', 'finish (prep Ha knot pixels)', hkc.min_pink_frac, `HII knots found in the prep Ha stay pink-red (share >= ${hkc.min_pink_frac}); only when Ha data exists`, 'BLOCKING', emergency);
+  if (Number.isFinite(envc.max_edge_steepening)) add('edge_softness', 'finish (outer-glow radial profile)', envc.max_edge_steepening, `outer glow fades at the edge no more than x${envc.max_edge_steepening} faster than inside (no mask-shaped boundary)`, 'BLOCKING', emergency);
+  if (Number.isFinite(envc.min_sector_ratio)) add('envelope_clip', 'finish (envelope by direction vs prep)', envc.min_sector_ratio, `outer glow in each of 8 directions >= x${envc.min_sector_ratio} of what the prep data holds there (no one-sided mask/gradient-model edge)`, 'BLOCKING', emergency);
   const tonal = gateThreshold(profile, 'tonal.min_separation', TONAL);
   add('tonal_presence', 'check_tonal_presence', tonal, `subject/background separation >= ${tonal}x (${TONAL_SMALL}x for small galaxies; advisory at low ROI confidence)`,
     'BLOCKING', emergency, 'tonal.min_separation', TONAL);

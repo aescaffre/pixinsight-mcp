@@ -287,7 +287,11 @@ Successfully processed with zero target-specific code changes between runs:
 - **Node.js** v22+ (tested with v22.13.1)
 - **Claude Code** with a **Max subscription** (the creative agent runs via `claude -p` subprocess -- no API key needed)
 - **Calibrated master frames** -- WBPP-stacked, debayered XISF files (R, G, B, optionally L and Ha; or mono S/H/O for narrowband)
-- **macOS** (tested on Darwin/arm64; Linux may work but is untested)
+- **macOS or Windows** (and likely Linux):
+  - **macOS**: primary platform, tested on Darwin/arm64.
+  - **Windows**: the Node <-> PixInsight bridge was validated by a community tester; v0.4.0 fixes the portability issues they reported (Windows paths embedded in PJSR, Unix-only `ps`/`grep`/`awk` memory checks, hard-coded PixInsight install paths in the watcher).
+  - **Linux**: same code paths as macOS (process checks via `ps`/`pgrep`); expected to work, untested.
+  - `scripts/pi-relaunch.sh` is a macOS convenience script; on Windows/Linux start PixInsight yourself and run the watcher (Quick Start steps 2 and 3a).
 - At least 20 GB free disk space (checked at startup; under 10 GB the run aborts)
 
 ---
@@ -295,34 +299,38 @@ Successfully processed with zero target-specific code changes between runs:
 ## Quick Start
 
 ```bash
-# 1. Build the MCP server
-export PATH="/Users/aescaffre/.local/node-v22.13.1-darwin-arm64/bin:$PATH"
-cd /Users/aescaffre/pixinsight-mcp && npm run build
+# 1. Build the MCP server (from the repository folder)
+npm install && npm run build
 
-# 2. Start PixInsight with the watcher. Either:
+# 2. Point the watcher at your PixInsight install (writes pjsr/mcp-solver-paths.jsh for the ImageSolver
+#    plate-solve fallback). Auto-detects /Applications/PixInsight (macOS), C:/Program Files/PixInsight (Windows),
+#    /opt/PixInsight (Linux); override with PIXINSIGHT_DIR=<folder> or --pi-dir <folder>. Re-run after moving PixInsight.
+node scripts/setup-watcher.mjs
+
+# 3. Start PixInsight with the watcher. Either:
 #    a) Script > Run Script... > pjsr/pixinsight-mcp-watcher.js   (first line: #engine v8)
-#    b) headless relaunch with RC-Astro modules + watcher (clears stale bridge files, waits for the watcher):
+#    b) macOS: headless relaunch with RC-Astro modules + watcher (runs step 2, clears stale bridge files, waits for the watcher):
 scripts/pi-relaunch.sh            # add --kill to terminate a stalled PixInsight first
 
-# 3. Verify bridge connectivity
+# 4. Verify bridge connectivity
 node scripts/ping-watcher.mjs
 
-# 4. Create a config JSON (see Config Format below) and run the GIGA pipeline
+# 5. Create a config JSON (see Config Format below) and run the GIGA pipeline
 node agents/llm/giga-run.mjs --config /path/to/config.json
 
-# 5. Optional: add a processing intent to guide aesthetic decisions
+# 6. Optional: add a processing intent to guide aesthetic decisions
 node agents/llm/giga-run.mjs --config /path/to/config.json --intent "push IFN hard, vivid galaxy colors"
 
-# 6. Dry run (classification + brief only, no processing)
+# 7. Dry run (classification + brief only, no processing)
 node agents/llm/giga-run.mjs --config /path/to/config.json --dry-run
 
-# 7. After a PixInsight crash: restart PixInsight + watcher, then re-attach the same Claude session
+# 8. After a PixInsight crash: restart PixInsight + watcher, then re-attach the same Claude session
 node agents/llm/giga-run.mjs --config /path/to/config.json --resume-agent <runId>
 
-# 8. Promote a finished run's final image to the approved-image registry
+# 9. Promote a finished run's final image to the approved-image registry
 node agents/llm/giga-run.mjs --config /path/to/config.json --approve <runId>
 
-# 9. Back-test the gates against every registered image (PixInsight running); 10. unit tests (no PixInsight)
+# 10. Back-test the gates against every registered image (PixInsight running); 11. unit tests (no PixInsight)
 node scripts/backtest-gates.mjs            # exit 1 = approved image rejected, 2 = rejected image passed
 npm test                                   # prompt goldens under test/golden, UPDATE_GOLDEN=1 to refresh
 ```

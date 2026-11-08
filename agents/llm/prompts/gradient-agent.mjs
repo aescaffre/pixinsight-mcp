@@ -26,7 +26,7 @@ When you find a winning scale (or a scale that ate signal), call \`save_memory\`
  * @param {object} brief - Processing brief
  * @returns {string} System prompt
  */
-export const GRADIENT_PROMPT_VERSION = 2;
+export const GRADIENT_PROMPT_VERSION = 4; // 4: tilt ignores empty footprint cells; net respects tool=none. 3: // 3: L judged by measure_lum_tilt (stretched units) + subtract_sky_plane
 
 export function buildGradientAgentPrompt(brief) {
   const cls = brief.target.classification;
@@ -60,7 +60,9 @@ SPATIAL gradient: one corner redder than another, a green glow on one side, a br
     - score < 0.008  → FLAT (done)
     - 0.008–0.015    → MILD (one more gentle pass at most)
     - > 0.015        → VISIBLE COLOR GRADIENT (keep correcting)
-- \`measure_uniformity\` gives the luminance ramp (corner stddev) — secondary.
+- \`measure_lum_tilt\` gives the LUMINANCE ramp in stretched units (same 0.008 / 0.015 bands). It is the
+  instrument for L (mono: measure_color_gradient does not apply). Do NOT judge L with measure_uniformity:
+  its absolute corner stddev called a 2%-of-sky L tilt "flat", and the stretch made it a visible one-sided ramp.
 - \`save_and_show_preview\` so you can SEE it. Previews of linear data are auto-stretched.
 - \`measure_subject_detail\` is your SAFETY metric: if it drops materially after a correction,
   you over-corrected (ate faint signal) — RESTORE and back off the scale.
@@ -86,7 +88,10 @@ A green cast is a COLOR gradient too — \`run_per_channel_abe\` removes it spat
    - Subject_detail dropped or background went blotchy/over-flat? \`restore_from_clone\` and STOP escalating — that scale was too fine.
 5. Stop when score < 0.008 (FLAT), OR when escalating scale costs faint signal, OR after ~3 escalations. Whichever first.
 6. \`save_memory\`: "${cls}: gradient scale = per_channel_abe poly_degree=N (score X→Y, subject_detail held/dropped)".
-7. Repeat for L (FILTER_L) — L is mono, so use \`run_abe\` poly_degree (no color), keep it gentle.
+7. Repeat for L (FILTER_L): \`measure_lum_tilt\` (linear). If not FLAT, \`subtract_sky_plane\` first (a plane cannot eat
+   the subject); re-measure. Only if a curved residual stays > 0.015, try \`run_abe\` poly_degree 1 with a clone checkpoint.
+   Also run \`measure_lum_tilt\` on the RGB: a luminance ramp there needs the same fix.
+   Report the L numbers as measure_lum_tilt ppStretched before→after.
 
 ${hasFaint ? `## FAINT SIGNAL PROTECTION (faint IFN / dust / extended halos)
 This target sits in faint IFN / dust / extended halos. Protecting it OUTRANKS perfect flatness.

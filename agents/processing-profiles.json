@@ -217,7 +217,11 @@
     },
     "saturation": {
       "hue_selective": true,
-      "max_p90": 0.75
+      "max_p90": 0.75,
+      "min_p50": 0.075,
+      "_floor_calibration": "2026-11-07: subject median saturation (checkSaturation). User galaxy references M101 0.128/0.085, M83 0.22; approved NGC4490 0.312, NGC3628 0.179 (edge-on); rejected M74 v2 0.061 ('washed out'). Floor 0.075 = ~12% under the weakest reference.",
+      "min_arm_p50": 0.1,
+      "_arm_calibration": "2026-11-07: median HSV saturation of arm pixels (> 60th lum pct of their annulus). User refs M101 0.143/0.102, M83 0.140; M74 v5 0.120 (critic: haze), v3 0.064. Gaps in refs 0.057-0.125 (not gated)."
     },
     "look": {
       "_calibration": "PROVISIONAL — back-test pending",
@@ -247,6 +251,37 @@
       "min_level": 0.045,
       "max_black_fraction": 0.05,
       "_calibration": "Back-test 2026-10-29: approved ngc4490_rgb_accepted sky 0.0557 and ngc3628_candidate 0.0559; floor 0.045 (~20% margin). NOTE: the 2026-10-29 galaxy reruns were NOT darker (0.068 / 0.079) — their \"flat\" look is low saturation (p90S 0.30 vs 0.46 approved), not a crushed sky. max_black_fraction 0.05: every approved image measured 0.0% black background blocks (<0.015)."
+    },
+    "outer_arms": {
+      "min_net_contrast": 0.04,
+      "_calibration": "2026-11-07 M74 only (no prep inventory exists for the approved NGC4490/NGC3628 runs): zone = 0.8-1.0 x the prep detection radius. v3 0.018 (user: outer arms not visible), v4 0.080 (visible)."
+    },
+    "core_preservation": {
+      "min_ratio_vs_prep": 0.75,
+      "_calibration": "2026-11-07 M74 only: final core/disc index / prep index; v3 0.86 (core fine), v4 0.58 (whole disc lifted, flat hazy galaxy).",
+      "min_core_structure": 0.06,
+      "_structure_calibration": "2026-11-07: std(g1-g6)/level within 0.2 x rDet. User refs 0.062/0.089/0.069, M74 v3 0.065 (structured core), v5 0.053 (bright featureless core).",
+      "max_core_spectrum": 1.2,
+      "_spectrum_calibration": "2026-11-08: std(g_u-g_2u)/std(g_4u-g_8u), r<0.22 rDet, u=rDet/300. User refs 0.68-0.86 (5 galaxies), approved NGC4490 0.68, M74 v3 0.81 v5 1.03 v6 1.12; cooked v7 1.69"
+    },
+    "texture_scale": {
+      "min_ratio_vs_prep": 1.0,
+      "_prep_calibration": "2026-11-07: final fine/blob / prep L fine/blob (1.29 on M74). v3 1.14 (user: its knot structure should be kept), v4 0.96, v5 0.98 (soft). No upper bound: the 1.40 cap from Ha references pushed v4/v5 to soften."
+    },
+    "envelope": {
+      "min_sector_ratio": 0.3,
+      "min_level": 0.005,
+      "_calibration": "2026-11-08 M74: right sector vs prep L (0.64 of median there): v4 0.11, v5 0.06, v6 0.004 (critic: mask-like edge); v3 not evaluated (envelope not lifted). Cause: GradientCorrection on stretched L. Sectors where prep < 0.3 of median are skipped.",
+      "max_edge_steepening": 2.5,
+      "_steepening_calibration": "2026-11-08: log-slope of the sector-median outer profile 0.2->0.03 over 0.6->0.2. User refs 0.94-1.48, prep 0.46-0.53, v3 0.96 v5 1.50 v6 2.35; mask-edge v7 4.59. 2.5 leaves margin for sector-median noise (+0.4..1.1 seen)"
+    },
+    "arm_gaps": {
+      "min_depth": 0.36,
+      "_calibration": "2026-11-08: median over annuli 0.30-0.85 rDet of (p80-p20)/(p80-sky). User refs 0.38-0.88 (M74 ref 0.63, M83 0.38, M101 0.42/0.79); M74 v3 0.45, v5 0.39, v6 0.33, v7 0.31. Gap hue was inside the reference range; knot hue is Ha-limited: neither gated."
+    },
+    "ha_knots": {
+      "min_pink_frac": 0.04,
+      "_calibration": "2026-11-08 M101 friend data (4096 crop), 3445 prep-Ha knot pixels: 2026-10-30 results with visible pink HII 0.079 / 0.107, 2026-11-08 variant_12 after a cool hue shift 0.005, prep RGB before Ha injection 0.015. Only armed when the prep found Ha knots (Ha data)."
     }
   },
   "galaxy_edge_on": {
@@ -598,7 +633,11 @@
       "stretch_midtone": 0.22,
       "stretch_iterations": 5
     },
-    "notes": "Many small galaxies — each needs to be visible with distinct colors (blue spirals, golden ellipticals). Push saturation HARD — blue galaxies must look blue. Dark background essential. HDRMT with medianTransform is the primary detail tool — push layers and iterations. LHE on individual galaxies through tight masks. Hand-written guidance (formerly a per-profile overrides block): HDRMT with medianTransform; push blue-galaxy saturation."
+    "notes": "Many small galaxies — each needs to be visible with distinct colors (blue spirals, golden ellipticals). Push saturation HARD — blue galaxies must look blue. Dark background essential. HDRMT with medianTransform is the primary detail tool — push layers and iterations. LHE on individual galaxies through tight masks. Hand-written guidance (formerly a per-profile overrides block): HDRMT with medianTransform; push blue-galaxy saturation.",
+    "tonal": {
+      "min_separation": 1.3,
+      "_calibration": "2026-10-31 back-test: user-approved Abell2151 v9 (Final_ABELL2151.jpg) measures separation 1.46 (sky 0.133) and FAILED the default 3.0. The 3.0 gate forced runs 96508fc1/b0f37200 to crush the sky to 0.06 (faint stars/galaxies lost) and inflate halos with masked lifts. A field of many small galaxies has no single dominant subject."
+    }
   },
   "emission_nebula": {
     "gradient": {
@@ -1044,6 +1083,12 @@
     "stars": {
       "screen_blend_strength": 0.8,
       "prominence": "subdued"
+    },
+    "faint_halo": {
+      "lift": false,
+      "compress_strength": 0.75,
+      "reason": "On filamentary remnants the lifted neutral haze reads as fog, not structure (NGC6992: user 'way too much', kept compression at 0.75).",
+      "_calibration": "User-picked on NGC6992 only (2026-11-03); one data point."
     },
     "notes": "Faint filaments are the primary target. Color contrast between OIII (blue/teal) and Ha (red) is key. Stars should be subdued to not overwhelm delicate filaments."
   },

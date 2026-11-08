@@ -489,13 +489,19 @@ export async function chromaSmooth(ctx, viewId, opts = {}) {
 export async function liftFaintHalo(ctx, viewId, haId, opts = {}) {
   const o = Object.assign({ in0: 0.0035, in1: 0.0165, out0: 0.13, out1: 0.19, lhe_amount: 0.35, nxt: 0.25, color: true,
     halo_mask_id: 'HALO_MASK', body_mask_id: 'BODY_EDGE',
-    curve: [[0,0],[0.06,0.066],[0.075,0.12],[0.10,0.17],[0.13,0.20],[0.2,0.25],[0.4,0.42],[1,1]] }, opts);
+    curve: [[0,0],[0.06,0.066],[0.075,0.12],[0.10,0.17],[0.13,0.20],[0.2,0.25],[0.4,0.42],[1,1]] },
+    // drop undefined keys: the tool handler forwards absent inputs as undefined, and Object.assign
+    // would overwrite the defaults with them (→ "undefined"/NaN inside the PixelMath expression)
+    Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== undefined)));
   const r = await ctx.pjsr(`
     ${DARK_CELLS_JS}
     function closeId(id){var w=ImageWindow.windowById(id);if(!w.isNull)w.forceClose();}
     function gauss(w,s){var C=new Convolution;C.mode=Convolution.prototype.Parametric;C.sigma=s;C.shape=2;C.aspectRatio=1;C.rotationAngle=0;C.executeOn(w.mainView);}
     function pm(expr,target,newId,sym){var P=new PixelMath;P.expression=expr;if(sym)P.symbols=sym;P.useSingleExpression=true;P.use64BitWorkingImage=true;P.truncate=true;P.truncateLower=0;P.truncateUpper=1;
-      if(newId){P.createNewImage=true;P.newImageId=newId;P.newImageColorSpace=PixelMath.prototype.Gray;}else P.createNewImage=false;P.executeOn(target.mainView);}
+      if(newId){P.createNewImage=true;P.newImageId=newId;P.newImageColorSpace=PixelMath.prototype.Gray;}else P.createNewImage=false;
+      // PixelMath failures are silent (executeOn returns false, no image created) and surfaced later as
+      // "executeOn(): Invalid argument type: View or Image object expected" — fail here with the expression instead.
+      if(!P.executeOn(target.mainView) || (newId && ImageWindow.windowById(newId).isNull)) throw new Error('liftFaintHalo PixelMath failed on '+target.mainView.id+(newId?' -> '+newId:'')+': '+expr.substring(0,160));}
     function ss(v,a,b){ return 'min(1,max(0,('+v+'-'+a+')/'+(b-a)+'))'; }
     var V = ImageWindow.windowById('${viewId}'); if (V.isNull) throw new Error('liftFaintHalo: view not found: ${viewId}');
     var Hw = ImageWindow.windowById('${haId}'); if (Hw.isNull) throw new Error('liftFaintHalo: Ha view not found: ${haId}');
@@ -518,11 +524,12 @@ export async function liftFaintHalo(ctx, viewId, haId, opts = {}) {
     pm('a='+ss('__lh_lum',sky+${o.in0},sky+${o.in1})+'; b='+ss('__lh_lum',${o.out0},${o.out1})+'; h='+ss('__lh_ha',hsky+0.0015,hsky+0.0145)+'; (a*a*(3-2*a))*(1-b*b*(3-2*b))*(h*h*(3-2*h))', Lw, '${o.halo_mask_id}', 'a,b,h');
     var M = ImageWindow.windowById('${o.halo_mask_id}'); gauss(M, 25);
     Lw.forceClose(); Hs.forceClose();
-    // lift + gold + shapes through the halo mask
+    // lift + (SHO: gold) + shapes through the halo mask
     V.mask = M; V.maskInverted = false;
     var C = new CurvesTransformation; C.K = ${JSON.stringify(o.curve)}; C.Kt = CurvesTransformation.prototype.AkimaSubsplines; C.executeOn(V.mainView);
-    var HC = new CurvesTransformation; HC.H = [[0,0],[0.06,0.06],[0.16,0.11],[0.25,0.115],[0.33,0.13],[0.40,0.18],[0.50,0.50],[1,1]]; HC.Ht = CurvesTransformation.prototype.AkimaSubsplines; HC.executeOn(V.mainView);
-    var CS = new ColorSaturation; CS.HS = [[0,0.10],[0.11,0.25],[0.33,-0.2],[0.5,0.1],[0.64,0.1],[0.83,0],[1,0.10]]; CS.HSt = ColorSaturation.prototype.AkimaSubsplines; CS.executeOn(V.mainView);
+    // SHO only: fold yellow/green toward Hubble gold. HOO (R=Ha, G/B=OIII) keeps its own red/teal hues.
+    if (${o.palette === 'hoo' ? 'false' : 'true'}) { var HC = new CurvesTransformation; HC.H = [[0,0],[0.06,0.06],[0.16,0.11],[0.25,0.115],[0.33,0.13],[0.40,0.18],[0.50,0.50],[1,1]]; HC.Ht = CurvesTransformation.prototype.AkimaSubsplines; HC.executeOn(V.mainView); }
+    if (${o.palette === 'hoo' ? 'false' : 'true'}) { var CS = new ColorSaturation; CS.HS = [[0,0.10],[0.11,0.25],[0.33,-0.2],[0.5,0.1],[0.64,0.1],[0.83,0],[1,0.10]]; CS.HSt = ColorSaturation.prototype.AkimaSubsplines; CS.executeOn(V.mainView); }
     if (${o.lhe_amount} > 0) { var P = new LocalHistogramEqualization; P.radius = 250; P.histogramBins = LocalHistogramEqualization.prototype.Bit12; P.slopeLimit = 2.0; P.amount = ${o.lhe_amount}; P.circularKernel = true; P.executeOn(V.mainView); }
     V.removeMask();
     if (${o.nxt} > 0) { var N = new NoiseXTerminator; N.denoise = ${o.nxt}; N.detail = 0.15; N.executeOn(V.mainView); }
@@ -557,4 +564,50 @@ export async function bodyEdgeContrast(ctx, viewId, opts = {}) {
   `);
   if (r.status === 'error') throw new Error('bodyEdgeContrast failed: ' + (r.error?.message || 'unknown'));
   return { result: r.outputs?.consoleOutput };
+}
+
+/**
+ * Tone DOWN the faint outer haze (the opposite of liftFaintHalo). USER-APPROVED on the
+ * NGC6992 Veil (2026-11-03, "haze75"): the lifted grey-pink Ha/OIII fog around the arc was
+ * "way too much"; compressing it toward the sky at strength 0.75 was kept as the final.
+ * Mask = faint luminance (sky+haze_on, ramp haze_ramp) × (1 − grown bright-filament body:
+ * lum > body_lo over body_ramp, σ body_grow, ×4, σ body_grow), feathered σ feather.
+ * Per channel: X' = sky_c + (X − sky_c)·(1 − strength·mask). Filaments and the bright body
+ * are untouched; the arc keeps a soft edge because the body band is protected.
+ * Do NOT subtract a blurred/eroded "glow" layer instead: that dims the filament core and
+ * leaves the outer haze (tried on the same image, rejected).
+ * opts: { strength (0.75), haze_on (0.008), haze_ramp (0.03), body_lo (0.28), body_ramp (0.08),
+ *         body_grow (40), feather (20), mask_id ('HAZE_MASK'), keep_mask (false) }
+ */
+export async function compressOuterHaze(ctx, viewId, opts = {}) {
+  const o = Object.assign({ strength: 0.75, haze_on: 0.008, haze_ramp: 0.03, body_lo: 0.28, body_ramp: 0.08,
+    body_grow: 40, feather: 20, mask_id: 'HAZE_MASK', keep_mask: false },
+    Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== undefined)));
+  if (!(o.strength >= 0 && o.strength <= 1)) throw new Error('compressOuterHaze: strength must be in [0,1]');
+  const r = await ctx.pjsr(`
+    ${DARK_CELLS_JS}
+    function closeId(id){var w=ImageWindow.windowById(id);if(!w.isNull)w.forceClose();}
+    function gauss(w,s){var C=new Convolution;C.mode=Convolution.prototype.Parametric;C.sigma=s;C.shape=2;C.aspectRatio=1;C.rotationAngle=0;C.executeOn(w.mainView);}
+    function pm(expr,target,newId){var P=new PixelMath;P.expression=expr;P.useSingleExpression=true;P.truncate=true;P.truncateLower=0;P.truncateUpper=1;
+      if(newId){P.createNewImage=true;P.newImageId=newId;P.newImageColorSpace=PixelMath.prototype.Gray;P.newImageSampleFormat=PixelMath.prototype.f32;}else P.createNewImage=false;
+      if(!P.executeOn(target.mainView) || (newId && ImageWindow.windowById(newId).isNull)) throw new Error('compressOuterHaze PixelMath failed on '+target.mainView.id+': '+expr.substring(0,160));
+      return ImageWindow.windowById(newId||target.mainView.id);}
+    var V = ImageWindow.windowById('${viewId}'); if (V.isNull) throw new Error('compressOuterHaze: view not found: ${viewId}');
+    if (V.mainView.image.numberOfChannels < 3) throw new Error('compressOuterHaze: colour view expected');
+    ['__ch_lum','__ch_body','${o.mask_id}'].forEach(closeId);
+    var sky = darkCellMedians(V.mainView.image), ls = 0.2126*sky[0]+0.7152*sky[1]+0.0722*sky[2];
+    var L = pm('0.2126*${viewId}[0]+0.7152*${viewId}[1]+0.0722*${viewId}[2]', V, '__ch_lum'); gauss(L, 8);
+    var B = pm('min(1,max(0,(__ch_lum-${o.body_lo})/${o.body_ramp}))', L, '__ch_body'); gauss(B, ${o.body_grow}); pm('min(1,$T*4)', B); gauss(B, ${o.body_grow});
+    var M = pm('min(1,max(0,(__ch_lum-'+(ls+${o.haze_on})+')/${o.haze_ramp}))*(1-__ch_body)', L, '${o.mask_id}'); gauss(M, ${o.feather});
+    var Q = new PixelMath; Q.useSingleExpression = false; Q.truncate = true; Q.truncateLower = 0; Q.truncateUpper = 1; Q.createNewImage = false;
+    var e = []; for (var c = 0; c < 3; c++) e.push(sky[c]+'+($T['+c+']-'+sky[c]+')*(1-${o.strength}*${o.mask_id})');
+    Q.expression = e[0]; Q.expression1 = e[1]; Q.expression2 = e[2];
+    if (!Q.executeOn(V.mainView)) throw new Error('compressOuterHaze: compression PixelMath failed');
+    var mm = M.mainView.image.mean();
+    L.forceClose(); B.forceClose(); if (!${o.keep_mask ? 'true' : 'false'}) M.forceClose();
+    V.purge();
+    JSON.stringify({ sky: sky, skyLum: ls, hazeMaskMean: mm, median: V.mainView.image.median() });
+  `);
+  if (r.status === 'error') throw new Error('compressOuterHaze failed: ' + (r.error?.message || 'unknown'));
+  return Object.assign(JSON.parse(r.outputs?.consoleOutput || '{}'), { strength: o.strength, maskId: o.keep_mask ? o.mask_id : null });
 }

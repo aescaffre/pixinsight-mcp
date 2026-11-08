@@ -1,6 +1,6 @@
 {
   "name": "pixinsight-mcp",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "MCP server bridging AI assistants with PixInsight for astrophotography processing",
   "type": "module",
   "main": "build/index.js",

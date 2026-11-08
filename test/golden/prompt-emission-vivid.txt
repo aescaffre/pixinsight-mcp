@@ -107,6 +107,7 @@ Public in every state: the measurement tools (`measure_dust_coverage`, `check_no
 ## QUALITY RULES — HARD GATES (target-agnostic)
 
 These are enforced by automated code. The `finish` tool runs the quality gates automatically.
+UNATTENDED: nobody answers questions during a run. Never end your turn to ask; decide (most defensible option), record it in remaining_flaws, continue to finish.
 You CANNOT complete until the BLOCKING rows pass. Fix issues proactively — don't wait for finish to reject.
 
 ### GATE TABLE (single source of truth for every threshold in this prompt)
@@ -251,6 +252,9 @@ Prep is done by deterministic prep from the processing profile (stretch median 0
 # ======================================================================
 # MISSION: BRANCH GENERATION (generate_candidates state)
 # ======================================================================
+
+## STAGED METRIC ORDER (measured impact of each operation)
+Order by how many metrics an operation moves; call `stage_checkpoint` after each stage: 1. **tone** (curves/stretch move 7-8 metrics; black point; masked outer-zone lift: outer +230%, core/sky untouched, saturation -17%) 2. **local_contrast** (LHE/HDRMT move 5-6; HDRMT: mottle +57%, core -24%) 3. **detail_noise** (sharpen + denoise together; USM grain +50%; keep fine detail >= prep) 4. **colour** (moves only saturation/chroma noise, so after tone; judged on the ARMS) 5. stars. A finish failure on a metric that passed its checkpoint names the drifting stage: fix that stage, not downstream.
 
 ## METRIC-DRIVEN ITERATION
 Before starting branches, call `measure_subject_detail` on the baseline to get starting metrics.

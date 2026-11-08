@@ -282,6 +282,8 @@ export async function measureDetailBaseline(ctx, views, { runDir, log = console.
   const out = { rgb: null, l: null, max: null };
   try { if (views?.rgb) out.rgb = pickDetail(await measureSubjectDetail(ctx, views.rgb)); } catch (e) { log(`  [baseline] rgb detail failed: ${e.message}`); }
   try { if (views?.l) out.l = pickDetail(await measureSubjectDetail(ctx, views.l)); } catch (e) { log(`  [baseline] L detail failed: ${e.message}`); }
+  // Scale-band baseline (fine-detail retention advisory): L when present (that is what the detail rides on), else RGB.
+  try { const sv = views?.l || views?.rgb; if (sv) { const sb = await measureScaleBands(ctx, sv); if (!sb.error) out.scale = sb; } } catch (e) { log(`  [baseline] scale bands failed: ${e.message}`); }
   const cands = [out.rgb, out.l].filter(Boolean);
   if (cands.length) {
     out.max = {
@@ -1191,21 +1193,51 @@ export async function compareToReference(ctx, viewId, referencePath, opts = {}) 
       // and is resampled in place; the target is only ever duplicated, never touched.
       __mark('ms-ssim resample (new 60 MP window + Resample)');
       var ms_ssim = null, perScale = [];
-      if (aspectOk) {
-        var tw = ${targetWidth}, th = Math.round(tw * a.height / a.width);
+      {
+        var tw = ${targetWidth};
         tmpW = new ImageWindow(a.width, a.height, a.numberOfChannels, 32, true, a.isColor, '${tmpId}');
         tmpW.mainView.beginProcess(); tmpW.mainView.image.assign(a); tmpW.mainView.endProcess();
         var shrink = function (win) {
+          var im0 = win.mainView.image;
           var R = new Resample;
           R.mode = Resample.prototype.AbsolutePixels;
-          R.xSize = tw; R.ySize = th;
+          R.xSize = tw; R.ySize = Math.round(tw * im0.height / im0.width);
           R.absoluteMode = Resample.prototype.ForceWidthAndHeight;
           R.interpolation = Resample.prototype.MitchellNetravaliFilter;
           R.executeOn(win.mainView);
         };
         shrink(tmpW); shrink(rw);
         var ta = tmpW.mainView.image, tb = rw.mainView.image;
-        if (ta.width === tb.width && ta.height === tb.height) {
+        // GRAIN (2026-10-31, Abell2151 96508fc1): pixel-scale granularity inside extended subject
+        // halos and in the sky, both images at the same width so the ratio is scale-fair. The run
+        // passed every gate while its galaxies were ~1.9x grainier than the reference (LHE after
+        // the last NXT + noisy L injection). hf = |L - mean of 4 neighbours|; halo = smooth level
+        // between P50+0.06 and P50+0.35, star-like pixels excluded.
+        function grainStats(img) {
+          __mark('grain loop');
+          var W2 = img.width, H2 = img.height, Ls2 = [];
+          for (var y = 8; y < H2 - 8; y += 4) for (var x = 8; x < W2 - 8; x += 4) Ls2.push(lumAt(img, x, y));
+          Ls2.sort(function (p, q) { return p - q; });
+          var p50 = Ls2.length ? Ls2[Math.floor(Ls2.length / 2)] : 0;
+          var halo = [], sky = [];
+          for (var y = 8; y < H2 - 8; y += 2) for (var x = 8; x < W2 - 8; x += 2) {
+            var L = lumAt(img, x, y);
+            var n1 = (lumAt(img, x - 1, y) + lumAt(img, x + 1, y) + lumAt(img, x, y - 1) + lumAt(img, x, y + 1)) / 4;
+            var wide = (lumAt(img, x - 6, y) + lumAt(img, x + 6, y) + lumAt(img, x, y - 6) + lumAt(img, x, y + 6)
+                      + lumAt(img, x - 4, y - 4) + lumAt(img, x + 4, y + 4) + lumAt(img, x - 4, y + 4) + lumAt(img, x + 4, y - 4)) / 8;
+            if (Math.abs(L - wide) > 0.08) continue;
+            var hf = Math.abs(L - n1);
+            if (wide > p50 + 0.06 && wide < p50 + 0.35) halo.push(hf);
+            else if (wide < p50 + 0.01) sky.push(hf);
+          }
+          halo.sort(function (p, q) { return p - q; }); sky.sort(function (p, q) { return p - q; });
+          return { halo: halo.length > 200 ? halo[Math.floor(halo.length / 2)] : null, sky: sky.length > 200 ? sky[Math.floor(sky.length / 2)] : null, nHalo: halo.length };
+        }
+        var gT = grainStats(ta), gR = grainStats(tb);
+        out.grain_halo_target = gT.halo; out.grain_halo_ref = gR.halo; out.grain_sky_target = gT.sky; out.grain_sky_ref = gR.sky;
+        out.grain_halo_ratio = (gT.halo != null && gR.halo > 0) ? gT.halo / gR.halo : null;
+        out.grain_sky_ratio = (gT.sky != null && gR.sky > 0) ? gT.sky / gR.sky : null;
+        if (aspectOk && ta.width === tb.width && ta.height === tb.height) {
           var W = ta.width, H = ta.height;
           var C1=0.0001, C2=0.0009;
           var scaleSteps=[2,4,8];
@@ -1260,7 +1292,7 @@ export async function compareToReference(ctx, viewId, referencePath, opts = {}) 
     `lab_emd=${f1(data.lab_emd)} (chroma-only a*b*); lum_cdf_dist=${f3(data.lum_cdf_dist)}; ` +
     `ms_ssim=${data.aspect_ok ? f3(data.ms_ssim) : 'n/a (aspect mismatch)'}; ` +
     `coverage_delta=${f3(data.coverage_delta)} (faint target=${f3(data.faint_target)}, ref=${f3(data.faint_ref)}); ` +
-    `dark_depth target=${f3(data.dark_depth_target)} ref=${f3(data.dark_depth_ref)}; local_contrast ratio=${f3(data.lc_ratio)} (p90 ${f3(data.lc_p90_ratio)}; 1.0 = same as reference)`;
+    `dark_depth target=${f3(data.dark_depth_target)} ref=${f3(data.dark_depth_ref)}; local_contrast ratio=${f3(data.lc_ratio)} (p90 ${f3(data.lc_p90_ratio)}; 1.0 = same as reference); grain halo ratio=${f3(data.grain_halo_ratio)} sky ratio=${f3(data.grain_sky_ratio)} (>1 = grainier than reference)`;
   return data;
 }
 
@@ -1306,4 +1338,767 @@ export async function measureBackgroundFloor(ctx, viewId) {
   const d = JSON.parse(r.outputs?.consoleOutput || '{}');
   d.details = `sky level ${(d.bgLevel ?? 0).toFixed(4)} (p10 ${(d.p10 ?? 0).toFixed(4)}, p90 ${(d.p90 ?? 0).toFixed(4)}), black background blocks ${((d.blackBlockFraction ?? 0) * 100).toFixed(1)}% of ${d.bgBlocks}`;
   return d;
+}
+
+/**
+ * Faint-disc retention (2026-11-07, M74 v2): the tonal gate rewards darkening a galaxy's faint
+ * outer disc, so nothing stopped truncated outer arms. Block-median luminance map (24 px blocks,
+ * no resampling of the image itself) -> sky = median block; galaxy = largest connected region
+ * 0.02 above sky, grown (<= 50 blocks) through blocks 0.015 above sky. faintFraction = share of
+ * galaxy blocks less than 0.05 above sky; extent = galaxy blocks / blocks 0.10 above sky.
+ * Calibration (python prototype, same algorithm): approved NGC4490 RGB 0.437, NGC3628 v3 0.504;
+ * user-rejected M74 v1 0.319, M74 v2 0.313.
+ */
+export function summarizeFaintDisc(grid, w, h) {
+  const n = w * h; if (!n) return { faintFraction: 0, extent: 0, galaxyBlocks: 0 };
+  const sorted = Array.from(grid).sort((a, b) => a - b); const sky = sorted[Math.floor(n / 2)];
+  const e = new Float64Array(n); for (let i = 0; i < n; i++) e[i] = grid[i] - sky;
+  const label = (mask) => {          // 4-connected components
+    const lab = new Int32Array(n); let next = 0; const stack = [];
+    for (let s = 0; s < n; s++) { if (!mask[s] || lab[s]) continue; next++; lab[s] = next; stack.push(s);
+      while (stack.length) { const p = stack.pop(), x = p % w, y = (p - x) / w;
+        for (const q of [x > 0 ? p - 1 : -1, x < w - 1 ? p + 1 : -1, y > 0 ? p - w : -1, y < h - 1 ? p + w : -1])
+          if (q >= 0 && mask[q] && !lab[q]) { lab[q] = next; stack.push(q); } } }
+    return { lab, count: next };
+  };
+  const core = new Uint8Array(n); for (let i = 0; i < n; i++) core[i] = e[i] > 0.02 ? 1 : 0;
+  const { lab, count } = label(core); if (!count) return { faintFraction: 0, extent: 0, galaxyBlocks: 0, sky };
+  const sizes = new Int32Array(count + 1); for (let i = 0; i < n; i++) sizes[lab[i]]++;
+  let best = 1; for (let k = 2; k <= count; k++) if (sizes[k] > sizes[best]) best = k;
+  // manhattan distance (<= 50) from the core region = scipy binary_dilation(iterations=50)
+  const dist = new Int32Array(n).fill(1e9); const qu = [];
+  for (let i = 0; i < n; i++) if (lab[i] === best) { dist[i] = 0; qu.push(i); }
+  for (let qi = 0; qi < qu.length; qi++) { const p = qu[qi], x = p % w, y = (p - x) / w; if (dist[p] >= 50) continue;
+    for (const q of [x > 0 ? p - 1 : -1, x < w - 1 ? p + 1 : -1, y > 0 ? p - w : -1, y < h - 1 ? p + w : -1])
+      if (q >= 0 && dist[q] > dist[p] + 1) { dist[q] = dist[p] + 1; qu.push(q); } }
+  const grow = new Uint8Array(n); for (let i = 0; i < n; i++) grow[i] = dist[i] <= 50 && e[i] > 0.015 ? 1 : 0;
+  const g2 = label(grow); const keep = new Set(); for (let i = 0; i < n; i++) if (lab[i] === best && g2.lab[i]) keep.add(g2.lab[i]);
+  let gal = 0, faint = 0, bright = 0;
+  for (let i = 0; i < n; i++) if (keep.has(g2.lab[i])) { gal++; if (e[i] < 0.05) faint++; if (e[i] > 0.10) bright++; }
+  return { faintFraction: gal ? faint / gal : 0, extent: gal / Math.max(bright, 1), galaxyBlocks: gal, sky };
+}
+
+export async function measureFaintDisc(ctx, viewId) {
+  const r = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}');
+    if (w.isNull) throw new Error('measureFaintDisc: view not found: ${viewId}');
+    var img = w.mainView.image, B = 24, gw = Math.floor(img.width / B), gh = Math.floor(img.height / B), g = [];
+    for (var by = 0; by < gh; by++) for (var bx = 0; bx < gw; bx++) {
+      img.selectedRect = new Rect(bx * B, by * B, bx * B + B, by * B + B);
+      if (img.isColor) {
+        img.selectedChannel = 0; var r0 = img.median(); img.selectedChannel = 1; var g0 = img.median(); img.selectedChannel = 2; var b0 = img.median();
+        g.push(Math.round((0.2126 * r0 + 0.7152 * g0 + 0.0722 * b0) * 1e5) / 1e5);
+      } else g.push(Math.round(img.median() * 1e5) / 1e5);
+    }
+    img.resetSelections();
+    JSON.stringify({ w: gw, h: gh, g: g });
+  `, { timeout: 600000 });
+  if (r.status === 'error') throw new Error('measureFaintDisc: ' + (r.error?.message || 'PJSR error'));
+  const d = JSON.parse(r.outputs?.consoleOutput || '{}');
+  const s = summarizeFaintDisc(d.g || [], d.w || 0, d.h || 0);
+  s.details = `faint outer disc ${(s.faintFraction * 100).toFixed(1)}% of galaxy area (extent ${s.extent.toFixed(2)}x the bright body, ${s.galaxyBlocks} blocks of 24 px)`;
+  return s;
+}
+
+/**
+ * Scale-band balance on the galaxy disc (2026-11-07, M74 v2 "watercolour" look): ratio of
+ * fine-band (gauss 0.7k - gauss 3k px) to blob-band (gauss 3k - gauss 6k px), k = r_disc/300 (size-relative) luminance std over disc
+ * pixels (48 px blocks 0.05 above sky; star pixels rejected). Compared final / prep baseline
+ * (fineRetention). M74 v2 measured 0.5-0.7 in the disc with the 3-6 px band boosted 1.6x.
+ * ADVISORY only until calibrated on an approved galaxy run.
+ */
+export async function measureScaleBands(ctx, viewId, { rDisc = null } = {}) {
+  // rDisc: fix the scale from the PREP disc radius — the final image's own radius grows when faint outskirts are
+  // lifted, which coarsens the bands and lets a soft disc pass (M74 v4: 552 prep -> 681 final).
+  const r = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}');
+    if (w.isNull) throw new Error('measureScaleBands: view not found: ${viewId}');
+    var img = w.mainView.image, W = img.width, H = img.height, B = 48, gw = Math.floor(W / B), gh = Math.floor(H / B);
+    function lumBlock(rect) { if (!img.isColor) { img.selectedRect = rect; return img.median(); }
+      img.selectedRect = rect; img.selectedChannel = 0; var a = img.median(); img.selectedChannel = 1; var b = img.median(); img.selectedChannel = 2; var c = img.median();
+      img.resetChannelSelection(); return 0.2126 * a + 0.7152 * b + 0.0722 * c; }
+    var g = [], i, x, y;
+    for (y = 0; y < gh; y++) for (x = 0; x < gw; x++) g.push(lumBlock(new Rect(x * B, y * B, x * B + B, y * B + B)));
+    img.resetSelections();
+    var s = g.slice().sort(function (a, b) { return a - b; }), sky = s[Math.floor(s.length / 2)];
+    var x0 = 1e9, y0 = 1e9, x1 = -1, y1 = -1, nd = 0;
+    for (y = 0; y < gh; y++) for (x = 0; x < gw; x++) if (g[y * gw + x] - sky > 0.05) { nd++; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    var out;
+    if (nd < 20) out = { error: 'no disc', discBlocks: nd };
+    else {
+      var px0 = x0 * B, py0 = y0 * B, bw = (x1 - x0 + 1) * B, bh = (y1 - y0 + 1) * B;
+      if (bw * bh > 16e6) { var k = Math.sqrt(16e6 / (bw * bh)); var nw = Math.floor(bw * k / B) * B, nh = Math.floor(bh * k / B) * B; px0 += Math.floor((bw - nw) / 2 / B) * B; py0 += Math.floor((bh - nh) / 2 / B) * B; bw = nw; bh = nh; }
+      var rect = new Rect(px0, py0, px0 + bw, py0 + bh), n = bw * bh, L = new Float32Array(n);
+      if (img.isColor) { var c0 = new Float32Array(n), c1 = new Float32Array(n), c2 = new Float32Array(n);
+        img.getSamples(c0, rect, 0); img.getSamples(c1, rect, 1); img.getSamples(c2, rect, 2);
+        for (i = 0; i < n; i++) L[i] = 0.2126 * c0[i] + 0.7152 * c1[i] + 0.0722 * c2[i]; }
+      else img.getSamples(L, rect, 0);
+      function blur(src, sig) { var rad = Math.ceil(3 * sig), kk = [], t = 0, j;
+        for (j = -rad; j <= rad; j++) { var v = Math.exp(-j * j / (2 * sig * sig)); kk.push(v); t += v; } for (j = 0; j < kk.length; j++) kk[j] /= t;
+        var tmp = new Float32Array(n), dst = new Float32Array(n), xx, yy, acc, q;
+        for (yy = 0; yy < bh; yy++) for (xx = 0; xx < bw; xx++) { acc = 0; for (j = -rad; j <= rad; j++) { q = xx + j; if (q < 0) q = 0; else if (q >= bw) q = bw - 1; acc += kk[j + rad] * src[yy * bw + q]; } tmp[yy * bw + xx] = acc; }
+        for (yy = 0; yy < bh; yy++) for (xx = 0; xx < bw; xx++) { acc = 0; for (j = -rad; j <= rad; j++) { q = yy + j; if (q < 0) q = 0; else if (q >= bh) q = bh - 1; acc += kk[j + rad] * tmp[q * bw + xx]; } dst[yy * bw + xx] = acc; }
+        return dst; }
+      var rD = ${Number.isFinite(rDisc) && rDisc > 0 ? Number(rDisc) : 'Math.sqrt(nd * B * B / Math.PI)'}, kS = Math.max(0.6, rD / 300);   // galaxy-size-relative scales (r_disc 300 px -> 0.7/3/6 px)
+      var g07 = blur(L, 0.7 * kS), g3 = blur(L, 3 * kS), g6 = blur(L, 6 * kS);
+      var sf = 0, sf2 = 0, sm = 0, sm2 = 0, cnt = 0;
+      for (y = 0; y < bh; y++) for (x = 0; x < bw; x++) {
+        var gx = Math.floor((px0 + x) / B), gy = Math.floor((py0 + y) / B);
+        if (gx >= gw || gy >= gh || g[gy * gw + gx] - sky <= 0.05) continue;
+        i = y * bw + x; if (L[i] - g6[i] > 0.05) continue;   // star / hot knot core
+        var f = g07[i] - g3[i], m = g3[i] - g6[i]; sf += f; sf2 += f * f; sm += m; sm2 += m * m; cnt++; }
+      var sdF = Math.sqrt(Math.max(0, sf2 / cnt - (sf / cnt) * (sf / cnt))), sdM = Math.sqrt(Math.max(0, sm2 / cnt - (sm / cnt) * (sm / cnt)));
+      out = { fine: sdF, blob: sdM, ratio: sdM > 0 ? sdF / sdM : 0, pixels: cnt, discBlocks: nd, rDisc: Math.round(rD), scaleK: kS, box: [px0, py0, bw, bh] };
+    }
+    JSON.stringify(out);
+  `, { timeout: 900000 });
+  if (r.status === 'error') throw new Error('measureScaleBands: ' + (r.error?.message || 'PJSR error'));
+  return JSON.parse(r.outputs?.consoleOutput || '{}');
+}
+
+/**
+ * Disc mottle ("watercolour" blotchiness, 2026-11-07): relative contrast of a galaxy disc at blob
+ * scale = std(gauss(s) - gauss(l)) / mean(gauss(l) - sky) over disc pixels, per zone (mid = 25-60%
+ * of the disc's p99 brightness above sky, outer = below 25%). Scales follow the galaxy size
+ * (r = sqrt(area/pi) from the 24 px block map: s = r/300, l = r/38), so a 2k web JPEG and a 9k
+ * master are comparable. Python prototype on the user's references (M101 x2, M83): mid 0.07-0.10,
+ * outer 0.12-0.21; M74 v2 (user: "mottled") mid 0.15, outer 0.25.
+ */
+export function galaxyBlockMask(grid, w, h) {
+  const n = w * h; const sorted = Array.from(grid).sort((a, b) => a - b); const sky = sorted[Math.floor(n / 2)];
+  const core = new Uint8Array(n); for (let i = 0; i < n; i++) core[i] = grid[i] - sky > 0.02 ? 1 : 0;
+  const lab = new Int32Array(n); let next = 0, best = 0, bestN = 0; const st = [];
+  for (let s = 0; s < n; s++) { if (!core[s] || lab[s]) continue; next++; let cnt = 0; lab[s] = next; st.push(s);
+    while (st.length) { const p = st.pop(), x = p % w, y = (p - x) / w; cnt++;
+      for (const q of [x > 0 ? p - 1 : -1, x < w - 1 ? p + 1 : -1, y > 0 ? p - w : -1, y < h - 1 ? p + w : -1])
+        if (q >= 0 && core[q] && !lab[q]) { lab[q] = next; st.push(q); } }
+    if (cnt > bestN) { bestN = cnt; best = next; } }
+  let bits = ''; for (let i = 0; i < n; i++) bits += lab[i] === best ? '1' : '0';
+  return { bits, blocks: bestN, sky };
+}
+
+export async function measureDiscMottle(ctx, viewId, { radius = null } = {}) {
+  const B = 24;
+  const g = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measureDiscMottle: view not found: ${viewId}');
+    var img = w.mainView.image, gw = Math.floor(img.width / ${B}), gh = Math.floor(img.height / ${B}), g = [];
+    for (var by = 0; by < gh; by++) for (var bx = 0; bx < gw; bx++) {
+      img.selectedRect = new Rect(bx * ${B}, by * ${B}, bx * ${B} + ${B}, by * ${B} + ${B});
+      if (img.isColor) { img.selectedChannel = 0; var a = img.median(); img.selectedChannel = 1; var b = img.median(); img.selectedChannel = 2; var c = img.median(); img.resetChannelSelection(); g.push(Math.round((0.2126 * a + 0.7152 * b + 0.0722 * c) * 1e5) / 1e5); }
+      else g.push(Math.round(img.median() * 1e5) / 1e5); }
+    img.resetSelections(); JSON.stringify({ w: gw, h: gh, g: g });`, { timeout: 600000 });
+  if (g.status === 'error') throw new Error('measureDiscMottle grid: ' + (g.error?.message || 'PJSR error'));
+  const d = JSON.parse(g.outputs?.consoleOutput || '{}');
+  const m = galaxyBlockMask(d.g || [], d.w, d.h);
+  if (m.blocks < 20) return { error: 'no galaxy', blocks: m.blocks };
+  const r = (Number.isFinite(radius) && radius > 0) ? radius : Math.sqrt(m.blocks * B * B / Math.PI), sS = Math.max(0.6, r / 300), sL = Math.max(4, r / 38);
+  const res = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}'); var img = w.mainView.image, W = img.width, H = img.height, n = W * H, i;
+    var L = new Float32Array(n);
+    if (img.isColor) { var c = new Float32Array(n); img.getSamples(c, new Rect(0,0,W,H), 0); for (i = 0; i < n; i++) L[i] = 0.2126 * c[i];
+      img.getSamples(c, new Rect(0,0,W,H), 1); for (i = 0; i < n; i++) L[i] += 0.7152 * c[i]; img.getSamples(c, new Rect(0,0,W,H), 2); for (i = 0; i < n; i++) L[i] += 0.0722 * c[i]; }
+    else img.getSamples(L, new Rect(0,0,W,H), 0);
+    function blurred(sig, id) { var bw = new ImageWindow(W, H, 1, 32, true, false, id); bw.mainView.beginProcess(); bw.mainView.image.setSamples(L, new Rect(0,0,W,H), 0); bw.mainView.endProcess();
+      var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = sig; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(bw.mainView);
+      var o = new Float32Array(n); bw.mainView.image.getSamples(o, new Rect(0,0,W,H), 0); bw.forceClose(); return o; }
+    var gs = blurred(${sS.toFixed(3)}, 'MOT_S'), gl = blurred(${sL.toFixed(3)}, 'MOT_L'), g6 = blurred(${(Math.max(2, r / 75)).toFixed(3)}, 'MOT_6');
+    var bits = '${m.bits}', gw = ${d.w}, sky = ${m.sky}, B = ${B}, e = [], x, y;
+    function inGal(x, y) { var bx = Math.floor(x / B), by = Math.floor(y / B); return bx < gw && bits.charAt(by * gw + bx) === '1'; }
+    for (y = 0; y < H; y += 4) for (x = 0; x < W; x += 4) if (inGal(x, y)) e.push(gl[y * W + x] - sky);
+    e.sort(function (a, b) { return a - b; }); var top = e[Math.floor(e.length * 0.99)];
+    var z = { mid: [0, 0, 0, 0], outer: [0, 0, 0, 0] };
+    for (y = 0; y < H; y++) for (x = 0; x < W; x++) { if (!inGal(x, y)) continue; i = y * W + x;
+      if (L[i] - g6[i] > 0.06) continue;
+      var ev = gl[i] - sky, k = ev < 0.25 * top ? 'outer' : (ev < 0.6 * top ? 'mid' : null); if (!k || ev <= 0) continue;
+      var dd = gs[i] - gl[i], a = z[k]; a[0] += dd; a[1] += dd * dd; a[2] += ev; a[3]++; }
+    function web(a) { if (a[3] < 100) return null; var mu = a[0] / a[3]; return Math.sqrt(Math.max(0, a[1] / a[3] - mu * mu)) / Math.max(a[2] / a[3], 1e-3); }
+    JSON.stringify({ mid: web(z.mid), outer: web(z.outer), midPx: z.mid[3], outerPx: z.outer[3] });`, { timeout: 900000 });
+  if (res.status === 'error') throw new Error('measureDiscMottle: ' + (res.error?.message || 'PJSR error'));
+  const o = JSON.parse(res.outputs?.consoleOutput || '{}');
+  o.radius = Math.round(r); o.sigmas = [+sS.toFixed(2), +sL.toFixed(2)];
+  o.details = `disc mottle mid ${o.mid?.toFixed(3)} outer ${o.outer?.toFixed(3)} (galaxy r~${o.radius}px, bands ${o.sigmas.join('-')}px)`;
+  return o;
+}
+
+// Outer-arm visibility (2026-11-07, M74 v3: arms present in the linear L to ~6' but displayed at <0.01 above sky).
+// Spread (p90-p10) of the sigma-8 smoothed display luminance in an annulus [r0,r1] px around the galaxy core,
+// star pixels excluded (g2-g8 excess). Arms vs inter-arm contrast, insensitive to a uniform glow lift.
+export async function measureOuterArms(ctx, viewId, r0, r1, sigma = 8) {
+  const B = 24;
+  const g = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measureOuterArms: view not found: ${viewId}');
+    var img = w.mainView.image, gw = Math.floor(img.width / ${B}), gh = Math.floor(img.height / ${B}), g = [];
+    for (var by = 0; by < gh; by++) for (var bx = 0; bx < gw; bx++) {
+      img.selectedRect = new Rect(bx * ${B}, by * ${B}, bx * ${B} + ${B}, by * ${B} + ${B});
+      if (img.isColor) { img.selectedChannel = 0; var a = img.median(); img.selectedChannel = 1; var b = img.median(); img.selectedChannel = 2; var c = img.median(); img.resetChannelSelection(); g.push(Math.round((0.2126 * a + 0.7152 * b + 0.0722 * c) * 1e5) / 1e5); }
+      else g.push(Math.round(img.median() * 1e5) / 1e5); }
+    img.resetSelections(); JSON.stringify({ w: gw, h: gh, g: g });`, { timeout: 600000 });
+  if (g.status === 'error') throw new Error('measureOuterArms grid: ' + (g.error?.message || 'PJSR error'));
+  const d = JSON.parse(g.outputs?.consoleOutput || '{}');
+  const m = galaxyBlockMask(d.g || [], d.w, d.h);
+  if (m.blocks < 20) return { error: 'no galaxy', blocks: m.blocks };
+  // core = brightest block inside the galaxy component (block medians reject stars)
+  let bi = -1, bv = -Infinity; for (let i = 0; i < m.bits.length; i++) if (m.bits[i] === '1' && d.g[i] > bv) { bv = d.g[i]; bi = i; }
+  const cx = (bi % d.w) * B + B / 2, cy = Math.floor(bi / d.w) * B + B / 2;
+  const res = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}'); var img = w.mainView.image, W = img.width, H = img.height, n = W * H, i;
+    var L = new Float32Array(n);
+    if (img.isColor) { var c = new Float32Array(n); img.getSamples(c, new Rect(0,0,W,H), 0); for (i = 0; i < n; i++) L[i] = 0.2126 * c[i];
+      img.getSamples(c, new Rect(0,0,W,H), 1); for (i = 0; i < n; i++) L[i] += 0.7152 * c[i]; img.getSamples(c, new Rect(0,0,W,H), 2); for (i = 0; i < n; i++) L[i] += 0.0722 * c[i]; }
+    else img.getSamples(L, new Rect(0,0,W,H), 0);
+    function blurred(sig, id) { var bw = new ImageWindow(W, H, 1, 32, true, false, id); bw.mainView.beginProcess(); bw.mainView.image.setSamples(L, new Rect(0,0,W,H), 0); bw.mainView.endProcess();
+      var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = sig; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(bw.mainView);
+      var o = new Float32Array(n); bw.mainView.image.getSamples(o, new Rect(0,0,W,H), 0); bw.forceClose(); return o; }
+    var g2 = blurred(2, 'ARM_2'), g8 = blurred(${sigma}, 'ARM_8'), cx = ${cx}, cy = ${cy}, r0 = ${r0}, r1 = ${r1}, v = [], sk = [], x, y;
+    for (y = 0; y < H; y += 2) for (x = 0; x < W; x += 2) { var dx = x - cx, dy = y - cy, r = Math.sqrt(dx * dx + dy * dy); i = y * W + x;
+      if (g2[i] - g8[i] > 0.02) continue;
+      if (r >= r0 && r < r1) v.push(g8[i]); else if (r >= r1 + 150 && r < r1 + 250) sk.push(g8[i]); }
+    function q(a, p) { return a[Math.min(a.length - 1, Math.floor(a.length * p))]; }
+    v.sort(function (a, b) { return a - b; }); sk.sort(function (a, b) { return a - b; });
+    JSON.stringify({ n: v.length, p10: q(v, 0.1), p50: q(v, 0.5), p90: q(v, 0.9), sky: sk.length ? q(sk, 0.5) : null, skySpread: sk.length > 100 ? q(sk, 0.9) - q(sk, 0.1) : null });`, { timeout: 900000 });
+  if (res.status === 'error') throw new Error('measureOuterArms: ' + (res.error?.message || 'PJSR error'));
+  const o = JSON.parse(res.outputs?.consoleOutput || '{}');
+  if (!(o.n > 500)) return { error: 'annulus empty', n: o.n, centre: [cx, cy] };
+  o.spread = o.p90 - o.p10; o.net = o.spread - (o.skySpread || 0); o.centre = [cx, cy]; o.r = [r0, r1];
+  o.details = `outer-arm net contrast ${o.net.toFixed(4)} (spread ${o.spread.toFixed(4)} in r ${r0}-${r1}px (median ${o.p50.toFixed(3)}, sky ${o.sky?.toFixed(3)}, sky spread ${o.skySpread?.toFixed(4)})), core at ${cx},${cy}`;
+  return o;
+}
+
+/**
+ * Radial zone statistics around a centre on the sigma-smoothed luminance (stars / star residuals excluded by
+ * g2-gS excess). zones: [[r0,r1], ...] in px. Returns per zone {n,p10,p50,p90} plus noise (MAD of gS-g40 on
+ * sky blocks) when withNoise. Shared by the prep signal inventory and the finish gates (same geometry).
+ */
+
+const EMPTY_PJSR = (sig) => `
+    var EMP = null; (function () { var ne = 0, E = new Float32Array(n); for (var j = 0; j < n; j++) if (L[j] <= 1e-6) { E[j] = 1; ne++; }
+      if (ne > 0 && ne < n) { var ew = new ImageWindow(W, H, 1, 32, true, false, 'EMPTY_M'); ew.mainView.beginProcess(); ew.mainView.image.setSamples(E, new Rect(0,0,W,H), 0); ew.mainView.endProcess();
+        var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = ${sig}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(ew.mainView);
+        EMP = new Float32Array(n); ew.mainView.image.getSamples(EMP, new Rect(0,0,W,H), 0); ew.forceClose(); } })();
+    function isEmpty(j) { return EMP !== null && EMP[j] > 0.002; }`;
+
+export async function measureRadialZones(ctx, viewId, centre, zones, { sigma = 8, withNoise = false, skyBits = null, gridW = 0, B = 24 } = {}) {
+  const res = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measureRadialZones: view not found: ${viewId}');
+    var img = w.mainView.image, W = img.width, H = img.height, n = W * H, i;
+    var L = new Float32Array(n);
+    if (img.isColor) { var c = new Float32Array(n); img.getSamples(c, new Rect(0,0,W,H), 0); for (i = 0; i < n; i++) L[i] = 0.2126 * c[i];
+      img.getSamples(c, new Rect(0,0,W,H), 1); for (i = 0; i < n; i++) L[i] += 0.7152 * c[i]; img.getSamples(c, new Rect(0,0,W,H), 2); for (i = 0; i < n; i++) L[i] += 0.0722 * c[i]; }
+    else img.getSamples(L, new Rect(0,0,W,H), 0);
+    ${EMPTY_PJSR(3 * sigma)}
+    function blurred(sig, id) { var bw = new ImageWindow(W, H, 1, 32, true, false, id); bw.mainView.beginProcess(); bw.mainView.image.setSamples(L, new Rect(0,0,W,H), 0); bw.mainView.endProcess();
+      var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = sig; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(bw.mainView);
+      var o = new Float32Array(n); bw.mainView.image.getSamples(o, new Rect(0,0,W,H), 0); bw.forceClose(); return o; }
+    var g2 = blurred(2, 'RZ_2'), gS = blurred(${sigma}, 'RZ_S'), cx = ${centre[0]}, cy = ${centre[1]}, Z = ${JSON.stringify(zones)}, k, x, y;
+    var acc = []; for (k = 0; k < Z.length; k++) acc.push([]);
+    var rMaxZ = 0; for (k = 0; k < Z.length; k++) if (Z[k][1] > rMaxZ) rMaxZ = Z[k][1];
+    for (y = 0; y < H; y += 2) for (x = 0; x < W; x += 2) { var dx = x - cx, dy = y - cy, r = Math.sqrt(dx * dx + dy * dy); if (r >= rMaxZ) continue; i = y * W + x;
+      if (g2[i] - gS[i] > 0.02 || isEmpty(i)) continue;
+      for (k = 0; k < Z.length; k++) if (r >= Z[k][0] && r < Z[k][1]) acc[k].push(gS[i]); }
+    function q(a, p) { return a[Math.min(a.length - 1, Math.floor(a.length * p))]; }
+    var out = { zones: [] };
+    for (k = 0; k < Z.length; k++) { var a = acc[k]; a.sort(function (u, v) { return u - v; });
+      out.zones.push(a.length ? { n: a.length, p10: q(a, 0.1), p50: q(a, 0.5), p90: q(a, 0.9) } : { n: 0 }); }
+    ${withNoise ? `
+    var g40 = blurred(40, 'RZ_40'), bits = '${skyBits || ''}', gw = ${gridW}, B = ${B}, hp = [];
+    for (y = 0; y < H; y += 4) for (x = 0; x < W; x += 4) { var bx = Math.floor(x / B), by = Math.floor(y / B);
+      if (bits.length && bits.charAt(by * gw + bx) !== '1') continue; i = y * W + x; if (isEmpty(i)) continue; if (g2[i] - gS[i] > 0.02) continue; hp.push(gS[i] - g40[i]); }
+    hp.sort(function (u, v) { return u - v; }); var md = q(hp, 0.5), dev = []; for (k = 0; k < hp.length; k++) dev.push(Math.abs(hp[k] - md));
+    dev.sort(function (u, v) { return u - v; }); out.noise = 1.4826 * q(dev, 0.5); out.noiseN = hp.length;` : ''}
+    JSON.stringify(out);`, { timeout: 900000 });
+  if (res.status === 'error') throw new Error('measureRadialZones: ' + (res.error?.message || 'PJSR error'));
+  return JSON.parse(res.outputs?.consoleOutput || '{}');
+}
+
+async function lumGrid(ctx, viewId, B) {
+  const g = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('lumGrid: view not found: ${viewId}');
+    var img = w.mainView.image, gw = Math.floor(img.width / ${B}), gh = Math.floor(img.height / ${B}), g = [];
+    for (var by = 0; by < gh; by++) for (var bx = 0; bx < gw; bx++) {
+      img.selectedRect = new Rect(bx * ${B}, by * ${B}, bx * ${B} + ${B}, by * ${B} + ${B});
+      if (img.isColor) { img.selectedChannel = 0; var a = img.median(); img.selectedChannel = 1; var b = img.median(); img.selectedChannel = 2; var c = img.median(); img.resetChannelSelection(); g.push(Math.round((0.2126 * a + 0.7152 * b + 0.0722 * c) * 1e6) / 1e6); }
+      else g.push(Math.round(img.median() * 1e6) / 1e6); }
+    img.resetSelections(); JSON.stringify({ w: gw, h: gh, W: img.width, H: img.height, g: g });`, { timeout: 600000 });
+  if (g.status === 'error') throw new Error('lumGrid: ' + (g.error?.message || 'PJSR error'));
+  return JSON.parse(g.outputs?.consoleOutput || '{}');
+}
+
+/**
+ * Pure: detection radius from a radial profile. ann = [{r0,r1,p10,p50,p90,n}] on the sigma-smoothed view.
+ * Detection = arm/inter-arm STRUCTURE (p90-p10) above the sky's own texture (skySpread: residual galaxies,
+ * gradients), in units of the smoothed noise. The annulus median level is NOT used: averaged over thousands of
+ * pixels, any residual gradient or smooth halo reads "significant" (M74 prep L: level >= 5 sigma out to 1050 px,
+ * structure stops at 750 px, matching the hand measurement on the linear master).
+ */
+export function summarizeInventory(ann, sky, noise, { minSnr = 3, gapsAllowed = 1, skySpread = null } = {}) {
+  const floor = Number.isFinite(skySpread) ? skySpread : 2.563 * noise;
+  const prof = ann.map(a => ({ r0: a.r0, r1: a.r1, level: a.n ? (a.p50 - sky) / noise : 0, structure: a.n ? (a.p90 - a.p10 - floor) / noise : 0 }));
+  let rDet = 0, gaps = 0;
+  for (const p of prof) {
+    if (p.structure >= minSnr) { rDet = p.r1; gaps = 0; }
+    else if (rDet > 0 && ++gaps > gapsAllowed) break;
+  }
+  return { rDet, floor, profile: prof.map(p => ({ r0: p.r0, r1: p.r1, level: +p.level.toFixed(1), structure: +p.structure.toFixed(1) })) };
+}
+
+/** Zone geometry derived from the detection radius (shared by prep and finish). */
+export function inventoryZones(rDet) {
+  return {
+    core: [0, Math.max(12, Math.round(0.08 * rDet))],
+    disc: [Math.round(0.35 * rDet), Math.round(0.55 * rDet)],
+    outer: [Math.round(0.8 * rDet), rDet],
+    sky: [rDet + 150, rDet + 250],
+  };
+}
+
+/** Core-to-disc index and outer-zone net contrast from zone stats (pure). */
+export function zoneIndices(z) {
+  const [core, disc, outer, sky] = z;
+  const s = sky?.n ? sky.p50 : null;
+  if (s == null || !core?.n || !disc?.n) return { coreIdx: null, outerNet: null };
+  const skySpread = sky.p90 - sky.p10;
+  return {
+    sky: s,
+    coreIdx: (disc.p50 - s) > 1e-6 ? (core.p50 - s) / (disc.p50 - s) : null,
+    outerNet: outer?.n ? (outer.p90 - outer.p10) - skySpread : null,
+    outerLevel: outer?.n ? outer.p50 - s : null,
+  };
+}
+
+/**
+ * PREP signal inventory (user methodology 2026-11-07: "stretch the longest exposure early to understand what
+ * there is to see"). On the deepest starless view (prep L, else RGB): galaxy centre, detection radius rDet (where
+ * the smoothed signal / arm structure is still >= 5 sigma), the zone geometry used by the finish gates, the prep
+ * core-to-disc index, and a hard-stretched preview for the agents.
+ */
+export async function measureSignalInventory(ctx, viewId, { previewDir = null, log = console.log } = {}) {
+  const B = 24;
+  const d = await lumGrid(ctx, viewId, B);
+  const m = galaxyBlockMask(d.g || [], d.w, d.h);
+  if (m.blocks < 20) return { error: 'no subject component', blocks: m.blocks };
+  let bi = -1, bv = -Infinity; for (let i = 0; i < m.bits.length; i++) if (m.bits[i] === '1' && d.g[i] > bv) { bv = d.g[i]; bi = i; }
+  const centre = [(bi % d.w) * B + B / 2, Math.floor(bi / d.w) * B + B / 2];
+  // sky blocks for the noise estimate: outside the subject component and in the lower half of block values
+  // empty (zero) blocks outside a drizzle/registration footprint are not sky (M101 friend crop 2026-11-08: sky read 0)
+  const sorted = Array.from(d.g).filter(v => v > 1e-6).sort((a, b) => a - b), med = sorted[Math.floor(sorted.length / 2)] ?? 0;
+  let skyBits = ''; for (let i = 0; i < d.g.length; i++) skyBits += (m.bits[i] !== '1' && d.g[i] > 1e-6 && d.g[i] <= med) ? '1' : '0';
+  const rMax = Math.floor(Math.hypot(Math.max(centre[0], d.W - centre[0]), Math.max(centre[1], d.H - centre[1])));
+  const step = 25, ann = [];
+  for (let r = 0; r + step <= rMax; r += step) ann.push([r, r + step]);
+  const z = await measureRadialZones(ctx, viewId, centre, ann, { withNoise: true, skyBits, gridW: d.w, B });
+  // sky = median of the outermost well-sampled annuli (beyond 85% of rMax), else the sky-block median
+  const outerAnn = z.zones.map((s, k) => ({ ...s, r0: ann[k][0], r1: ann[k][1] }));
+  const skyAnn = outerAnn.filter(a => a.n > 1000 && a.r0 >= 0.85 * Math.min(rMax, Math.min(d.W, d.H) / 2 * 1.4));
+  const sky = skyAnn.length ? skyAnn.map(a => a.p50).sort((a, b) => a - b)[Math.floor(skyAnn.length / 2)] : med;
+  const noise = Math.max(z.noise || 0, 1e-7);
+  const skySpreads = skyAnn.map(a => a.p90 - a.p10).sort((a, b) => a - b);
+  const skySpread = skySpreads.length ? skySpreads[Math.floor(skySpreads.length / 2)] : null;
+  const inv = summarizeInventory(outerAnn.filter(a => a.n > 200), sky, noise, { skySpread });
+  if (!inv.rDet) return { error: 'no detection', centre, noise, sky };
+  const zones = inventoryZones(inv.rDet);
+  const zz = await measureRadialZones(ctx, viewId, centre, [zones.core, zones.disc, zones.outer, zones.sky]);
+  const idx = zoneIndices(zz.zones);
+  let prepCoreWeber = null;
+  try { prepCoreWeber = (await measureZoneStructure(ctx, viewId, { centre, rDet: inv.rDet, zones })).coreWeber; } catch (e) { log(`  [inventory] core structure failed: ${e.message}`); }
+  let prepEnvelope = null;
+  try { prepEnvelope = (await measureEnvelopeSectors(ctx, viewId, { centre, rDet: inv.rDet })).excess; } catch (e) { log(`  [inventory] envelope sectors failed: ${e.message}`); }
+  const out = { view: viewId, centre, rDet: inv.rDet, skySpread, prepCoreWeber, prepEnvelope, rFrameMax: rMax, sky, noise, zones, prepCoreIdx: idx.coreIdx, prepOuterNet: idx.outerNet, profile: inv.profile };
+  out.text = `subject centre (${centre[0]}, ${centre[1]}); arm-scale structure detected (>= 3 sigma above the sky texture) out to r = ${inv.rDet} px` +
+    `${inv.rDet + 250 > Math.min(centre[0], centre[1], d.W - centre[0], d.H - centre[1]) ? ' (close to the frame edge)' : ''}; ` +
+    `outer zone ${zones.outer[0]}-${zones.outer[1]} px must stay VISIBLE in the final image; prep core/disc index ${idx.coreIdx?.toFixed(2)}.`;
+  if (previewDir) {
+    try {
+      const fsMod = await import('fs'); fsMod.mkdirSync(previewDir, { recursive: true });
+      // hard stretch scaled to what the OUTER zone holds: its p90 lands near 0.45, the core saturates (by design)
+      const oz = zz.zones[2], span = Math.max(((oz?.n ? oz.p90 : sky) - sky) * 2.5, 10 * noise);
+      await ctx.pjsr(`
+        var w = ImageWindow.windowById('${viewId}'); var img = w.mainView.image, W = img.width, H = img.height, n = W * H, i, R = new Rect(0,0,W,H);
+        var L = new Float32Array(n);
+        if (img.isColor) { var c = new Float32Array(n); img.getSamples(c, R, 0); for (i = 0; i < n; i++) L[i] = 0.2126 * c[i];
+          img.getSamples(c, R, 1); for (i = 0; i < n; i++) L[i] += 0.7152 * c[i]; img.getSamples(c, R, 2); for (i = 0; i < n; i++) L[i] += 0.0722 * c[i]; }
+        else img.getSamples(L, R, 0);
+        var t = new ImageWindow(W, H, 1, 32, true, false, 'INV_HARD');
+        t.mainView.beginProcess(); t.mainView.image.setSamples(L, R, 0); t.mainView.endProcess();
+        var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = 4; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(t.mainView);
+        var P = new PixelMath; P.expression = 'v = max(0, ($T - ${sky.toFixed(6)}) / ${span.toExponential(4)} + 0.03); v / (v + 0.25) * 1.25';
+        P.symbols = 'v'; P.useSingleExpression = true; P.createNewImage = false; P.rescale = false; P.truncate = true; P.executeOn(t.mainView); 'ok';`);
+      const { generateDiagnosticViews } = await import('../llm/vision.mjs');
+      out.preview = await generateDiagnosticViews(ctx, 'INV_HARD', previewDir);
+    } catch (e) { log(`  [inventory] hard-stretch preview failed: ${e.message}`); }
+    finally { await ctx.pjsr(`var w = ImageWindow.windowById('INV_HARD'); if (!w.isNull) w.forceClose(); 'ok';`).catch(() => {}); }
+  }
+  log(`  [inventory] ${out.text}`);
+  return out;
+}
+
+/** Finish-side: same geometry on the candidate image. */
+export async function measureInventoryZones(ctx, viewId, inv) {
+  const z = inv.zones;
+  const zz = await measureRadialZones(ctx, viewId, inv.centre, [z.core, z.disc, z.outer, z.sky]);
+  return zoneIndices(zz.zones);
+}
+
+/**
+ * Zone structure + colour on the inventory geometry (2026-11-07, M74 v5 loopholes):
+ * - coreWeber: fine structure inside the core, std(g1-g6)/mean(g6-sky) for r < 0.2 rDet (a bright but featureless
+ *   core passes core/disc brightness but fails this).
+ * - armSat / gapSat: median HSV saturation of ARM pixels (above the 60th lum percentile of their 25 px annulus,
+ *   sigma-8 luminance) vs inter-arm GAP pixels (below the 40th), r in [0.2, 1.0] rDet. A saturation floor on the
+ *   whole subject was met in v5 by tinting the gaps blue; on arms only that loophole closes.
+ */
+export async function measureZoneStructure(ctx, viewId, inv) {
+  const [cx, cy] = inv.centre, rDet = inv.rDet, rCore = Math.round(0.2 * rDet), r0 = Math.round(0.2 * rDet);
+  const res = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measureZoneStructure: view not found: ${viewId}');
+    var img = w.mainView.image, W = img.width, H = img.height, n = W * H, i, R = new Rect(0,0,W,H), col = img.isColor;
+    var L = new Float32Array(n), c0, c1, c2;
+    if (col) { c0 = new Float32Array(n); c1 = new Float32Array(n); c2 = new Float32Array(n); img.getSamples(c0, R, 0); img.getSamples(c1, R, 1); img.getSamples(c2, R, 2);
+      for (i = 0; i < n; i++) L[i] = 0.2126 * c0[i] + 0.7152 * c1[i] + 0.0722 * c2[i]; }
+    else img.getSamples(L, R, 0);
+    ${EMPTY_PJSR(24)}
+    function blurred(sig, id) { var bw = new ImageWindow(W, H, 1, 32, true, false, id); bw.mainView.beginProcess(); bw.mainView.image.setSamples(L, R, 0); bw.mainView.endProcess();
+      var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = sig; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(bw.mainView);
+      var o = new Float32Array(n); bw.mainView.image.getSamples(o, R, 0); bw.forceClose(); return o; }
+    var g1 = blurred(1, 'ZS_1'), g6 = blurred(6, 'ZS_6'), g8 = blurred(8, 'ZS_8');
+    var cx = ${cx}, cy = ${cy}, rDet = ${rDet}, rCore = ${rCore}, r0 = ${r0}, x, y, k;
+    // sky: median g8 in the inventory sky zone
+    var sk = []; for (y = 0; y < H; y += 4) for (x = 0; x < W; x += 4) { var d = Math.sqrt((x-cx)*(x-cx)+(y-cy)*(y-cy)); if (d >= ${inv.zones.sky[0]} && d < ${inv.zones.sky[1]} && !isEmpty(y*W+x)) sk.push(g8[y*W+x]); }
+    sk.sort(function(a,b){return a-b;}); var sky = sk.length ? sk[sk.length >> 1] : 0;
+    // core structure
+    var s = 0, s2 = 0, m = 0, cn = 0;
+    for (y = Math.max(0, cy - rCore); y < Math.min(H, cy + rCore); y++) for (x = Math.max(0, cx - rCore); x < Math.min(W, cx + rCore); x++) {
+      if ((x-cx)*(x-cx)+(y-cy)*(y-cy) >= rCore*rCore) continue; i = y*W+x; var dd = g1[i] - g6[i]; s += dd; s2 += dd*dd; m += g6[i] - sky; cn++; }
+    var mu = s / cn, coreWeber = Math.sqrt(Math.max(0, s2/cn - mu*mu)) / Math.max(m / cn, 1e-4);
+    var out = { coreWeber: coreWeber, corePx: cn, sky: sky };
+    if (col) {
+      var NA = Math.ceil(rDet / 25), ann = []; for (k = 0; k < NA; k++) ann.push([]);
+      for (y = 0; y < H; y += 2) for (x = 0; x < W; x += 2) { var r = Math.sqrt((x-cx)*(x-cx)+(y-cy)*(y-cy)); if (r < r0 || r >= rDet || isEmpty(y*W+x)) continue; ann[Math.floor(r / 25)].push(g8[y*W+x]); }
+      var lo = [], hi = []; for (k = 0; k < NA; k++) { var a = ann[k]; a.sort(function(p,q){return p-q;}); lo.push(a.length ? a[Math.floor(a.length*0.4)] : 0); hi.push(a.length ? a[Math.floor(a.length*0.6)] : 0); }
+      var arm = [], gap = [];
+      for (y = 0; y < H; y += 2) for (x = 0; x < W; x += 2) { var r = Math.sqrt((x-cx)*(x-cx)+(y-cy)*(y-cy)); if (r < r0 || r >= rDet) continue; i = y*W+x; if (isEmpty(i)) continue; k = Math.floor(r / 25);
+        if (L[i] - g6[i] > 0.05) continue;
+        var mx = Math.max(c0[i], c1[i], c2[i]), mn = Math.min(c0[i], c1[i], c2[i]), sat = mx > 0.001 ? (mx - mn) / mx : 0;
+        if (g8[i] >= hi[k]) arm.push(sat); else if (g8[i] <= lo[k]) gap.push(sat); }
+      arm.sort(function(p,q){return p-q;}); gap.sort(function(p,q){return p-q;});
+      out.armSat = arm.length ? arm[arm.length >> 1] : null; out.gapSat = gap.length ? gap[gap.length >> 1] : null; out.armN = arm.length;
+    }
+    JSON.stringify(out);`, { timeout: 900000 });
+  if (res.status === 'error') throw new Error('measureZoneStructure: ' + (res.error?.message || 'PJSR error'));
+  return JSON.parse(res.outputs?.consoleOutput || '{}');
+}
+
+/**
+ * Envelope by direction (2026-11-08, M74 v5/v6 "mask-like edge" on one side): 8 sectors around the subject;
+ * per sector, excess of the sigma-8 luminance in [0.9, 1.05] x rDet over that sector's own sky ring
+ * [rDet+100, rDet+400]. Compared final vs prep (relative to each image's median sector), a sector that the data
+ * fills but the final drops to sky is a threshold/mask clip. M74 prep L: right sector 0.73 of median; v6 0.004.
+ */
+export async function measureEnvelopeSectors(ctx, viewId, inv) {
+  const [cx, cy] = inv.centre, rd = inv.rDet;
+  const res = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measureEnvelopeSectors: view not found: ${viewId}');
+    var img = w.mainView.image, W = img.width, H = img.height, n = W * H, i, R = new Rect(0,0,W,H);
+    var L = new Float32Array(n);
+    if (img.isColor) { var c = new Float32Array(n); img.getSamples(c, R, 0); for (i = 0; i < n; i++) L[i] = 0.2126 * c[i];
+      img.getSamples(c, R, 1); for (i = 0; i < n; i++) L[i] += 0.7152 * c[i]; img.getSamples(c, R, 2); for (i = 0; i < n; i++) L[i] += 0.0722 * c[i]; }
+    else img.getSamples(L, R, 0);
+    ${EMPTY_PJSR(24)}
+    function blurred(sig, id) { var bw = new ImageWindow(W, H, 1, 32, true, false, id); bw.mainView.beginProcess(); bw.mainView.image.setSamples(L, R, 0); bw.mainView.endProcess();
+      var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = sig; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(bw.mainView);
+      var o = new Float32Array(n); bw.mainView.image.getSamples(o, R, 0); bw.forceClose(); return o; }
+    var g2 = blurred(2, 'ES_2'), g8 = blurred(8, 'ES_8'), cx = ${cx}, cy = ${cy}, rd = ${rd}, env = [], sky = [], s, x, y;
+    for (s = 0; s < 8; s++) { env.push([]); sky.push([]); }
+    for (y = 0; y < H; y += 2) for (x = 0; x < W; x += 2) { var dx = x - cx, dy = y - cy, r = Math.sqrt(dx*dx + dy*dy); i = y*W + x;
+      if (g2[i] - g8[i] > 0.02 || isEmpty(i)) continue;
+      s = Math.floor((Math.atan2(dy, dx) + Math.PI) / (Math.PI / 4)); if (s > 7) s = 7;
+      if (r > 0.9*rd && r < 1.05*rd) env[s].push(g8[i]); else if (r > rd + 100 && r < rd + 400) sky[s].push(g8[i]); }
+    function med(a) { if (a.length < 2000) return null; a.sort(function(p,q){return p-q;}); return a[a.length >> 1]; }
+    var ex = []; for (s = 0; s < 8; s++) { var e = med(env[s]), k = med(sky[s]); ex.push(e == null || k == null ? null : e - k); }
+    JSON.stringify({ excess: ex });`, { timeout: 900000 });
+  if (res.status === 'error') throw new Error('measureEnvelopeSectors: ' + (res.error?.message || 'PJSR error'));
+  return JSON.parse(res.outputs?.consoleOutput || '{}');
+}
+
+/** Pure: compare final vs prep envelope sectors. Sector s spans atan2 angle [-pi + s*pi/4, ...) (image y down). */
+export function compareEnvelopeSectors(finalEx, prepEx, { minLevel = 0.005 } = {}) {
+  const names = ['left/upper-left', 'upper-left/top', 'top/upper-right', 'upper-right/right', 'right/lower-right', 'lower-right/bottom', 'bottom/lower-left', 'lower-left/left'];
+  const ok = (a) => Array.isArray(a) && a.length === 8;
+  if (!ok(finalEx) || !ok(prepEx)) return { evaluated: false, reason: 'missing sectors' };
+  const idx = [...Array(8).keys()].filter(s => finalEx[s] != null && prepEx[s] != null);
+  if (idx.length < 5) return { evaluated: false, reason: 'too few sectors inside the frame' };
+  const medOf = (a) => { const v = idx.map(s => a[s]).sort((p, q) => p - q); return v[Math.floor(v.length / 2)]; };
+  const mf = medOf(finalEx), mp = medOf(prepEx);
+  if (!(mf >= minLevel) || !(mp > 0)) return { evaluated: false, reason: `envelope not lifted (median ${mf?.toFixed(4)} < ${minLevel})` };
+  let worst = null;
+  for (const s of idx) {
+    const relP = prepEx[s] / mp; if (relP < 0.3) continue;   // the data itself is faint there: not a clip
+    const ratio = (finalEx[s] / mf) / relP;
+    if (!worst || ratio < worst.ratio) worst = { sector: s, name: names[s], ratio, finalRel: finalEx[s] / mf, prepRel: relP };
+  }
+  return { evaluated: true, worst, medianFinal: mf };
+}
+
+/**
+ * Radial profiles by direction (2026-11-08, M74 v7 "mask-shaped glow boundary with a dark moat"): sigma-8 luminance
+ * median per 15 px radial bin, per 8 sectors, star-rejected, from 0.4 x rDet to rDet + 450. Used to compare how
+ * the outer glow FALLS to the sky in the final vs the prep data (a global stretch can only widen the falloff of
+ * faint signal; a narrower falloff, or a dip below the far sky, is a mask edge).
+ */
+export async function measureSectorProfiles(ctx, viewId, inv, { bin = 15 } = {}) {
+  const [cx, cy] = inv.centre, rd = inv.rDet;
+  const r0 = Math.round(0.4 * rd), r1 = rd + 450;
+  const res = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measureSectorProfiles: view not found: ${viewId}');
+    var img = w.mainView.image, W = img.width, H = img.height, n = W * H, i, R = new Rect(0,0,W,H);
+    var L = new Float32Array(n);
+    if (img.isColor) { var c = new Float32Array(n); img.getSamples(c, R, 0); for (i = 0; i < n; i++) L[i] = 0.2126 * c[i];
+      img.getSamples(c, R, 1); for (i = 0; i < n; i++) L[i] += 0.7152 * c[i]; img.getSamples(c, R, 2); for (i = 0; i < n; i++) L[i] += 0.0722 * c[i]; }
+    else img.getSamples(L, R, 0);
+    ${EMPTY_PJSR(24)}
+    function blurred(sig, id) { var bw = new ImageWindow(W, H, 1, 32, true, false, id); bw.mainView.beginProcess(); bw.mainView.image.setSamples(L, R, 0); bw.mainView.endProcess();
+      var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = sig; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(bw.mainView);
+      var o = new Float32Array(n); bw.mainView.image.getSamples(o, R, 0); bw.forceClose(); return o; }
+    var g2 = blurred(2, 'SP_2'), g8 = blurred(8, 'SP_8'), cx = ${cx}, cy = ${cy}, r0 = ${r0}, r1 = ${r1}, B = ${bin};
+    var NB = Math.ceil((r1 - r0) / B), acc = [], s, k, x, y;
+    for (s = 0; s < 8; s++) { acc.push([]); for (k = 0; k < NB; k++) acc[s].push([]); }
+    for (y = 0; y < H; y += 2) for (x = 0; x < W; x += 2) { var dx = x - cx, dy = y - cy, r = Math.sqrt(dx*dx + dy*dy); if (r < r0 || r >= r1) continue; i = y*W + x;
+      if (g2[i] - g8[i] > 0.02 || isEmpty(i)) continue;
+      s = Math.floor((Math.atan2(dy, dx) + Math.PI) / (Math.PI / 4)); if (s > 7) s = 7;
+      acc[s][Math.floor((r - r0) / B)].push(g8[i]); }
+    var prof = [];
+    for (s = 0; s < 8; s++) { var p = []; for (k = 0; k < NB; k++) { var a = acc[s][k]; if (a.length < 150) { p.push(null); continue; } a.sort(function(u,v){return u-v;}); p.push(a[a.length >> 1]); } prof.push(p); }
+    JSON.stringify({ r0: r0, bin: B, profiles: prof });`, { timeout: 900000 });
+  if (res.status === 'error') throw new Error('measureSectorProfiles: ' + (res.error?.message || 'PJSR error'));
+  return JSON.parse(res.outputs?.consoleOutput || '{}');
+}
+
+/**
+ * Core trough statistics (2026-11-08, M74 v7 "cooked core": local contrast carved near-black outlines into the
+ * core; coreWeber 0.074 = v6's natural 0.073, so a symmetric spread metric is blind). Relative residual
+ * rel = (g1 - g6) / (g6 - sky) inside r < 0.25 x rDet; reports the negative tail (p2, p5), the positive tail
+ * (p95, p98) and the fraction of pixels darker than -0.25 (outline pixels).
+ */
+export async function measureCoreTroughs(ctx, viewId, inv, { fracs = [1 / 250, 1 / 60, 1 / 30], coreFrac = 0.25 } = {}) {
+  // Scales are FRACTIONS of rDet so images of different pixel scale / galaxy size compare (user reference JPEGs).
+  const [cx, cy] = inv.centre, rC = Math.round(coreFrac * inv.rDet);
+  const sig = fracs.map(f => Math.max(0.7, +(f * inv.rDet).toFixed(2)));
+  const res = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measureCoreTroughs: view not found: ${viewId}');
+    var img = w.mainView.image, W = img.width, H = img.height, n = W * H, i, R = new Rect(0,0,W,H);
+    var L = new Float32Array(n);
+    if (img.isColor) { var c = new Float32Array(n); img.getSamples(c, R, 0); for (i = 0; i < n; i++) L[i] = 0.2126 * c[i];
+      img.getSamples(c, R, 1); for (i = 0; i < n; i++) L[i] += 0.7152 * c[i]; img.getSamples(c, R, 2); for (i = 0; i < n; i++) L[i] += 0.0722 * c[i]; }
+    else img.getSamples(L, R, 0);
+    function blurred(sig, id) { var bw = new ImageWindow(W, H, 1, 32, true, false, id); bw.mainView.beginProcess(); bw.mainView.image.setSamples(L, R, 0); bw.mainView.endProcess();
+      var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = sig; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(bw.mainView);
+      var o = new Float32Array(n); bw.mainView.image.getSamples(o, R, 0); bw.forceClose(); return o; }
+    var cx = ${cx}, cy = ${cy}, rC = ${rC}, x, y, SIG = ${JSON.stringify(sig)}, out = { scales: [] };
+    var gs = blurred(Math.max(8, SIG[SIG.length - 1] * 4), 'CT_S');
+    var sk = []; for (y = 0; y < H; y += 4) for (x = 0; x < W; x += 4) { var d = Math.sqrt((x-cx)*(x-cx)+(y-cy)*(y-cy)); if (d >= ${inv.zones.sky[0]} && d < ${inv.zones.sky[1]}) sk.push(gs[y*W+x]); }
+    sk.sort(function(a,b){return a-b;}); var sky = sk.length ? sk[sk.length >> 1] : 0; out.sky = sky;
+    for (var si = 0; si < SIG.length; si++) {
+      var ga = blurred(SIG[si], 'CT_A'), gb = blurred(SIG[si] * 4, 'CT_B'), rel = [];
+      for (y = Math.max(0, cy - rC); y < Math.min(H, cy + rC); y++) for (x = Math.max(0, cx - rC); x < Math.min(W, cx + rC); x++) {
+        if ((x-cx)*(x-cx)+(y-cy)*(y-cy) >= rC*rC) continue; i = y*W+x; rel.push((ga[i] - gb[i]) / Math.max(gb[i] - sky, 0.02)); }
+      rel.sort(function(a,b){return a-b;}); var N = rel.length, dark = 0;
+      for (i = 0; i < N; i++) { if (rel[i] < -0.25) dark++; else break; }
+      function q(f) { return rel[Math.min(N - 1, Math.floor(f * N))]; }
+      out.scales.push({ sigma: SIG[si], p2: q(0.02), p5: q(0.05), p50: q(0.5), p95: q(0.95), p98: q(0.98), darkFrac: dark / N, asym: -q(0.02) / Math.max(q(0.98), 1e-4) });
+    }
+    out.n = rC; JSON.stringify(out);`, { timeout: 900000 });
+  if (res.status === 'error') throw new Error('measureCoreTroughs: ' + (res.error?.message || 'PJSR error'));
+  return JSON.parse(res.outputs?.consoleOutput || '{}');
+}
+
+/**
+ * Core texture character (2026-11-08, M74 v7 "cooked core"): a dense, ISOTROPIC cell pattern (dark brown blobs on
+ * cream) replaced the few coherent spiral lanes; trough depth and coreWeber were blind to it (v7 0.074 = v6 0.073).
+ * Per scale s (fraction of rDet), inside r < coreFrac x rDet:
+ *  - coherence: energy-weighted structure-tensor coherence of the s-smoothed luminance (gradients integrated over
+ *    3s). Spiral lanes are oriented (high); a cell/worm pattern is isotropic (low).
+ *  - lumTex: std of the band-pass (g_s - g_4s) luminance relative to the local level (g_4s - sky).
+ *  - chromaTex: std of the band-pass of the two opponent chroma axes (R-G, (R+G)/2-B), relative to local luminance.
+ */
+export async function measureCoreTexture(ctx, viewId, inv, { fracs = [1 / 120, 1 / 50], coreFrac = 0.25 } = {}) {
+  const [cx, cy] = inv.centre, rC = Math.round(coreFrac * inv.rDet);
+  const sig = fracs.map(f => Math.max(0.8, +(f * inv.rDet).toFixed(2)));
+  const res = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measureCoreTexture: view not found: ${viewId}');
+    var img = w.mainView.image, W = img.width, H = img.height, n = W * H, i, R = new Rect(0,0,W,H), col = img.isColor;
+    var L = new Float32Array(n), A = null, Bc = null;
+    if (col) { var c0 = new Float32Array(n), c1 = new Float32Array(n), c2 = new Float32Array(n); img.getSamples(c0, R, 0); img.getSamples(c1, R, 1); img.getSamples(c2, R, 2);
+      A = new Float32Array(n); Bc = new Float32Array(n);
+      for (i = 0; i < n; i++) { L[i] = 0.2126 * c0[i] + 0.7152 * c1[i] + 0.0722 * c2[i]; A[i] = c0[i] - c1[i]; Bc[i] = 0.5 * (c0[i] + c1[i]) - c2[i]; } c0 = c1 = c2 = null; }
+    else img.getSamples(L, R, 0);
+    function blur(src, sig) { var bw = new ImageWindow(W, H, 1, 32, true, false, 'CTX_T'); bw.mainView.beginProcess(); bw.mainView.image.setSamples(src, R, 0); bw.mainView.endProcess();
+      var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = sig; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(bw.mainView);
+      var o = new Float32Array(n); bw.mainView.image.getSamples(o, R, 0); bw.forceClose(); return o; }
+    var cx = ${cx}, cy = ${cy}, rC = ${rC}, SIG = ${JSON.stringify(sig)}, x, y, out = { scales: [] };
+    var gS = blur(L, Math.max(8, SIG[SIG.length - 1] * 4)), sk = [];
+    for (y = 0; y < H; y += 4) for (x = 0; x < W; x += 4) { var d = Math.sqrt((x-cx)*(x-cx)+(y-cy)*(y-cy)); if (d >= ${inv.zones.sky[0]} && d < ${inv.zones.sky[1]}) sk.push(gS[y*W+x]); }
+    sk.sort(function(a,b){return a-b;}); var sky = sk.length ? sk[sk.length >> 1] : 0; out.sky = sky; gS = null;
+    var x0 = Math.max(1, cx - rC), x1 = Math.min(W - 1, cx + rC), y0 = Math.max(1, cy - rC), y1 = Math.min(H - 1, cy + rC);
+    for (var si = 0; si < SIG.length; si++) {
+      var s = SIG[si], ga = blur(L, s), gb = blur(L, 4 * s);
+      var jxx = new Float32Array(n), jxy = new Float32Array(n), jyy = new Float32Array(n);
+      for (y = y0; y < y1; y++) for (x = x0; x < x1; x++) { i = y*W+x; var gx = 0.5 * (ga[i+1] - ga[i-1]), gy = 0.5 * (ga[i+W] - ga[i-W]); jxx[i] = gx*gx; jxy[i] = gx*gy; jyy[i] = gy*gy; }
+      jxx = blur(jxx, 3 * s); jxy = blur(jxy, 3 * s); jyy = blur(jyy, 3 * s);
+      var num = 0, den = 0, lt = 0, lt2 = 0, cnt = 0, ca = null, cb = null, cA = 0, cA2 = 0, cB = 0, cB2 = 0;
+      if (col) { var aa = blur(A, s), ab = blur(A, 4 * s), ba = blur(Bc, s), bb = blur(Bc, 4 * s); }
+      for (y = y0; y < y1; y++) for (x = x0; x < x1; x++) { if ((x-cx)*(x-cx)+(y-cy)*(y-cy) >= rC*rC) continue; i = y*W+x;
+        var tr = jxx[i] + jyy[i], df = Math.sqrt((jxx[i]-jyy[i])*(jxx[i]-jyy[i]) + 4*jxy[i]*jxy[i]); num += df; den += tr;
+        var lvl = Math.max(gb[i] - sky, 0.02), v = (ga[i] - gb[i]) / lvl; lt += v; lt2 += v*v; cnt++;
+        if (col) { var va = (aa[i] - ab[i]) / lvl, vb = (ba[i] - bb[i]) / lvl; cA += va; cA2 += va*va; cB += vb; cB2 += vb*vb; } }
+      function sd(s1, s2) { var m = s1 / cnt; return Math.sqrt(Math.max(0, s2 / cnt - m*m)); }
+      out.scales.push({ sigma: s, coherence: den > 0 ? num / den : null, lumTex: sd(lt, lt2), chromaTex: col ? Math.sqrt(sd(cA, cA2)*sd(cA, cA2) + sd(cB, cB2)*sd(cB, cB2)) : null });
+      ga = gb = jxx = jxy = jyy = null;
+    }
+    JSON.stringify(out);`, { timeout: 1200000 });
+  if (res.status === 'error') throw new Error('measureCoreTexture: ' + (res.error?.message || 'PJSR error'));
+  return JSON.parse(res.outputs?.consoleOutput || '{}');
+}
+
+/**
+ * Core texture SPECTRUM (2026-11-08, M74 v7 "cooked core", calibrated on 5 user reference galaxies).
+ * spectrum = std(g_u - g_2u) / std(g_4u - g_8u) inside r < 0.22 x rDet, u = rDet / 300 (scale-free across images).
+ * Natural cores carry MORE structure at larger scales (lanes, inner arms): refs 0.68-0.86, v3 0.81, v5 1.04,
+ * v6 1.12. Local contrast at small radius inverts it into a cell/worm pattern: v7 1.71. Trough depth, coreWeber,
+ * coherence, kurtosis and central concentration were all blind to it (v7 = v6 or = the M74 reference).
+ */
+export async function measureCoreSpectrum(ctx, viewId, inv, { coreFrac = 0.22 } = {}) {
+  const [cx, cy] = inv.centre, rC = Math.round(coreFrac * inv.rDet), u = Math.max(0.6, inv.rDet / 300);
+  const res = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measureCoreSpectrum: view not found: ${viewId}');
+    var img = w.mainView.image, W = img.width, H = img.height, cx = ${cx}, cy = ${cy}, rC = ${rC}, u = ${u}, pad = Math.ceil(${u} * 8 * 3);
+    var x0 = Math.max(0, cx - rC - pad), y0 = Math.max(0, cy - rC - pad), x1 = Math.min(W, cx + rC + pad), y1 = Math.min(H, cy + rC + pad);
+    var CW = x1 - x0, CH = y1 - y0, n = CW * CH, i, R = new Rect(x0, y0, x1, y1), L = new Float32Array(n);
+    if (img.isColor) { var c = new Float32Array(n); img.getSamples(c, R, 0); for (i = 0; i < n; i++) L[i] = 0.2126 * c[i];
+      img.getSamples(c, R, 1); for (i = 0; i < n; i++) L[i] += 0.7152 * c[i]; img.getSamples(c, R, 2); for (i = 0; i < n; i++) L[i] += 0.0722 * c[i]; }
+    else img.getSamples(L, R, 0);
+    var RR = new Rect(0, 0, CW, CH);
+    function blur(sig) { var bw = new ImageWindow(CW, CH, 1, 32, true, false, 'CSP_T'); bw.mainView.beginProcess(); bw.mainView.image.setSamples(L, RR, 0); bw.mainView.endProcess();
+      var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = sig; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(bw.mainView);
+      var o = new Float32Array(n); bw.mainView.image.getSamples(o, RR, 0); bw.forceClose(); return o; }
+    var g1 = blur(u), g2 = blur(2 * u), g4 = blur(4 * u), g8 = blur(8 * u);
+    function sd(a, b) { var s = 0, s2 = 0, k = 0, x, y, d; for (y = 0; y < CH; y++) for (x = 0; x < CW; x++) { var dx = x + x0 - cx, dy = y + y0 - cy; if (dx*dx + dy*dy >= rC*rC) continue; i = y*CW + x; d = a[i] - b[i]; s += d; s2 += d*d; k++; }
+      var m = s / k; return Math.sqrt(Math.max(0, s2 / k - m*m)); }
+    var fine = sd(g1, g2), mid = sd(g2, g4), coarse = sd(g4, g8);
+    JSON.stringify({ u: u, fine: fine, mid: mid, coarse: coarse, spectrum: coarse > 0 ? fine / coarse : null, midCoarse: coarse > 0 ? mid / coarse : null });`, { timeout: 900000 });
+  if (res.status === 'error') throw new Error('measureCoreSpectrum: ' + (res.error?.message || 'PJSR error'));
+  return JSON.parse(res.outputs?.consoleOutput || '{}');
+}
+
+/**
+ * Pure: outer-glow EDGE STEEPENING from measureSectorProfiles (2026-11-08, M74 v7 "mask-shaped boundary").
+ * On the 8-sector-median profile, excess over the far sky normalised at 0.6 x rDet; k_inner = log-slope while
+ * the excess falls 0.6 -> 0.2, k_edge = log-slope while it falls 0.2 -> 0.03; steepening = k_edge / k_inner.
+ * Natural discs fade at a steady or slowing rate (user refs 0.94-1.48, prep data 0.46-0.53); a lifted plateau that
+ * ends in a cliff speeds up at the end (v6 2.35, v7 4.59; v5 1.50, v3 0.96).
+ */
+export function edgeSteepening(prof, rDet) {
+  if (!prof?.profiles?.length) return { evaluated: false, reason: 'no profiles' };
+  const nb = prof.profiles[0].length, rr = [...Array(nb).keys()].map(k => (prof.r0 + prof.bin * (k + 0.5)) / rDet);
+  const med = (a) => { const v = a.filter(x => x != null).sort((p, q) => p - q), h = v.length >> 1; return v.length ? (v.length % 2 ? v[h] : 0.5 * (v[h - 1] + v[h])) : null; };
+  const p = rr.map((r, k) => ({ r, v: med(prof.profiles.map(s => s[k])) })).filter(o => o.v != null);
+  const sky = med(p.filter(o => o.r > 1 + 300 / rDet).map(o => o.v)), ref = med(p.filter(o => o.r > 0.55 && o.r < 0.65).map(o => o.v));
+  if (sky == null || ref == null || !(ref - sky > 0)) return { evaluated: false, reason: 'no far sky or no glow at 0.6 rDet' };
+  let e = p.map(o => ({ r: o.r, v: (o.v - sky) / (ref - sky) }));
+  e = e.slice(1, -1).map((o, i) => ({ r: o.r, v: (e[i].v + e[i + 1].v + e[i + 2].v) / 3 }));
+  const cross = (t) => { for (let i = 1; i < e.length; i++) if (e[i].r > 0.6 && e[i].v < t) { const a = e[i - 1], b = e[i]; return a.v !== b.v ? a.r + (b.r - a.r) * (a.v - t) / (a.v - b.v) : b.r; } return null; };
+  const r60 = cross(0.6), r20 = cross(0.2), r03 = cross(0.03);
+  if (r60 == null || r20 == null || r03 == null || !(r20 > r60) || !(r03 > r20)) return { evaluated: false, reason: 'glow does not fall to the sky inside the measured range' };
+  const kIn = Math.log(3) / (r20 - r60), kEdge = Math.log(0.2 / 0.03) / (r03 - r20);
+  return { evaluated: true, steepening: kEdge / kIn, r60, r20, r03, tail: r03 - r20 };
+}
+
+/**
+ * Arm/gap DEPTH (2026-11-08, M74 "blue-grey haze between the arms"; calibrated on 5 user reference galaxies).
+ * Per annulus 0.30-0.85 x rDet (step 0.05): smoothed luminance (sigma 2u, u = rDet/300, star pixels skipped),
+ * depth = (p80 - p20) / (p80 - sky). Median over annuli. Refs 0.38-0.88 (the M74 reference 0.63); M74 v3 0.45,
+ * v5 0.39, v6 0.34, v7 0.31 — each version filled the gaps more. Gap HUE was inside the reference range (not gated),
+ * and knot hue is Ha-limited (refs have Ha; user: no H data yet), so neither is gated.
+ */
+export async function measureArmGapDepth(ctx, viewId, inv) {
+  const [cx, cy] = inv.centre, rd = inv.rDet, u = Math.max(0.7, rd / 300);
+  const res = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measureArmGapDepth: view not found: ${viewId}');
+    var img = w.mainView.image, W = img.width, H = img.height, n = W * H, i, R = new Rect(0,0,W,H);
+    var L = new Float32Array(n);
+    if (img.isColor) { var c = new Float32Array(n); img.getSamples(c, R, 0); for (i = 0; i < n; i++) L[i] = 0.2126 * c[i];
+      img.getSamples(c, R, 1); for (i = 0; i < n; i++) L[i] += 0.7152 * c[i]; img.getSamples(c, R, 2); for (i = 0; i < n; i++) L[i] += 0.0722 * c[i]; }
+    else img.getSamples(L, R, 0);
+    ${EMPTY_PJSR(Math.max(24, 18 * u))}
+    function blurred(sig, id) { var bw = new ImageWindow(W, H, 1, 32, true, false, id); bw.mainView.beginProcess(); bw.mainView.image.setSamples(L, R, 0); bw.mainView.endProcess();
+      var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = sig; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(bw.mainView);
+      var o = new Float32Array(n); bw.mainView.image.getSamples(o, R, 0); bw.forceClose(); return o; }
+    var u = ${u}, gs = blurred(Math.max(0.7, u / 2), 'AG_S'), g = blurred(2 * u, 'AG_2'), gw = blurred(Math.max(8, 6 * u), 'AG_W');
+    var cx = ${cx}, cy = ${cy}, rd = ${rd}, NA = 11, ann = [], sk = [], x, y, k;
+    for (k = 0; k < NA; k++) ann.push([]);
+    for (y = 0; y < H; y += 2) for (x = 0; x < W; x += 2) { var r = Math.sqrt((x-cx)*(x-cx)+(y-cy)*(y-cy)) / rd; i = y*W + x;
+      if (gs[i] - gw[i] > 0.08 || isEmpty(i)) continue;   // star / bright compact source
+      if (r >= 1.15 && r < 1.3) { sk.push(g[i]); continue; }
+      if (r < 0.30 || r >= 0.85) continue; k = Math.floor((r - 0.30) / 0.05); if (k >= 0 && k < NA) ann[k].push(g[i]); }
+    function q(a, f) { return a[Math.min(a.length - 1, Math.floor(f * a.length))]; }
+    sk.sort(function(a,b){return a-b;});
+    var sky = sk.length > 200 ? q(sk, 0.5) : null;
+    if (sky === null) { var s2 = []; for (y = 0; y < H; y += 4) for (x = 0; x < W; x += 4) { var d = Math.sqrt((x-cx)*(x-cx)+(y-cy)*(y-cy)); if (d >= ${inv.zones.sky[0]} && d < ${inv.zones.sky[1]} && !isEmpty(y*W+x)) s2.push(g[y*W+x]); } s2.sort(function(a,b){return a-b;}); sky = s2.length ? q(s2, 0.5) : 0; }
+    var depths = [];
+    for (k = 0; k < NA; k++) { var a = ann[k]; if (a.length < 200) continue; a.sort(function(p,qq){return p-qq;}); var hi = q(a, 0.8), lo = q(a, 0.2); depths.push((hi - lo) / Math.max(hi - sky, 1e-3)); }
+    var ds = depths.slice().sort(function(a,b){return a-b;});
+    JSON.stringify({ depth: ds.length ? (ds.length % 2 ? ds[ds.length >> 1] : 0.5 * (ds[(ds.length >> 1) - 1] + ds[ds.length >> 1])) : null, min: ds.length ? ds[0] : null, perAnnulus: depths, sky: sky });`, { timeout: 900000 });
+  if (res.status === 'error') throw new Error('measureArmGapDepth: ' + (res.error?.message || 'PJSR error'));
+  return JSON.parse(res.outputs?.consoleOutput || '{}');
+}
+
+/**
+ * Ha KNOTS (2026-11-08, M101 friend data: pink HII knots visible on 2026-10-30, gone today after a "cool hue shift"
+ * + chroma/brightness push; the reference-palette gate did not see it: knots are a tiny pixel fraction).
+ * On the prep starless Ha (same geometry as RGB): band-pass g1 - g8 inside 1.1 x rDet; knot pixels = band-pass
+ * above max(p99.5, 6 x its robust noise). Returns up to maxN [x, y] samples.
+ */
+export async function measureHaKnots(ctx, haViewId, inv, { maxN = 6000 } = {}) {
+  const [cx, cy] = inv.centre, rMax = Math.round(1.1 * inv.rDet);
+  const res = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${haViewId}'); if (w.isNull) throw new Error('measureHaKnots: view not found: ${haViewId}');
+    var img = w.mainView.image, W = img.width, H = img.height, n = W * H, i, R = new Rect(0,0,W,H), L = new Float32Array(n);
+    img.getSamples(L, R, 0);
+    ${EMPTY_PJSR(24)}
+    function blurred(sig, id) { var bw = new ImageWindow(W, H, 1, 32, true, false, id); bw.mainView.beginProcess(); bw.mainView.image.setSamples(L, R, 0); bw.mainView.endProcess();
+      var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = sig; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(bw.mainView);
+      var o = new Float32Array(n); bw.mainView.image.getSamples(o, R, 0); bw.forceClose(); return o; }
+    var g1 = blurred(1, 'HK_1'), g8 = blurred(8, 'HK_8'), cx = ${cx}, cy = ${cy}, rM = ${rMax}, x, y, v = [], idx = [];
+    for (y = 0; y < H; y += 1) for (x = 0; x < W; x += 1) { var dx = x - cx, dy = y - cy; if (dx*dx + dy*dy > rM*rM) continue; i = y*W + x; if (isEmpty(i)) continue; v.push(g1[i] - g8[i]); idx.push(i); }
+    var s = v.slice().sort(function(a,b){return a-b;}), N = s.length, md = s[N >> 1], dv = [];
+    for (i = 0; i < N; i += 7) dv.push(Math.abs(s[i] - md)); dv.sort(function(a,b){return a-b;});
+    var noise = 1.4826 * dv[dv.length >> 1], thr = Math.max(s[Math.floor(0.995 * N)], md + 6 * noise), pts = [];
+    for (i = 0; i < v.length; i++) if (v[i] > thr) pts.push(idx[i]);
+    var step = Math.max(1, Math.ceil(pts.length / ${maxN})), out = [];
+    for (i = 0; i < pts.length; i += step) out.push([pts[i] % W, Math.floor(pts[i] / W)]);
+    JSON.stringify({ W: W, H: H, n: pts.length, thr: thr, noise: noise, pts: out });`, { timeout: 900000 });
+  if (res.status === 'error') throw new Error('measureHaKnots: ' + (res.error?.message || 'PJSR error'));
+  return JSON.parse(res.outputs?.consoleOutput || '{}');
+}
+
+/**
+ * Final-image colour at the prep Ha knots: 3x3-mean RGB -> HSV. pinkFrac = share with hue >= 290 or < 35 deg and
+ * saturation >= 0.10 (pink-red); whiteFrac = share clipped to white (max > 0.92 and sat < 0.10).
+ */
+export async function measureHaKnotColour(ctx, viewId, knots) {
+  if (!knots?.pts?.length) return { evaluated: false, reason: 'no Ha knots' };
+  const res = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measureHaKnotColour: view not found: ${viewId}');
+    var img = w.mainView.image; if (!img.isColor) throw new Error('measureHaKnotColour: needs a colour image');
+    if (img.width !== ${knots.W} || img.height !== ${knots.H}) JSON.stringify({ evaluated: false, reason: 'geometry differs from prep (' + img.width + 'x' + img.height + ' vs ${knots.W}x${knots.H})' });
+    else {
+      var P = ${JSON.stringify(knots.pts)}, pink = 0, white = 0, n = 0, hs = [];
+      for (var k = 0; k < P.length; k++) { var x = P[k][0], y = P[k][1]; if (x < 1 || y < 1 || x >= img.width - 1 || y >= img.height - 1) continue;
+        var r = 0, g = 0, b = 0; for (var dy = -1; dy <= 1; dy++) for (var dx = -1; dx <= 1; dx++) { r += img.sample(x+dx, y+dy, 0); g += img.sample(x+dx, y+dy, 1); b += img.sample(x+dx, y+dy, 2); }
+        r /= 9; g /= 9; b /= 9; var mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn, s = mx > 0 ? d / mx : 0, h = 0;
+        if (d > 1e-6) { if (mx === r) h = 60 * (((g - b) / d) % 6); else if (mx === g) h = 60 * ((b - r) / d + 2); else h = 60 * ((r - g) / d + 4); if (h < 0) h += 360; }
+        n++; if (s >= 0.10 && (h >= 290 || h < 35)) pink++; if (mx > 0.92 && s < 0.10) white++; hs.push(h); }
+      hs.sort(function(a,b){return a-b;});
+      JSON.stringify({ evaluated: true, n: n, pinkFrac: pink / n, whiteFrac: white / n, medHue: hs[hs.length >> 1] });
+    }`, { timeout: 600000 });
+  if (res.status === 'error') throw new Error('measureHaKnotColour: ' + (res.error?.message || 'PJSR error'));
+  return JSON.parse(res.outputs?.consoleOutput || '{}');
 }

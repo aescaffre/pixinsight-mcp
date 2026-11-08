@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import os from 'os';
+import { normalizeWinPathsInCode, piMemoryMB } from '../agents/ops/platform.mjs';
 
 const home = os.homedir();
 const cmdDir = path.join(home, '.pixinsight-mcp/bridge/commands');
@@ -11,6 +12,7 @@ const resDir = path.join(home, '.pixinsight-mcp/bridge/results');
 function send(tool, proc, params, opts) {
   return new Promise((resolve, reject) => {
     const id = crypto.randomUUID();
+    if (params && typeof params.code === 'string') params = { ...params, code: normalizeWinPathsInCode(params.code) };
     const cmd = {
       id, timestamp: new Date().toISOString(), tool, process: proc,
       parameters: params,
@@ -128,11 +130,10 @@ async function main() {
     }
 
     case 'mem': {
-      // Check PI memory via ps
-      const { execSync } = await import('child_process');
-      const out = execSync("ps aux | grep 'PixInsight.app/Contents/MacOS/PixInsight' | grep -v grep | awk '{print $6}'").toString().trim();
-      const kb = parseInt(out);
-      const gb = (kb / 1024 / 1024).toFixed(2);
+      // PixInsight resident memory (macOS/Linux: ps; Windows: tasklist)
+      const mb = piMemoryMB();
+      if (mb == null) { console.log('PixInsight memory: not measurable on this platform'); break; }
+      const kb = mb * 1024, gb = (mb / 1024).toFixed(2);
       console.log(`PixInsight memory: ${gb} GB (${kb} KB)`);
       if (kb > 18 * 1024 * 1024) console.log('WARNING: Above 18GB threshold!');
       break;

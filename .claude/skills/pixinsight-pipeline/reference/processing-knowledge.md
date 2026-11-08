@@ -244,3 +244,149 @@ The old "global unmasked inverted HDRMT (4 layers)" mandate for planetary nebula
 
 ## Borrowed / externally integrated masters (2026-10-29)
 Config flags in `files`: `pixelScale` (arcsec/px seed for the plate-solve fallback; else derived from FOCALLEN/XPIXSZ), `forceAlign: true` (StarAlignment of every channel to R even when dimensions match — prep otherwise skips alignment and separately integrated channels keep red/cyan star fringes), `distortionCorrection: true` (StarAlignment distortion model). Prep's SPCC now runs with generateGraphs/StarMaps/TextFiles=false: the graph WebView failed on a 104 MP image and failed the whole process.
+
+## Galaxy grain at 1:1 (2026-10-31, Abell2151 96508fc1)
+- Run passed every gate yet the user rejected it: galaxy halos ~2x grainier than the approved v9 output when zoomed.
+- Causes: noisy L injected repeatedly (lrgb_combine + inject_luminance 0.20-0.25) and LHE/MSE run after the last NXT. A post-hoc NXT only removed ~8% of it.
+- Rules: NXT goes after every local-contrast/sharpening step; if L is used, denoise L first and inject at <=0.15.
+- `compare_to_reference` reports `grain_halo_ratio` / `grain_sky_ratio` (both images resampled to the same width); gate with `referenceGates.max_grain_ratio` (1.25 was used).
+
+## Prep signal inventory + data-anchored galaxy gates (2026-11-07, M74)
+- **Prep signal inventory** (`measureSignalInventory`, deterministic-prep, after the detail baseline). It runs on the deepest starless view (prep L, else RGB). It records into `prep-metrics.json` `inventory` and `brief._inventory`:
+  - the subject centre;
+  - the detection radius `rDet`: the last 25 px annulus whose arm-scale structure (p90-p10 of the sigma-8 luminance) stands >= 3 sigma above the sky's own texture;
+  - the zones: core 0-0.08 rDet, disc 0.35-0.55, outer 0.8-1.0, sky +150..+250;
+  - the prep core/disc index;
+  - a hard-stretched preview (`diagnostics/inventory/`), scaled so the outer zone's p90 lands near 0.45. The overview and centre crop are attached to the agent's first message, with an "inventory" block of text.
+- **Do not use the annulus median level for detection.** Averaged over thousands of pixels, any residual gradient reads as >5 sigma (M74: level said 1150 px, structure 750 px; the hand measurement on the linear master was about 750).
+- **Finish gates** (galaxy_spiral profile):
+  - `outer_arms.min_net_contrast` 0.04: outer-zone (p90-p10) minus sky-zone spread. M74 v3 0.018 (user: arms not visible), v4 0.080.
+  - `core_preservation.min_ratio_vs_prep` 0.75: final core/disc index divided by the prep index. v3 0.86, v4 0.58 (whole disc lifted, flat and hazy).
+  - Both are calibrated on M74 only, because the approved NGC4490/NGC3628 runs predate the inventory. Back-test when the next approved galaxy has a prep inventory.
+- **The fine/blob and mottle gates now use the PREP disc radius** (`baselineDetail.scale.rDisc`). Lifting faint outskirts grows the final image's own radius and coarsens the bands. The change was small on M74 (v4 1.27 -> 1.24, still passing), so v4's softness is NOT captured by fine/blob. It shows up as a core/disc collapse.
+- **Lesson:** a single "outer arms visible" gate makes the agent lift the whole disc. Pair it with a core-preservation gate.
+
+## Operation -> metric impact matrix (2026-11-07, perturbation study)
+- **Method:** one operation applied to M74 v3 final, with every metric measured. One image, one strength per operation: the signs are reliable, the magnitudes approximate. Script: session scratchpad `impact.mjs`.
+
+| op | sat | fine/blob | mottle | core | outer | sky | separation | grain | chroma noise |
+|---|---|---|---|---|---|---|---|---|---|
+| K midtone lift | -9 | +4 | -9 | -12 | +33 | +37 | -4 | +35 | +34 |
+| K S-curve | +20 | -2 | +9 | +15 | -15 | -22 | +18 | -19 | -14 |
+| L masked outer lift | -17 | +5 | +2 | 0 | +230 | 0 | -9 | +2 | +12 |
+| S or c saturation | +33 | 0 | 0 | -1 | 0 | 0 | 0 | 0 | +35 |
+| NXT 0.30 | -1 | -2 | 0 | 0 | +1 | 0 | -1 | -10 | -31 |
+| chroma smooth | -5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | -81 |
+| USM | 0 | +9 | +3 | 0 | -1 | 0 | +7 | +50 | +4 |
+| LHE r64 | -7 | +3 | +12 | -9 | +30 | +7 | -1 | +18 | +2 |
+| HDRMT 5L | +11 | +5 | +57 | -24 | -4 | 0 | -12 | +14 | 0 |
+| sky black point | +9 | 0 | 0 | 0 | +2 | -22 | +21 | +2 | +2 |
+
+- **Order by blast radius:**
+  1. global tone (7-8 metrics);
+  2. local contrast (LHE/HDRMT, 5-6 metrics; HDRMT is the main source of mottle and core loss);
+  3. masked outer lift (targeted, but it lowers saturation by 17%);
+  4. sharpen and NR, as one stage (USM +50% grain);
+  5. colour (S/c, chroma smooth, SCNR touch only saturation and chroma noise).
+- **The saturation floor must be judged AFTER the tonal and local-contrast stages,** which move it by -17% to +20%. That explains v4's 9 UNDER-SATURATED failures.
+- **Separation (tonal) is cheaply gamed by the sky black point** (+21%, sky -22%). Keep the sky-level gate next to it.
+
+## Staged checkpoints + v5 loophole gates (2026-11-07)
+- **`stage_checkpoint` tool** (tools.mjs `METRIC_STAGES`/`measureStage`), for tone -> local_contrast -> detail_noise -> colour:
+  - It measures one stage's gates and records them in `brief._stageLocks`.
+  - A finish failure on a gate that passed at its checkpoint gets a `[DRIFT: ...]` suffix naming the stage.
+  - The order is advisory (agentic, not a hard-coded workflow). The prompt carries a STAGED METRIC ORDER section.
+- **New galaxy_spiral gates.** Each was back-tested on the user references and the approved NGC4490/NGC3628:
+  - `core_preservation.min_core_structure` 0.06: std(g1-g6)/level within 0.2 rDet. Refs 0.062-0.089, NGC4490 0.127, NGC3628 0.065, M74 v3 0.065; v5 0.053 (bright, featureless) fails.
+  - `saturation.min_arm_p50` 0.10: arms = pixels above the 60th luminance percentile of their annulus. Refs 0.10-0.14, NGC4490 0.356, NGC3628 0.208. It replaces the subject-median floor when an inventory exists, because v5 met that floor by tinting the inter-arm gaps.
+  - Inter-arm gap saturation in the refs is 0.06-0.13, so the bluish inter-arm haze is a HUE problem, not saturation. Not gated.
+  - `texture_scale.min_ratio_vs_prep` 1.0: the final fine/blob must not fall below the prep L ratio. M74 v3 1.14, v4 0.96, v5 0.98.
+  - The `max_fine_blob` 1.40 cap was removed. It came from Ha references, punished v3's knots (which the user liked), and pushed v4/v5 to soften.
+- **Prompt size ratchet raised to 44100** (documented in the test).
+
+## Envelope clip gate + gradient on stretched data (2026-11-08, M74 v6)
+- **v6 (a47c7078) result:** core structure improved (0.072 vs v5 0.053) and detail is x1.04 of prep, but critic 6.3 (v5 7.0).
+  - A one-sided "mask-like edge": the right sector of the outer glow is x0.004 of what prep L holds there. v4 had it at 0.11 and v5 at 0.06.
+  - The HII knots are posterised flat periwinkle patches. The agent built a hand-made multi-scale LRGB PixelMath compositor with hard-coded sky constants and 100-250 px colour blurs.
+- **Root cause of the edge:** the main agent ran `run_gradient_correction` on the STRETCHED L (`L_G`, `L_SG`) with the galaxy in frame, and the model absorbed the faint envelope on one side.
+  - The agent did it because the stretch amplifies a 0.34% linear sky tilt (sector spread / sky on the linear L) into a visible ~5% gradient.
+  - The gradient agent judged L "already flat" from absolute corner stddev (3.2e-5, about 1.3% of the 0.0025 linear sky).
+  - ABE degree 1 on linear L barely changes the envelope but only partly removes the tilt.
+- **New measurements:**
+  - `measureEnvelopeSectors` (8 directions, glow excess in [0.9, 1.05] rDet over that sector's own sky ring) and `compareEnvelopeSectors`, final vs prep. The prep values are stored in `inventory.prepEnvelope`.
+  - galaxy_spiral `envelope.min_sector_ratio` 0.3, evaluated only when the median glow is >= 0.005.
+  - GC/ABE/per-channel-ABE on a stretched view now return an immediate envelope-by-direction verdict.
+- **Not yet addressed:**
+  - A relative (sky-normalised) L flatness criterion for the gradient agent.
+  - A metric for posterised/flat knot colour.
+  - The agent never calls `stage_checkpoint` (0 calls in v6).
+
+### Linear L sky tilt must be judged in STRETCHED units (2026-11-08, M74 v4-v6 "brown one-sided edge")
+- measure_color_gradient refuses mono views and measure_uniformity is an absolute 4-corner stddev: the M74
+  linear L had a plane tilt of 1.8 % of sky across the full frame (corner stddev 3.2e-5 → "flat"), which the
+  auto-stretch (target 0.10) turns into a 0.043 ramp (FLAT < 0.008, VISIBLE > 0.015).
+- Consequence: the main agent saw the ramp after the stretch, ran GradientCorrection on the stretched L with the
+  galaxy in frame, the model ate the envelope on one side; the RGB colour stayed there without luminance → muddy
+  brown, "mask-like edge" (envelope_clip gate: right sector ×0.004 of prep).
+- Fix: `measure_lum_tilt` (robust sky-plane fit on a 12x8 grid of cell medians, subject cells rejected as positive
+  residuals, plane corners pushed through the auto-stretch MTF) and `subtract_sky_plane` (zero-mean 3-parameter
+  plane, linear only; a plane cannot follow the subject). Gradient agent prompt v3 uses them for L. A pipeline
+  safety net after the gradient agent subtracts the plane if ppStretched > 0.015 remains (trace event lum_tilt_autofix).
+  On the cached M74 L: 0.0435 → 0.00006.
+
+### Automatic stage checkpoints (2026-11-08)
+- The agent never called stage_checkpoint (v6: 0 calls). Now the first main-agent call of a later-stage tool
+  (LHE/HDRMT/MSE → local_contrast, NXT → detail_noise, S-curve/chroma_smooth/SCNR → colour, star blend → stars)
+  on the working colour image measures every earlier unrecorded stage BEFORE the op and appends the report.
+  ~35 s per stage; 108 s for three stages on M74 3000x2000.
+
+### Cooked core and mask-shaped glow edge (2026-11-08, M74 v7; calibrated on 5 user reference JPEGs)
+- Calibrate texture gates on the USER'S REFERENCE images (user: "work out on the jpegs, that's much better").
+  Scales are fractions of rDet so JPEGs of any size compare; measureSignalInventory runs on a JPEG for centre/rDet
+  (fails on multi-galaxy fields: the Leo Triplet picked a star).
+- COOKED CORE = inverted core texture spectrum. measureCoreSpectrum: std(g_u-g_2u)/std(g_4u-g_8u), r<0.22 rDet,
+  u=rDet/300. Natural cores have more structure at large scales: refs 0.68-0.86, NGC4490 0.68, v3 0.81, v5 1.03,
+  v6 1.12; v7 1.69 (cells/worms). Gate core_cooked max 1.2. Blind metrics (all tried): trough depth p2/p5,
+  coreWeber, structure-tensor coherence, kurtosis/sparsity, spot density, centre/ring concentration (the M74
+  reference itself has a flat core, 1.12 vs v7 1.10), old ringing/detail-ratio/struct-halo checks.
+- MASK-LIKE EDGE = the glow fades faster at its end than inside. edgeSteepening on measureSectorProfiles:
+  sector-median profile, excess over far sky normalised at 0.6 rDet; log-slope 0.2->0.03 over 0.6->0.2.
+  Refs 0.94-1.48, prep 0.46-0.53, v3 0.96, v5 1.50, v6 2.35, v7 4.59. Gate edge_softness max 2.5 (median of 8
+  sectors must be a TRUE median: upper-middle element moved refs by up to +1.1). Fix = feather the outer lift
+  past rDet (large mask blur / radial taper), never a plateau.
+- The core_structure FLOOR (0.06) alone rewarded over-driving local contrast (v7 sat at 0.059 then cooked it);
+  the spectrum cap now brackets it.
+
+### Inter-arm haze = filled gaps, not hue; knot hue is Ha-limited (2026-11-08, M74; 5 user reference galaxies)
+- Knot hue (bright compact disc features, sat > 0.10): our M74 versions are ~95 % BLUE (hue ~220°), 0-4 % violet:
+  not lilac. Refs: 10-78 % pink-red, from their Ha masters. Pink knots need Ha data (user has none yet): NOT gated.
+- Gap colour (p<=35 % of each annulus): our sat 0.04-0.08, slightly blue; refs 0.006-0.28 sat, neutral to bluer: inside range, NOT gated.
+- Gap DEPTH separates: measureArmGapDepth median (p80-p20)/(p80-sky) over annuli 0.30-0.85 rDet (sigma 2u,
+  star pixels skipped). Refs 0.38-0.88 (M74 ref 0.63), v3 0.45, v5 0.39, v6 0.33, v7 0.31 (each version filled the
+  gaps more). Gate arm_gap_depth min 0.36 (tone stage).
+
+### MultiscaleAdaptiveStretch A/B on M74 prep (2026-11-08)
+- MAS (installed native process; ids targetBackground, aggressiveness, dynamicRangeCompression, contrastRecovery,
+  scaleSeparation px 8-1024, contrastRecoveryIntensity, backgroundROI*, saturation*) runs from PJSR; prep option
+  stretch.method "mas" (+ stretch.mas overrides), auto darkest-128px-block background ROI.
+- At aggressiveness 0.7 / DRC 0.4 / contrast recovery 256 px vs SetiStretch: core structure L -34 %, RGB -28 %;
+  core/disc index 2.32 vs 2.89 (flatter core); L gap depth 0.44 vs 0.47; edge/spectrum both natural. Visually the
+  L core is flatter/hazier. DRC squeezes the galaxy core toward the disc: good for M42-type HDR, bad when the core
+  must stay defined. Default stays Seti; untested: DRC 0.1-0.2, scaleSeparation 64.
+- NXT frequency/colour separation ids (from the RC-Astro binary): enableFrequencySeparation, denoiseLf,
+  frequencyScale, enableColorSeparation, denoiseColor, denoiseLfColor — exposed in run_nxt.
+
+### M101 friend-data test (2026-11-08): what the M74-tuned pipeline missed
+- EMPTY FOOTPRINT: drizzled L had zero corners. (1) the L tilt read 31 % of sky (corners = 0) and the post-gradient
+  safety net subtracted a plane that CREATED a 14 % ramp, overriding a gradient agent that had correctly declined;
+  (2) the signal inventory read sky = 0, so rDet = frame edge (2325 px instead of 1125) and the outer-zone / edge /
+  arm-saturation gates measured empty sky. Fix: measureLumTilt drops empty cells (refuses < 60 % valid / < 12 sky);
+  the net respects tool=none; all zone/sky/profile/gap measurements skip pixels within ~3 sigma of an empty pixel
+  (EMPTY_PJSR helper); inventory sky blocks exclude zero blocks.
+- FALSE REPAIR: check_saturation's static line "finish gate FAILS above 0.85" matched /FAIL/ -> every saturation
+  check opened a repair; Ha injection was walked down 0.4 -> 0.3. Reworded + \bFAIL\b.
+- HA KNOTS LOST: a global "cool hue shift" (chasing the reference's blue-violet palette) + chroma/brightness push
+  turned the pink HII knots blue-white; the palette gate could not see it (tiny pixel share). New gate ha_knots:
+  prep finds HII knots in the starless Ha (g1-g8 band-pass > max(p99.5, 6 sigma) within 1.1 rDet); finish measures
+  the pink-red share (hue >= 290 or < 35, sat >= 0.10) at those pixels. Old results 0.079/0.107, variant_12 0.005,
+  prep RGB without Ha 0.015 -> min 0.04. Armed only when Ha data exists.

@@ -312,3 +312,41 @@ export function ghsCode(ctx, viewId, orgD, B, SP, LP, HP) {
     P.executeOn(ImageWindow.windowById('${viewId}').mainView);
   `;
 }
+
+/**
+ * MultiscaleAdaptiveStretch (PI 1.9.x native, installed: bin/MultiscaleAdaptiveStretch-pxm.dylib). Parameter ids
+ * read from the binary and the official doc (doc/tools/MultiscaleAdaptiveStretch): targetBackground [0,0.5] 0.15,
+ * aggressiveness [0,1] 0.7 (shadow clip), dynamicRangeCompression [0,1] 0.4, contrastRecovery (bool),
+ * scaleSeparation [8,1024] px (dyadic), contrastRecoveryIntensity [0,1] 1.0, backgroundROIEnabled/X0/Y0/Width/Height,
+ * saturationEnabled/Amount/Boost/LightnessMask. Input must be LINEAR (and colour-calibrated for RGB).
+ * Background ROI: when not given, the darkest 128x128 block of a coarse grid (star-robust medians).
+ */
+export async function masStretch(ctx, viewId, o = {}) {
+  const p = {
+    targetBackground: o.targetBackground ?? 0.15, aggressiveness: o.aggressiveness ?? 0.7,
+    dynamicRangeCompression: o.dynamicRangeCompression ?? 0.4, contrastRecovery: o.contrastRecovery ?? true,
+    scaleSeparation: o.scaleSeparation ?? 1024, contrastRecoveryIntensity: o.contrastRecoveryIntensity ?? 1.0,
+    saturationEnabled: !!o.saturationEnabled, saturationAmount: o.saturationAmount ?? 0.6, saturationBoost: o.saturationBoost ?? 0.5,
+  };
+  const roi = o.roi || null;
+  const r = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('masStretch: view not found: ${viewId}');
+    var img = w.mainView.image, W = img.width, H = img.height, B = 128, roi = ${JSON.stringify(roi)};
+    if (!roi) { var best = null, bm = 1e9;
+      for (var y = B; y + B < H - B; y += B) for (var x = B; x + B < W - B; x += B) {
+        img.selectedRect = new Rect(x, y, x + B, y + B); var m = 0, nc = img.isColor ? 3 : 1;
+        for (var c = 0; c < nc; c++) { img.selectedChannel = c; m += img.median(); } img.resetChannelSelection();
+        if (m < bm) { bm = m; best = [x, y, B, B]; } }
+      img.resetSelections(); roi = best; }
+    var P = new MultiscaleAdaptiveStretch;
+    P.targetBackground = ${p.targetBackground}; P.aggressiveness = ${p.aggressiveness}; P.dynamicRangeCompression = ${p.dynamicRangeCompression};
+    P.contrastRecovery = ${p.contrastRecovery}; P.scaleSeparation = ${p.scaleSeparation}; P.contrastRecoveryIntensity = ${p.contrastRecoveryIntensity};
+    P.backgroundROIEnabled = true; P.backgroundROIX0 = roi[0]; P.backgroundROIY0 = roi[1]; P.backgroundROIWidth = roi[2]; P.backgroundROIHeight = roi[3];
+    P.saturationEnabled = ${p.saturationEnabled}; P.saturationAmount = ${p.saturationAmount}; P.saturationBoost = ${p.saturationBoost};
+    if (!P.executeOn(w.mainView)) throw new Error('MultiscaleAdaptiveStretch execution failed');
+    JSON.stringify({ roi: roi, median: w.mainView.image.median() });`, { timeout: 1800000 });
+  if (r.status === 'error') throw new Error('masStretch: ' + (r.error?.message || 'PJSR error'));
+  const out = JSON.parse(r.outputs?.consoleOutput?.trim() || '{}');
+  ctx.log?.(`    MAS: ROI ${JSON.stringify(out.roi)} -> median ${out.median?.toFixed(4)}`);
+  return { ...out, params: p };
+}

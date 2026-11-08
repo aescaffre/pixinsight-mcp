@@ -82,6 +82,10 @@ export const DEFAULT_CONFIG: BridgeConfig = {
   pollIntervalMs: 200,
   defaultTimeoutMs: 300_000,       // 5 minutes
   extendedTimeoutMs: 3_600_000,    // 1 hour
-  pixinsightPath: "/Applications/PixInsight/PixInsight.app/Contents/MacOS/PixInsight",
+  // PIXINSIGHT_BIN overrides; otherwise the default install location of each platform.
+  pixinsightPath: process.env.PIXINSIGHT_BIN || (process.platform === "win32"
+    ? "C:/Program Files/PixInsight/bin/PixInsight.exe"
+    : process.platform === "linux" ? "/opt/PixInsight/bin/PixInsight"
+    : "/Applications/PixInsight/PixInsight.app/Contents/MacOS/PixInsight"),
   automationMode: true,
 };

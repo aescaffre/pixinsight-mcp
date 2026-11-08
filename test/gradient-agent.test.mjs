@@ -28,6 +28,6 @@ test('gradient_agent tool set excludes run_scnr', () => {
 });
 
 test('gradientHash is salted by prompt version', () => {
-  assert.equal(GRADIENT_PROMPT_VERSION, 2);
+  assert.equal(GRADIENT_PROMPT_VERSION, 4);
   assert.match(gradientHash({ a: 1 }, { median: 1 }), /^[0-9a-f]{40}$/);
 });

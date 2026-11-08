@@ -22,7 +22,7 @@ if (fs.existsSync(envPath)) {
 import { execSync } from 'child_process';
 
 import { createBridgeContext } from '../ops/bridge.mjs';
-import { getStats, measureUniformity } from '../ops/stats.mjs';
+import { getStats, measureUniformity, measureLumTilt, subtractSkyPlane } from '../ops/stats.mjs';
 import { ArtifactStore, getBestVariant } from '../artifact-store.mjs';
 import { generateBrief } from '../classifier.mjs';
 import { MaxAgent } from './engine-max.mjs';
@@ -355,6 +355,29 @@ The corrected views MUST stay under these exact IDs. Do NOT stretch, denoise, ru
         fs.appendFileSync(path.join(store.baseDir, 'trace.jsonl'), JSON.stringify({ type: 'run_meta', ts: Date.now(), event: 'gradient_result', result: gm ? gm[0] : null, text: gtext.slice(0, 4000) }) + '\n');
       } catch (e) { console.log(`  gradient-result persist skipped: ${e.message}`); }
       console.log('--- Gradient Agent done — handing flattened linear views to prep phase 2 ---');
+      // Safety net (M74 v4-v6): a linear luminance tilt the agent left in is amplified ~15x by the
+      // stretch, and the main agent then "fixes" it on stretched data, cutting the envelope on one
+      // side. A sky-plane fit (3 parameters, subject cells rejected) cannot remove the subject.
+      // Respect a deliberate agent decision: if its GRADIENT RESULT says it left a view untouched with a reason
+      // (M101 friend crop: zero corners made the reading false), the net must not override it.
+      let gradText = '';
+      try { gradText = fs.readFileSync(path.join(store.baseDir, 'gradient-result.md'), 'utf8'); } catch { /* */ }
+      const agentDeclined = /tool=none/i.test(gradText);
+      for (const vid of [targetName, ...(hasL ? ['FILTER_L'] : [])]) {
+        try {
+          const t = await measureLumTilt(ctx, vid);
+          if (t.error) { console.log(`  Lum tilt ${vid}: ${t.error}`); continue; }
+          console.log(`  Lum tilt ${vid}: ${t.verdict} ppStretched=${t.ppStretched.toFixed(4)} (${(100 * (t.relToSky ?? 0)).toFixed(2)}% of sky, ${t.direction})`);
+          if (t.ppStretched > 0.015 && agentDeclined) {
+            console.log(`  Lum tilt ${vid}: NOT auto-corrected — the gradient agent deliberately applied no correction (tool=none); see gradient-result.md`);
+          } else if (t.ppStretched > 0.015) {
+            await subtractSkyPlane(ctx, vid, t);
+            const t1 = await measureLumTilt(ctx, vid);
+            console.log(`  Lum tilt ${vid}: sky plane subtracted by the pipeline -> ppStretched=${t1.ppStretched?.toFixed(4)} (${t1.verdict})`);
+            fs.appendFileSync(path.join(store.baseDir, 'trace.jsonl'), JSON.stringify({ type: 'run_meta', ts: Date.now(), event: 'lum_tilt_autofix', view: vid, before: t.ppStretched, after: t1.ppStretched }) + '\n');
+          }
+        } catch (e) { console.log(`  Lum tilt check ${vid} skipped: ${e.message}`); }
+      }
 
       const gradFailed = !gradResult || gradResult.exitCode && gradResult.exitCode !== 0 || (gradResult.num_turns ?? gradResult.turns ?? 1) === 0;
       if (gradFailed) {
@@ -378,9 +401,15 @@ The corrected views MUST stay under these exact IDs. Do NOT stretch, denoise, ru
     brief._baselineDetail = prepResult.baselineDetail;
     brief._hasL = !!prepResult.views.l;
     if (opts.baseRun) {
-      try { fs.writeFileSync(path.join(store.baseDir, 'prep-metrics.json'), JSON.stringify({ baselineDetail: prepResult.baselineDetail, baseRun: opts.baseRun }, null, 2)); } catch { /* */ }
+      try { fs.writeFileSync(path.join(store.baseDir, 'prep-metrics.json'), JSON.stringify({ baselineDetail: prepResult.baselineDetail, inventory: prepResult.inventory, baseRun: opts.baseRun }, null, 2)); } catch { /* */ }
     }
   }
+  if (prepResult.inventory) brief._inventory = prepResult.inventory;
+  const inventoryText = (() => {
+    const v = prepResult.inventory; if (!v) return '';
+    const z = v.zones;
+    return `\n### Signal inventory (prep, deepest starless channel \`${v.view}\`, hard-stretched preview attached)\n- ${v.text}\n- Zones (px from the subject centre): core ${z.core[0]}-${z.core[1]}, disc ${z.disc[0]}-${z.disc[1]}, outer ${z.outer[0]}-${z.outer[1]}, sky ${z.sky[0]}-${z.sky[1]}.\n- The finish gates measure these same zones: what the data holds in the OUTER zone must read above the sky, and the core/disc contrast must not collapse relative to prep (lift the outer zone through a mask; never lift the whole disc).\n`;
+  })();
   if (prepResult.narrowband) brief._nbPrep = { linearStarless: prepResult.narrowband.linearStarless || {}, prepParams: prepResult.narrowband.prepParams || {}, prepDir: prepResult.narrowbandPrepDir || path.join(store.baseDir, 'prep') };
   const baselineDetailText = (() => {
     const b = prepResult.baselineDetail;
@@ -448,7 +477,7 @@ ${viewsList}
 - Max: ${(prepResult.stats.rgb?.max || 0).toFixed(4)}
 - Background uniformity: ${(await measureUniformity(ctx, prepResult.views.rgb)).score.toFixed(6)}
 
-${baselineDetailText}
+${baselineDetailText}${inventoryText}
 ${prepResult.views.l ? `### Current L stats:
 - Median: ${prepResult.stats.l?.median?.toFixed(6) || 'N/A'}
 - Max: ${(prepResult.stats.l?.max || 0).toFixed(4)}
@@ -518,6 +547,8 @@ RULES:
     systemPrompt,
     agentName: 'giga_orchestrator',
     maxTurns: mainMaxTurns,
+    // Wall clock scales with the turn budget (~9 s/turn observed; default 120 min cut a 540-turn run short).
+    timeoutMs: Math.max(120, Math.ceil(mainMaxTurns * 15 / 60)) * 60 * 1000,
     model: AGENT_MODELS.giga_orchestrator.model,
     effort: AGENT_MODELS.giga_orchestrator.effort,
     fallbackModel: AGENT_MODELS.giga_orchestrator.fallbackModel,
@@ -527,9 +558,32 @@ RULES:
 
   // Run
   const startTime = Date.now();
-  result = await agent.run(initialText, [...diagPaths, ...lDiagPaths]);
+  const invPaths = (prepResult.inventory?.preview || []).slice(0, 2);   // hard-stretched deepest channel: overview + centre crop
+  result = await agent.run(initialText, [...diagPaths, ...lDiagPaths, ...invPaths]);
   elapsed = Date.now() - startTime;
   recordAgent('giga_orchestrator', result);
+  // Unattended-run nudge (2026-11-08, M74 v8): the agent ended its turn to ASK the user a question at turn 230/540
+  // with no finish; nobody answers in a queued run, so the run fell back to a best-effort export. PixInsight still
+  // holds every view: resume the SAME session (same cwd) and tell it to decide and continue to finish.
+  let usedTurns = result.turnCount || 0;
+  for (let nudge = 1; nudge <= 2; nudge++) {
+    if (result.crashError || result.timedOut || result.maxTurnsHit || store.readFinalSelection()) break;
+    const left = mainMaxTurns - usedTurns;
+    if (left < 40) break;
+    console.log(`\n--- Agent stopped without finish (${usedTurns}/${mainMaxTurns} turns): unattended nudge ${nudge}/2, resuming session ${result.sessionId} ---`);
+    try { fs.appendFileSync(path.join(store.baseDir, 'trace.jsonl'), JSON.stringify({ type: 'run_meta', ts: Date.now(), event: 'unattended_nudge', nudge, usedTurns }) + '\n'); } catch { /* */ }
+    const again = new MaxAgent('giga_orchestrator', {
+      systemPrompt, agentName: 'giga_orchestrator', maxTurns: left,
+      timeoutMs: Math.max(60, Math.ceil(left * 15 / 60)) * 60 * 1000,
+      model: AGENT_MODELS.giga_orchestrator.model, effort: AGENT_MODELS.giga_orchestrator.effort,
+      fallbackModel: AGENT_MODELS.giga_orchestrator.fallbackModel, store, brief,
+      extraArgs: ['--resume', result.sessionId], cwd: agent.cwd,
+    });
+    const t1 = Date.now();
+    result = await again.run(`UNATTENDED RUN: nobody will answer questions — the user is not watching this session. Take the decision yourself: pick the option you recommended (or the most conservative one that keeps the image honest), note the decision in remaining_flaws, and continue the plan through to finish. ${left} turns remain. Do not end your turn without calling finish.`);
+    elapsed += Date.now() - t1; usedTurns += result.turnCount || 0;
+    recordAgent('giga_orchestrator', result);
+  }
   }
 
   console.log(`\n--- GIGA Agent completed in ${Math.round(elapsed / 1000)}s ---`);

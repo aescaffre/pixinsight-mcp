@@ -142,7 +142,7 @@ const renderConfig = (f) => {
   return { brief, cfg: c, prompt: buildGigaOrchestratorPrompt(brief, c) };
 };
 // Ratchet: the measured maximum after WI-09 (M27_HaLRGB 41507 chars). Lower it when the prompt shrinks; never raise it silently.
-const PROMPT_CHAR_RATCHET = 42250; // 2026-10-29: +~190 chars for the two user-approved gate rows (background_floor, star_retention); // WI-22: +55 chars for the post-stretch scoping of the per-channel prohibition; WI-23: +~220 chars BXT double-sharpen warning (broadband)
+const PROMPT_CHAR_RATCHET = 44300; // 2026-11-08: +~170 chars UNATTENDED rule (v8 stopped to ask a question at turn 230/540); 2026-11-07: +~1.1k STAGED METRIC ORDER section (perturbation-study ordering) and the galaxy_spiral rows (outer_arms, core_preservation, core_structure, arm saturation, detail vs prep); 2026-10-29: +~190 chars for the two user-approved gate rows (background_floor, star_retention); // WI-22: +55 chars for the post-stretch scoping of the per-channel prohibition; WI-23: +~220 chars BXT double-sharpen warning (broadband)
 const BANNED = [/metrics lie/i, /Trust your eyes/i, /FEEL something/i, /Would I be proud/i, /Visual assessment OVERRIDES/i, /KNOWN BUG/, /Previous failures/, /\bv\d+ (had|showed|failure)/, /\bPhase \d/i, /LRGB COMBINE IS NOT OPTIONAL/, /GLOBAL inverted HDRMT/];
 
 for (const f of CONFIG_FILES) {
@@ -271,7 +271,7 @@ test('giga-run wrap-up: critical summary first, no celebratory banner, diagnosti
   assert.ok(!src.includes('GIGA Processing complete!'));
   assert.ok(src.includes('Run finished — review the flaws above; final judgment is yours.'));
   assert.ok(src.indexOf('console.log(criticalBlock)') < src.indexOf('Run finished'));
-  assert.ok(src.includes('agent.run(initialText, [...diagPaths, ...lDiagPaths])'));
+  assert.ok(src.includes('agent.run(initialText, [...diagPaths, ...lDiagPaths, ...invPaths])'));
   assert.ok(!/buildImageMessage/.test(src));
   assert.ok(src.includes('Read the overview and corner crop before branching'));
   assert.ok(src.includes('Finish Gate 3e will reject greyed/crushed dust'));
@@ -368,4 +368,35 @@ test('memory: narrowband recall drops broadband-stamped universal entries and ad
   assert.ok(rec.universal.some(x => x.title === 'NBRULE'));
   assert.ok(rec.summary.startsWith('NOTE: STARLESS NARROWBAND run'));
   assert.ok(mem.recallForBrief(bbBrief).universal.some(x => x.title === 'BBRULE-star blend unlock'));
+});
+
+test('narrowband remnant: haze compressed, not lifted; other palette classes keep the lift', () => {
+  const nb = (cls, name) => {
+    const f = fixture(cls, 'vivid', 'HOO');
+    f.dataDescription.narrowband = true;
+    f.processingProfile = profileFor(cls, true, 'HOO');
+    f.target.name = name;
+    return buildGigaOrchestratorPrompt(f, { files: { Ha: 'h.xisf', O: 'o.xisf', targetName: name } });
+  };
+  const snr = nb('supernova_remnant', 'NGC6992');
+  assert.ok(snr.includes('compress_outer_haze (strength 0.75)'));
+  assert.ok(!snr.includes('on a clone, lift_faint_halo'));
+  const em = nb('emission_nebula', 'NGC281');
+  assert.ok(em.includes('on a clone, lift_faint_halo'));
+  assert.ok(!em.includes('compress_outer_haze'));
+});
+
+test('lift_faint_halo refuses a no-lift class without touching PixInsight', async () => {
+  const t = tools.TOOL_CATALOG.lift_faint_halo;
+  const r = await t.handler(null, null, { processingProfile: profileFor('supernova_remnant', true, 'HOO') }, { view_id: 'V' });
+  assert.match(r.text, /refused/);
+  assert.ok(tools.TOOL_CATALOG.compress_outer_haze);
+});
+
+test('centerCropBox: centred pixel box, clamped, rejects a crop larger than the image', async () => {
+  const { centerCropBox } = await import(path.join(ROOT, 'agents/llm/deterministic-prep.mjs'));
+  assert.deepEqual(centerCropBox(9508, 6291, { width: 4800, height: 3200 }).x0, 2354);
+  assert.equal(centerCropBox(100, 100, { width: 40, height: 40, cx: 5, cy: 95 }).x0, 0);
+  assert.equal(centerCropBox(100, 100, { width: 40, height: 40, cx: 5, cy: 95 }).y0, 60);
+  assert.equal(centerCropBox(100, 100, { width: 200, height: 40 }), null);
 });

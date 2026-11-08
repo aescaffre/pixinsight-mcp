@@ -1658,7 +1658,8 @@ export async function checkStarLayerIntegrity(ctx, viewId) {
       clipped_fraction_995: clippedFrac995,
       color_diversity: colorDiv,
       bright_star_chroma: brightStarChroma,
-      nonzero_pixel_count: nonzeroCount
+      nonzero_pixel_count: nonzeroCount,
+      sampled_pixel_count: Math.ceil(img.width / step) * Math.ceil(img.height / step)
     });
   `);
 
@@ -1710,6 +1711,7 @@ export async function checkStarLayerIntegrity(ctx, viewId) {
     color_diversity: data.color_diversity,
     bright_star_chroma: data.bright_star_chroma,
     nonzero_pixel_count: data.nonzero_pixel_count,
+    sampled_pixel_count: data.sampled_pixel_count,
     details: details.join(' '),
   };
 }

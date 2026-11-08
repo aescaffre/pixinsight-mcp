@@ -41,7 +41,7 @@ const KNOWN_OBJECTS = {
   'M31': 'galaxy_spiral', 'M33': 'galaxy_spiral', 'M51': 'galaxy_spiral',
   'M81': 'galaxy_spiral', 'M82': 'galaxy_spiral', 'M101': 'galaxy_spiral',
   'M104': 'galaxy_spiral', 'M106': 'galaxy_spiral', 'M63': 'galaxy_spiral',
-  'M64': 'galaxy_spiral', 'M66': 'galaxy_spiral', 'M65': 'galaxy_spiral',
+  'M64': 'galaxy_spiral', 'M66': 'galaxy_spiral', 'M65': 'galaxy_spiral', 'M74': 'galaxy_spiral',
   'NGC891': 'galaxy_edge_on', 'NGC4565': 'galaxy_edge_on', 'NGC5907': 'galaxy_edge_on',
   'NGC3628': 'galaxy_spiral', 'NGC2403': 'galaxy_spiral', 'NGC4631': 'galaxy_edge_on',
   'NGC253': 'galaxy_spiral', 'NGC4244': 'galaxy_edge_on', 'NGC4490': 'galaxy_spiral',
@@ -51,8 +51,8 @@ const KNOWN_OBJECTS = {
   'NGC7000': 'emission_nebula', 'NGC6888': 'emission_nebula',
   'NGC2237': 'emission_nebula', 'NGC2244': 'emission_nebula',
   'Rosette': 'emission_nebula', 'Rosetta': 'emission_nebula',
-  'IC1396': 'emission_nebula', 'NGC6992': 'emission_nebula',
-  'NGC6960': 'emission_nebula', 'NGC7380': 'emission_nebula',
+  'IC1396': 'emission_nebula',
+  'NGC7380': 'emission_nebula',
   'NGC281': 'emission_nebula', 'IC1805': 'emission_nebula',
   'IC1848': 'emission_nebula', 'M16': 'emission_nebula',
   'M17': 'emission_nebula', 'M20': 'emission_nebula',
@@ -203,6 +203,19 @@ function applyReferenceGates(profile, rg) {
   return p;
 }
 
+/**
+ * Per-run profile overrides (config.files.profileOverrides, 2026-11-07): one-level-deep merge of
+ * gate blocks (e.g. texture_scale, saturation) calibrated on the user's references for THIS run,
+ * when a class-wide value would reject an older approved image (M74: fine_detail gate from the
+ * user's M101/M83 references; approved NGC4490 RGB scores below it, so it stays out of the profile).
+ */
+function applyProfileOverrides(profile, ov) {
+  if (!ov || typeof ov !== 'object') return profile;
+  const p = JSON.parse(JSON.stringify(profile || {}));
+  for (const [k, v] of Object.entries(ov)) p[k] = (v && typeof v === 'object' && !Array.isArray(v)) ? { ...(p[k] || {}), ...v } : v;
+  return p;
+}
+
 export function generateBrief(config, opts = {}) {
   const targetName = config.files?.targetName || config.name || 'Unknown';
   const classification = opts.classification || classifyFromName(targetName);
@@ -314,6 +327,6 @@ export function generateBrief(config, opts = {}) {
       maxIterationsPerAgent: opts.maxIterationsPerAgent || 8
     },
     softGoals: opts.softGoals || [],
-    processingProfile: applyReferenceGates(buildProfile(classification, isNarrowband), config.files?.referenceGates)
+    processingProfile: applyProfileOverrides(applyReferenceGates(buildProfile(classification, isNarrowband), config.files?.referenceGates), config.files?.profileOverrides)
   };
 }

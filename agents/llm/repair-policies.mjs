@@ -1195,7 +1195,9 @@ export function parseFinishResult(text) {
 export function isFailResult(toolName, text) {
   const t = String(text || '');
   if (toolName === 'finish') return /^FINISH REJECTED/.test(t);
-  if (toolName === 'check_saturation') return /exceeds hard limit|UPSTREAM FIX REQUIRED|FAIL|REJECTED/.test(t);
+  // \bFAIL\b: the static threshold line once read 'finish gate FAILS above 0.85' and every saturation check
+  // after an Ha injection opened a repair (M101 friend crop 2026-11-08).
+  if (toolName === 'check_saturation') return /exceeds hard limit|UPSTREAM FIX REQUIRED|\bFAIL\b|REJECTED/.test(t);
   return /FAIL|REJECTED|COLLAPSED|SUBDUED/.test(t);
 }
 

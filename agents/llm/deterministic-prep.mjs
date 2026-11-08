@@ -14,11 +14,12 @@ import os from 'os';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
 import { getStats, measureUniformity } from '../ops/stats.mjs';
-import { setiStretch } from '../ops/stretch.mjs';
+import { setiStretch, masStretch } from '../ops/stretch.mjs';
+import { measureHaKnots } from '../ops/subject-metrics.mjs';
 import { runGC } from '../ops/gradient.mjs';
 import { createLumMask } from '../ops/masks.mjs';
 import { savePreview } from '../ops/preview.mjs';
-import { measureDetailBaseline } from '../ops/subject-metrics.mjs';
+import { measureDetailBaseline, measureSignalInventory } from '../ops/subject-metrics.mjs';
 import { measureBaselineTexture, recordPsfField } from '../ops/quality-gates.mjs';
 import { cloneImage, closeImage, purgeUndoHistory } from '../ops/image-mgmt.mjs';
 import { detectNarrowbandWorkflow, runNarrowbandPrep } from './narrowband-prep.mjs';
@@ -42,7 +43,7 @@ function computeCacheKey(config, brief) {
   // Hash stretch parameters from processing profile (invalidate when profile changes)
   const pp = brief?.processingProfile;
   if (pp?.stretch) {
-    hash.update(`stretch:${pp.stretch.target_median}:${pp.stretch.headroom}|`);
+    hash.update(`stretch:${pp.stretch.target_median}:${pp.stretch.headroom}:${pp.stretch.method || 'seti'}|`);
   }
   return hash.digest('hex').slice(0, 24);
 }
@@ -224,6 +225,34 @@ async function autoCropViews(ctx, { targetName, hasL, log }) {
     log(`  Cropped ${W}x${H} → ${cropW}x${cropH} (removed ${W-cropW}px W, ${H-cropH}px H)`);
   } else {
     log('  No border detected — full frame kept.');
+  }
+}
+
+/** Pure helper: fractional DynamicCrop box for a pixel crop; null when it does not fit the image. */
+export function centerCropBox(W, H, crop) {
+  const width = Math.round(Number(crop?.width)), height = Math.round(Number(crop?.height));
+  if (!(width > 0) || !(height > 0) || width > W || height > H) return null;
+  const px = Number.isFinite(crop.cx) ? crop.cx : W / 2, py = Number.isFinite(crop.cy) ? crop.cy : H / 2;
+  const x0 = Math.min(W - width, Math.max(0, Math.round(px - width / 2)));
+  const y0 = Math.min(H - height, Math.max(0, Math.round(py - height / 2)));
+  return { x0, y0, width, height, cx: (x0 + width / 2) / W, cy: (y0 + height / 2) / H, fw: width / W, fh: height / H };
+}
+
+async function centerCropViews(ctx, { targetName, hasL, crop, log }) {
+  const ids = [targetName].concat(hasL ? ['FILTER_L'] : []);
+  const dim = await ctx.pjsr(`var w=ImageWindow.windowById('${targetName}'); var i=w.mainView.image; i.width+'x'+i.height;`);
+  const [W, H] = String(dim.outputs?.consoleOutput || '').trim().split('x').map(Number);
+  const b = centerCropBox(W, H, crop);
+  if (!b) throw new Error(`centerCrop ${JSON.stringify(crop)} does not fit ${W}x${H}`);
+  for (const id of ids) {
+    const r = await ctx.pjsr(`
+      var w=ImageWindow.windowById('${id}'); if (w.isNull) throw new Error('centerCrop: view not found: ${id}');
+      ${WCS_CLEAR}
+      var P=new DynamicCrop; P.centerX=${b.cx}; P.centerY=${b.cy}; P.width=${b.fw}; P.height=${b.fh}; P.angle=0; P.scaleX=1; P.scaleY=1;
+      if(!P.executeOn(w.mainView)) throw new Error('centerCrop failed on ${id}');
+      w.mainView.image.width+'x'+w.mainView.image.height;`);
+    if (r.status === 'error') throw new Error(`centerCrop ${id}: ${r.error?.message}`);
+    log(`  Center crop ${id}: ${W}x${H} -> ${String(r.outputs?.consoleOutput).trim()} (origin ${b.x0},${b.y0})`);
   }
 }
 
@@ -636,6 +665,12 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
   // ========================================================================
   log('\n[PREP] Step 4: Linear processing on RGB...');
 
+  // Optional subject framing (config.files.centerCrop = { width, height, cx?, cy? } in pixels, no resampling).
+  // Done here, BEFORE solve/SPCC: cropping drops an astrometric solution, the gradient model has already
+  // used the full field, and a sparse full frame with reducer distortion can fail the initial alignment
+  // while its centre solves (M74, 2026-11-07: 9508x6291 failed at any seed, 4000x4000 and 6000x4500 solved).
+  if (F.centerCrop) await centerCropViews(ctx, { targetName, hasL, crop: F.centerCrop, log });
+
   // Background neutralization — always once, after gradient correction, before
   // SPCC (SPCC wants a neutral background reference). Runs in both the agentic
   // and default gradient paths.
@@ -884,8 +919,17 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
 
   // Seti stretch RGB (target from processing profile)
   log(`  Seti stretch RGB (target=${rgbTarget}, headroom=${headroom})...`);
+  if (profileStretch.method === 'mas') {
+    // 2026-11-08: MultiscaleAdaptiveStretch (PI 1.9.x): dynamic-range compression during the stretch + ringing-free
+    // multiscale contrast recovery; profile stretch.mas overrides the defaults.
+    const mo = { targetBackground: rgbTarget, ...(profileStretch.mas || {}) };
+    log(`  MAS stretch RGB (${JSON.stringify(mo)})...`);
+    const mr = await masStretch(ctx, targetName, mo);
+    noteApplied('MultiscaleAdaptiveStretch', targetName, { ...mr.params, roi: mr.roi });
+  } else {
   await setiStretch(ctx, targetName, { targetMedian: rgbTarget, hdrAmount: hdrOpts.hdrAmount, hdrKnee: hdrOpts.hdrKnee, hdrHeadroom: headroom });
   noteApplied('SetiStretch', targetName, { targetMedian: rgbTarget, hdrAmount: hdrOpts.hdrAmount, hdrKnee: hdrOpts.hdrKnee, hdrHeadroom: headroom });
+  }
 
   // NXT post-stretch (from profile)
   log(`  NXT post-stretch (${nxtPost})...`);
@@ -962,8 +1006,15 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
 
     // Seti stretch L (brighter to extract faint detail, with headroom for HDRMT)
     log(`  Seti stretch L (target=${lTarget.toFixed(2)}, headroom=${Math.max(headroom, 0.05).toFixed(2)})...`);
+    if (profileStretch.method === 'mas') {
+      const mo = { targetBackground: Math.min(0.5, lTarget), ...(profileStretch.mas || {}), saturationEnabled: false };
+      log(`  MAS stretch L (${JSON.stringify(mo)})...`);
+      const mr = await masStretch(ctx, 'FILTER_L', mo);
+      noteApplied('MultiscaleAdaptiveStretch', 'FILTER_L', { ...mr.params, roi: mr.roi });
+    } else {
     await setiStretch(ctx, 'FILTER_L', { targetMedian: lTarget, hdrAmount: hdrOpts.hdrAmount, hdrKnee: hdrOpts.hdrKnee, hdrHeadroom: Math.max(headroom, 0.05) });
     noteApplied('SetiStretch', 'FILTER_L', { targetMedian: lTarget, hdrAmount: hdrOpts.hdrAmount, hdrKnee: hdrOpts.hdrKnee, hdrHeadroom: Math.max(headroom, 0.05) });
+    }
 
     result.views.l = 'FILTER_L';
     result.stats.l = await getStats(ctx, 'FILTER_L');
@@ -1114,6 +1165,32 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     result.baselineDetail = await measureDetailBaseline(ctx, { rgb: result.views.rgb, l: result.views.l }, { runDir: opts.runDir, log });
     if (brief) { brief._baselineDetail = result.baselineDetail; brief._hasL = !!result.views.l; }
   } catch (e) { log(`  [PREP] baseline detail failed: ${e.message}`); }
+
+  // Signal inventory (2026-11-07): what the deepest starless channel actually holds — detection radius, zone
+  // geometry for the finish gates, prep core/disc index, hard-stretched preview for the agents. Never fatal.
+  try {
+    log('\n[PREP] Signal inventory on the deepest starless view...');
+    const invView = result.views.l || result.views.rgb;
+    const previewDir = opts.runDir ? path.join(opts.runDir, 'diagnostics', 'inventory') : null;
+    const inv = await measureSignalInventory(ctx, invView, { previewDir, log });
+    if (inv && !inv.error) {
+      // Ha knots (2026-11-08): where the HII regions are, so finish can check they stay pink-red.
+      if (result.views.ha) {
+        try {
+          const hk = await measureHaKnots(ctx, result.views.ha, inv);
+          if (hk?.pts?.length >= 50) { inv.haKnots = hk; log(`  [inventory] Ha knots: ${hk.n} px (${hk.pts.length} sampled), threshold ${hk.thr.toExponential(2)}`); }
+          else log(`  [inventory] Ha knots: too few (${hk?.n ?? 0}) — knot colour gate not armed`);
+        } catch (e) { log(`  [inventory] Ha knots failed: ${e.message}`); }
+      }
+      result.inventory = inv;
+      if (brief) brief._inventory = inv;
+      if (opts.runDir) {
+        const pm = path.join(opts.runDir, 'prep-metrics.json');
+        let j = {}; try { j = JSON.parse(fs.readFileSync(pm, 'utf8')); } catch { /* */ }
+        j.inventory = { ...inv, preview: inv.preview }; fs.writeFileSync(pm, JSON.stringify(j, null, 2));
+      }
+    } else log(`  [inventory] skipped: ${inv?.error}`);
+  } catch (e) { log(`  [PREP] signal inventory failed: ${e.message}`); }
 
   // WI-26 C: deterministic highlight-texture baseline on the SXT-starless stretched RGB / L / Ha
   // (one locateSubjectROI; stores brief._roi + brief._baselineTexture, writes baseline-texture.json).

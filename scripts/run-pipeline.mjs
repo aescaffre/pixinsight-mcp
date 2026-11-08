@@ -3,6 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import os from 'os';
 import { fileURLToPath } from 'url';
+import { normalizeWinPathsInCode, piMemoryMB } from '../agents/ops/platform.mjs';
 
 const home = os.homedir();
 const cmdDir = path.join(home, '.pixinsight-mcp/bridge/commands');
@@ -618,6 +619,8 @@ async function savePreview(viewId, stepId) {
 function send(tool, proc, params, opts) {
   return new Promise((resolve, reject) => {
     const id = crypto.randomUUID();
+    // Windows: drive paths embedded in PJSR lose their backslashes; rewrite them to forward slashes.
+    if (params && typeof params.code === 'string') params = { ...params, code: normalizeWinPathsInCode(params.code) };
     const cmd = {
       id, timestamp: new Date().toISOString(), tool, process: proc,
       parameters: params,
@@ -659,11 +662,8 @@ const MEM_ABORT_MB = 8000;
 
 async function checkMemory(stepId) {
   try {
-    const { execSync } = await import('child_process');
-    const out = execSync("ps aux | grep '[P]ixInsight.app' | awk '{s+=$6} END{print s}'").toString().trim();
-    const memKB = parseInt(out, 10);
-    if (!memKB) return;
-    const memMB = Math.round(memKB / 1024);
+    const memMB = piMemoryMB();   // null on unsupported platforms: skip silently (no ps/grep/awk on Windows)
+    if (!memMB) return;
     if (memMB > MEM_ABORT_MB) {
       log(`  [MEMORY] CRITICAL: PixInsight using ${memMB}MB — saving checkpoint and aborting`);
       await saveCheckpoint(stepId);
@@ -677,8 +677,7 @@ async function checkMemory(stepId) {
       }
       await pjsr('processEvents();');
       // Re-check
-      const out2 = execSync("ps aux | grep '[P]ixInsight.app' | awk '{s+=$6} END{print s}'").toString().trim();
-      const memMB2 = Math.round(parseInt(out2, 10) / 1024);
+      const memMB2 = piMemoryMB() ?? 0;
       log(`  [MEMORY] After purge: ${memMB2}MB`);
     } else {
       log(`  [memory] ${memMB}MB`);

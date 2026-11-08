@@ -5,18 +5,18 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import {
-  getStats, measureUniformity, measureColorGradient,
+  getStats, measureUniformity, measureColorGradient, measureLumTilt, subtractSkyPlane,
   savePreview, autoStretch,
   cloneImage, restoreFromClone, closeImage, purgeUndoHistory,
   runGC, runABE, runPerChannelABE, runSCNR,
   setiStretch,
   createLumMask, applyMask, removeMask, closeMask, shapeMask, measureMask, maskStatsText,
   checkStarQuality, measureStarField, checkRinging, checkSharpness, assessBurn, scanBurntRegions, checkSaturation, checkTonalPresence, checkStarLayerIntegrity, checkBrightChroma, checkHighlightTexture, measureShellTexture, measurePsfField,
-  measureSubjectDetail, evaluateDetailGain, summarizeDetail, locateSubjectROI, measureCoreContrast, measureBackgroundNoise, measureChromaNoise, measureDustCoverage, compareToReference, measureBackgroundFloor,
+  measureSubjectDetail, evaluateDetailGain, summarizeDetail, locateSubjectROI, measureCoreContrast, measureBackgroundNoise, measureChromaNoise, measureDustCoverage, compareToReference, measureBackgroundFloor, measureScaleBands, measureDiscMottle, measureOuterArms, measureInventoryZones, measureZoneStructure, measureEnvelopeSectors, compareEnvelopeSectors, measureSectorProfiles, measureCoreSpectrum, edgeSteepening, measureArmGapDepth, measureHaKnotColour,
   multiScaleEnhance, shellDetailEnhance,
   extractPseudoOIII, continuumSubtractHa, dynamicNarrowbandBlend, createSyntheticLuminance, createZoneMasks, createAdaptiveZoneMasks, continuousClamp,
 } from '../ops/index.mjs';
-import { shoCombine, shoHueShift, shoHueSaturation, measurePaletteBalance, computeNarrowbandBalance, repairStarResiduals, neutralizePaletteBackground, chromaSmooth, liftFaintHalo, bodyEdgeContrast } from '../ops/sho-palette.mjs';
+import { shoCombine, shoHueShift, shoHueSaturation, measurePaletteBalance, computeNarrowbandBalance, repairStarResiduals, neutralizePaletteBackground, chromaSmooth, liftFaintHalo, bodyEdgeContrast, compressOuterHaze } from '../ops/sho-palette.mjs';
 import { checkHardConstraints, statsToScores, computeAggregate } from '../scoring.mjs';
 import { openXisfAs } from './prep-cache-util.mjs';
 import { backgroundGrid } from './narrowband-prep.mjs';
@@ -360,6 +360,82 @@ function verifyToolsForGates(failedGates) {
  *   in Gate 9; the aesthetic critic is opt-in (opts.aesthetic, default false).
  * @returns {{failures, warnings, metrics, stats, failedGates, isEmergency}}
  */
+
+// ============================================================================
+// Staged metric order (2026-11-07 perturbation study on M74, processing-knowledge.md "impact matrix"):
+// operations ordered by how many metrics they move — tone (7-8) -> local contrast (5-6) -> detail+noise -> colour
+// (moves only saturation/chroma noise) -> stars. stage_checkpoint measures ONE stage's metrics and records them;
+// finish failures on a metric that passed at its checkpoint name the stage, so drift is attributed, not re-fought.
+// ============================================================================
+export const METRIC_STAGES = [
+  { stage: 'tone', gates: ['core_preservation', 'outer_arms', 'envelope_clip', 'edge_softness', 'arm_gap_depth', 'sky_level', 'tonal_presence'], tools: 'stretch/global curves, black point, masked outer-zone lift' },
+  { stage: 'local_contrast', gates: ['disc_mottle', 'core_structure', 'core_cooked'], tools: 'LHE, HDRMT (HDRMT: +57% mottle, -24% core on M74), MSE' },
+  { stage: 'detail_noise', gates: ['fine_detail', 'noise_bg'], tools: 'BXT/MLT/USM sharpening and NXT together (USM: +50% grain)' },
+  { stage: 'colour', gates: ['saturation_floor', 'saturation', 'ha_knots'], tools: 'chroma/S curves, chroma_smooth, SCNR (touch only saturation + chroma noise)' },
+];
+export const STAGE_OF_GATE = Object.fromEntries(METRIC_STAGES.flatMap(s => s.gates.map(g => [g, s.stage])));
+
+export async function measureStage(ctx, brief, viewId, stage) {
+  const profile = brief?.processingProfile || {}, inv = brief?._inventory, rows = [];
+  const row = (gate, metric, value, limit, pass, note = '') => rows.push({ gate, metric, value: value == null ? null : +(+value).toFixed(4), limit, pass, note });
+  if (stage === 'tone') {
+    if (inv?.zones) {
+      const z = await measureInventoryZones(ctx, viewId, inv);
+      const cp = profile.core_preservation, oa = profile.outer_arms;
+      if (Number.isFinite(cp?.min_ratio_vs_prep) && z.coreIdx != null) row('core_preservation', 'core/disc vs prep', z.coreIdx / inv.prepCoreIdx, `>= ${cp.min_ratio_vs_prep}`, z.coreIdx / inv.prepCoreIdx >= cp.min_ratio_vs_prep);
+      if (Number.isFinite(oa?.min_net_contrast) && z.outerNet != null) row('outer_arms', `outer zone ${inv.zones.outer.join('-')}px net`, z.outerNet, `>= ${oa.min_net_contrast}`, z.outerNet >= oa.min_net_contrast);
+      row('sky_level', 'sky (inventory sky zone)', z.sky, '0.08-0.10 (galaxy look)', z.sky >= 0.075 && z.sky <= 0.11);
+      const envp = profile.envelope;
+      if (Number.isFinite(envp?.min_sector_ratio) && inv.prepEnvelope) { const c = await envelopeClip(ctx, brief, viewId); if (c?.evaluated && c.worst) row('envelope_clip', `outer glow by direction (worst ${c.worst.name}) vs prep`, c.worst.ratio, `>= ${envp.min_sector_ratio}`, c.worst.ratio >= envp.min_sector_ratio); }
+      if (Number.isFinite(envp?.max_edge_steepening)) { const es = edgeSteepening(await measureSectorProfiles(ctx, viewId, inv), inv.rDet); if (es.evaluated) row('edge_softness', 'outer-glow edge steepening (fade speed at the edge / inside)', es.steepening, `<= ${envp.max_edge_steepening}`, es.steepening <= envp.max_edge_steepening, 'a lifted plateau ending in a cliff reads as a mask'); }
+      const agp = profile.arm_gaps; if (Number.isFinite(agp?.min_depth)) { const ag = await measureArmGapDepth(ctx, viewId, inv); if (ag.depth != null) row('arm_gap_depth', 'arm/gap depth (p80-p20)/(p80-sky) per annulus, median', ag.depth, `>= ${agp.min_depth}`, ag.depth >= agp.min_depth, 'filled gaps read as haze between the arms'); }
+    }
+    const t = await checkTonalPresence(ctx, viewId, brief?.target?.classification || 'unknown');
+    row('tonal_presence', 'subject/background separation', t.separation, `>= ${gateThreshold(profile, 'tonal.min_separation', TONAL)}`, t.separation >= gateThreshold(profile, 'tonal.min_separation', TONAL), 'the sky black point alone moves this +21%: do not crush the sky to pass it');
+  } else if (stage === 'local_contrast') {
+    const ts = profile.texture_scale, cp = profile.core_preservation, rD = brief?._baselineDetail?.scale?.rDisc;
+    if (Number.isFinite(ts?.max_mid_mottle)) { const m = await measureDiscMottle(ctx, viewId, { radius: rD }); row('disc_mottle', 'mid-disc mottle', m.mid, `<= ${ts.max_mid_mottle}`, m.mid != null && m.mid <= ts.max_mid_mottle); }
+    if (Number.isFinite(cp?.min_core_structure) && inv?.zones) { const zs = await measureZoneStructure(ctx, viewId, inv); row('core_structure', 'core fine structure', zs.coreWeber, `>= ${cp.min_core_structure}`, zs.coreWeber >= cp.min_core_structure); }
+    if (Number.isFinite(cp?.max_core_spectrum) && inv?.zones) { const sp = await measureCoreSpectrum(ctx, viewId, inv); if (sp.spectrum != null) row('core_cooked', 'core texture spectrum (fine/coarse)', sp.spectrum, `<= ${cp.max_core_spectrum}`, sp.spectrum <= cp.max_core_spectrum, 'natural cores carry more structure at large scales; > limit = small-radius local contrast made cells'); }
+  } else if (stage === 'detail_noise') {
+    const ts = profile.texture_scale, prep = brief?._baselineDetail?.scale;
+    const sb = await measureScaleBands(ctx, viewId, { rDisc: prep?.rDisc });
+    if (Number.isFinite(ts?.min_ratio_vs_prep) && Number.isFinite(prep?.ratio)) row('fine_detail', 'fine/blob vs prep', sb.ratio / prep.ratio, `>= ${ts.min_ratio_vs_prep}`, sb.ratio / prep.ratio >= ts.min_ratio_vs_prep);
+    if (Number.isFinite(ts?.min_fine_blob)) row('fine_detail', 'fine/blob', sb.ratio, `>= ${ts.min_fine_blob}`, sb.ratio >= ts.min_fine_blob);
+    const bn = await measureBackgroundNoise(ctx, viewId); const lim = gateThreshold(profile, 'noise.bg_hard', NOISE_BG_HARD);
+    row('noise_bg', 'background grain', bn.bgNoise, `<= ${lim}`, bn.bgNoise <= lim);
+  } else if (stage === 'colour') {
+    const sp = profile.saturation || {};
+    if (Number.isFinite(sp.min_arm_p50) && inv?.zones) { const zs = await measureZoneStructure(ctx, viewId, inv); row('saturation_floor', 'arm saturation (median)', zs.armSat, `>= ${sp.min_arm_p50}`, zs.armSat != null && zs.armSat >= sp.min_arm_p50, `gaps ${zs.gapSat?.toFixed(3)}`); }
+    const sat = await checkSaturation(ctx, viewId); const { failAt } = saturationThresholds(brief);
+    row('saturation', 'subject P90 saturation', sat.p90S, `<= ${failAt.toFixed(2)}`, sat.p90S <= failAt);
+    if (Number.isFinite(sp.min_p50) && !(Number.isFinite(sp.min_arm_p50) && inv?.zones)) row('saturation_floor', 'subject median saturation', sat.medianS, `>= ${sp.min_p50}`, sat.medianS >= sp.min_p50);
+    const hkp = profile.ha_knots; if (Number.isFinite(hkp?.min_pink_frac) && inv?.haKnots) { const hk = await measureHaKnotColour(ctx, viewId, inv.haKnots); if (hk.evaluated) row('ha_knots', 'Ha knots still pink-red (share of knot pixels)', hk.pinkFrac, `>= ${hkp.min_pink_frac}`, hk.pinkFrac >= hkp.min_pink_frac, `white-clipped ${(100 * hk.whiteFrac).toFixed(0)}%, median hue ${hk.medHue?.toFixed(0)}°`); }
+  } else throw new Error(`unknown stage ${stage}`);
+  return rows;
+}
+
+
+// Envelope clip check (2026-11-08): M74 v4-v6 ran GradientCorrection on the STRETCHED L with the galaxy in frame;
+// the model absorbed the faint envelope on one side (right sector 0.004-0.11 of what the prep data holds) and the
+// critic saw a "mask-like edge". Shared by the gradient tools (immediate feedback) and finish Gate 7c.
+export async function envelopeClip(ctx, brief, viewId) {
+  const inv = brief?._inventory; if (!inv?.prepEnvelope) return null;
+  const e = await measureEnvelopeSectors(ctx, viewId, inv);
+  const lvl = brief?.processingProfile?.envelope?.min_level ?? 0.005;
+  return compareEnvelopeSectors(e.excess, inv.prepEnvelope, { minLevel: lvl });
+}
+async function envelopeNote(ctx, brief, viewId) {
+  try {
+    const st = await getStats(ctx, viewId); if (!(st.median > 0.02)) return '';   // linear data: the prep inventory is not comparable
+    const c = await envelopeClip(ctx, brief, viewId); const lim = brief?.processingProfile?.envelope?.min_sector_ratio ?? 0.3;
+    if (!c?.evaluated || !c.worst) return '';
+    return c.worst.ratio < lim
+      ? `\n⚠️ ENVELOPE CLIPPED (${c.worst.name}): that side's outer glow is x${c.worst.ratio.toFixed(2)} of what the prep data holds. A gradient model on STRETCHED data with the galaxy in frame eats the faint envelope — restore_from_clone and leave large-scale gradients to the linear gradient phase (or use an inverted galaxy mask / mask_view_id blend).`
+      : `\nEnvelope by direction OK (worst ${c.worst.name} x${c.worst.ratio.toFixed(2)} of prep).`;
+  } catch (e) { return ''; }
+}
+
 export async function evaluateFinishGates(ctx, store, brief, viewId, agentName, opts = {}) {
   const mode = opts.mode || 'run';
   const variantId = opts.variantId || null;
@@ -378,6 +454,9 @@ export async function evaluateFinishGates(ctx, store, brief, viewId, agentName, 
   const report = { critic: null, reference: null };   // WI-09: persisted into final-selection.json by finish
   const failedGates = [];   // structured failures consumed by the WI-06 repair engine (also serialised as GATES_JSON)
   const fail = (gate, msg, extra = {}) => {
+    const st = STAGE_OF_GATE[gate], lock = st && brief?._stageLocks?.[st];
+    const locked = lock?.rows?.find(r => r.gate === gate && r.pass);
+    if (locked) msg += ` [DRIFT: this passed at your '${st}' checkpoint (${locked.metric} ${locked.value}); an operation after it broke it. Re-check that stage's work instead of compensating downstream.]`;
     failures.push(msg);
     const parsed = parseGateFailure(gate, msg);
     const tool = GATE_REPAIR_TOOL[gate] || gate;
@@ -762,6 +841,133 @@ export async function evaluateFinishGates(ctx, store, brief, viewId, agentName, 
     warnings.push(`Saturation check error: ${e.message} — inspect manually`);
   }
 
+  // Gate 7b (2026-11-07): saturation FLOOR + fine-detail balance + disc mottle, calibrated on the user's
+  // galaxy references (M101 x2, M83; ~/Downloads, measured with these same functions) vs the rejected M74 v2
+  // ("washed out", "watercolour"). Profile keys: saturation.min_p50, texture_scale.{min_fine_blob,max_mid_mottle}.
+  try {
+    const minArm = profile?.saturation?.min_arm_p50, invS = brief?._inventory;
+    if (Number.isFinite(minArm) && invS?.zones) {
+      const zs = await measureZoneStructure(ctx, viewId, invS);
+      if (zs.armSat != null && zs.armSat < minArm) {
+        const msg = `UNDER-SATURATED ARMS: median saturation of the ARM pixels ${zs.armSat.toFixed(3)} < floor ${minArm} (inter-arm gaps ${zs.gapSat?.toFixed(3)}; ${profile.saturation._arm_calibration || 'reference-calibrated'}). Colour the arms (chroma curve through an arm/galaxy mask, AFTER tonal and local-contrast work, which shift saturation by -17%..+20%); tinting the gaps does not count.`;
+        if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('saturation_floor', msg, { metric: 'armSat', value: zs.armSat, limit: minArm });
+      }
+    }
+    const minP50 = Number.isFinite(minArm) && invS?.zones ? null : profile?.saturation?.min_p50;
+    if (Number.isFinite(minP50) && champSat && champSat.subjectPixelCount > 100 && champSat.medianS < minP50) {
+      const msg = `UNDER-SATURATED: subject median saturation ${champSat.medianS.toFixed(3)} < floor ${minP50} (${profile.saturation._floor_calibration || 'reference-calibrated'}). Colour reads washed out. Raise colour at the source (LRGB saturation, colour-saturation curve through the galaxy mask, warmer HII); never a global boost that lifts sky chroma.`;
+      if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('saturation_floor', msg, { metric: 'medianS', value: champSat.medianS, limit: minP50 });
+    }
+  } catch (e) { warnings.push(`Saturation floor check error: ${e.message}`); }
+  const ts = profile?.texture_scale;
+  if (ts && (Number.isFinite(ts.min_fine_blob) || Number.isFinite(ts.min_ratio_vs_prep) || Number.isFinite(ts.max_mid_mottle))) {
+    try {
+      if (Number.isFinite(ts.min_fine_blob) || Number.isFinite(ts.min_ratio_vs_prep)) {
+        const sb = await measureScaleBands(ctx, viewId, { rDisc: brief?._baselineDetail?.scale?.rDisc });
+        if (!sb.error && Number.isFinite(ts.max_fine_blob) && sb.ratio > ts.max_fine_blob) {
+          const msg = `OVER-SHARPENED DISC: fine/blob detail ratio ${sb.ratio.toFixed(3)} > ${ts.max_fine_blob} (references top out near ${ts.max_fine_blob}) — crunchy 1-3 px knots and grain. Back off the last fine-scale sharpening (BXT nonstellar / MLT layers 1-2 / USM) or apply light NXT through the galaxy mask.`;
+          if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('fine_detail', msg, { metric: 'fineBlob', value: sb.ratio, limit: ts.max_fine_blob });
+        }
+        const prepRatio = brief?._baselineDetail?.scale?.ratio;
+        if (!sb.error && Number.isFinite(ts.min_ratio_vs_prep) && Number.isFinite(prepRatio) && sb.ratio < prepRatio * ts.min_ratio_vs_prep) {
+          const msg = `DETAIL LOST VS PREP: fine/blob ${sb.ratio.toFixed(3)} < x${ts.min_ratio_vs_prep} of the prep ratio ${prepRatio.toFixed(3)} — the knots and fine structure the data had at prep were smoothed away (M74 v4/v5). Reveal the knots: fine-scale enhancement (BXT / MLT layers 1-2) on the galaxy, lighter noise reduction through the galaxy mask, no blob-scale smoothing.`;
+          if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('fine_detail', msg, { metric: 'fineBlobVsPrep', value: sb.ratio / prepRatio, limit: ts.min_ratio_vs_prep });
+        }
+        if (!sb.error && Number.isFinite(ts.min_fine_blob) && sb.ratio < ts.min_fine_blob) {
+          const msg = `WATERCOLOUR DISC: fine/blob detail ratio ${sb.ratio.toFixed(3)} < ${ts.min_fine_blob} — 0.7-3 px structure smeared while 3-6 px blobs remain. Use less noise reduction on the galaxy (NXT <= 0.25 through the galaxy mask), drop/soften LHE/HDRMT at radius < 32, and sharpen fine scales (BXT/ MLT layers 1-2) before any blob-scale contrast.`;
+          if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('fine_detail', msg, { metric: 'fineBlob', value: sb.ratio, limit: ts.min_fine_blob });
+        }
+      }
+      if (Number.isFinite(ts.max_mid_mottle)) {
+        const mo = await measureDiscMottle(ctx, viewId, { radius: brief?._baselineDetail?.scale?.rDisc });
+        if (!mo.error && mo.mid != null && mo.mid > ts.max_mid_mottle) {
+          const msg = `disc mottle: ${mo.details} > ${ts.max_mid_mottle}. Blotchy mid disc — reduce blob-scale contrast (LHE r 64-128 / HDRMT) on the disc.`;
+          if (ts.mottle_blocking === true && !isEmergency) fail('disc_mottle', `DISC MOTTLE: ${msg}`, { metric: 'midMottle', value: mo.mid, limit: ts.max_mid_mottle });
+          else warnings.push(`${ts.mottle_blocking ? '[RELAXED]' : '(advisory)'} ${msg}`);
+        }
+      }
+    } catch (e) { warnings.push(`Texture-scale check error: ${e.message}`); }
+  }
+  // Gate 7c (2026-11-07): data-anchored zones from the PREP signal inventory (brief._inventory: centre, detection
+  // radius, core/disc/outer/sky zones on the deepest starless channel). (1) outer zone: what the data holds must
+  // read above sky (net of sky spread) — M74 v3 0.018 "outer arms not visible", v4 0.082 visible; (2) core
+  // preservation: final core/disc index vs the prep index must not collapse (M74 v4 lifted the whole disc).
+  // Explicit profile outer_arms.r_min_px/r_max_px override the inventory annulus.
+  const oa = profile?.outer_arms, cp = profile?.core_preservation, inv = brief?._inventory;
+  if ((oa && Number.isFinite(oa.min_net_contrast)) || (cp && (Number.isFinite(cp.min_ratio_vs_prep) || Number.isFinite(cp.min_core_structure))) || Number.isFinite(profile?.envelope?.min_sector_ratio)) {
+    try {
+      let zi = null;
+      if (inv?.zones && inv?.centre) zi = await measureInventoryZones(ctx, viewId, inv);
+      if (oa && Number.isFinite(oa.min_net_contrast)) {
+        let net = null, where = '';
+        if (Number.isFinite(oa.r_min_px) && Number.isFinite(oa.r_max_px)) {
+          const o = await measureOuterArms(ctx, viewId, oa.r_min_px, oa.r_max_px);
+          if (!o.error) { net = o.net; where = `r ${oa.r_min_px}-${oa.r_max_px}px (profile)`; }
+        } else if (zi?.outerNet != null) { net = zi.outerNet; where = `r ${inv.zones.outer[0]}-${inv.zones.outer[1]}px (prep inventory: data detected to ${inv.rDet}px)`; }
+        if (net != null && net < oa.min_net_contrast) {
+          const msg = `OUTER ZONE INVISIBLE: net contrast ${net.toFixed(4)} < ${oa.min_net_contrast} in ${where}. The linear data holds structure there but the stretch buries it. Lift ONLY the outer zone (mask: outside the inner disc, excluding sky) with a shadow/low-midtone curve; keep core and inner-disc contrast; sky stays at its level.`;
+          if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('outer_arms', msg, { metric: 'outerNet', value: net, limit: oa.min_net_contrast });
+        }
+      }
+      if (cp && Number.isFinite(cp.min_ratio_vs_prep) && zi?.coreIdx != null && Number.isFinite(inv?.prepCoreIdx) && inv.prepCoreIdx > 0) {
+        const ratio = zi.coreIdx / inv.prepCoreIdx;
+        if (ratio < cp.min_ratio_vs_prep) {
+          const msg = `CORE FLATTENED: core/disc index ${zi.coreIdx.toFixed(2)} is x${ratio.toFixed(2)} of prep ${inv.prepCoreIdx.toFixed(2)} (< x${cp.min_ratio_vs_prep}). The disc was lifted toward the core: the galaxy reads flat and hazy. Undo global/whole-disc lifts; lift only the outer zone through a mask and keep the core brighter than the disc.`;
+          if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('core_preservation', msg, { metric: 'coreIdxRatio', value: ratio, limit: cp.min_ratio_vs_prep });
+        }
+      }
+      const envp = profile?.envelope;
+      if (envp && Number.isFinite(envp.min_sector_ratio) && inv?.prepEnvelope) {
+        const c = await envelopeClip(ctx, brief, viewId);
+        if (c?.evaluated && c.worst && c.worst.ratio < envp.min_sector_ratio) {
+          const msg = `ENVELOPE CLIPPED (${c.worst.name}): the outer glow on that side is x${c.worst.ratio.toFixed(2)} of what the prep data holds there (< x${envp.min_sector_ratio}) — a mask/threshold or gradient-model edge (critic: "mask-like edge"). Typical cause: GradientCorrection/ABE on stretched data with the galaxy in frame, or a luminance-threshold mask riding a residual sky tilt. Undo it; keep large-scale background work in the linear gradient phase.`;
+          if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('envelope_clip', msg, { metric: 'envelopeSectorRatio', value: c.worst.ratio, limit: envp.min_sector_ratio });
+        }
+      }
+      if (cp && Number.isFinite(cp.min_core_structure) && inv?.zones) {
+        const zs = await measureZoneStructure(ctx, viewId, inv);
+        if (zs.coreWeber < cp.min_core_structure) {
+          const msg = `FEATURELESS CORE: core fine-structure ${zs.coreWeber.toFixed(4)} < ${cp.min_core_structure} (prep ${inv.prepCoreWeber?.toFixed(4) ?? 'n/a'}; ${cp._structure_calibration || ''}). The core is bright but smooth — the nuclear dust lanes are gone. Use the core specialist / a core-masked HDRMT or fine-scale sharpening on the core; do not flatten it with curves.`;
+          if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('core_structure', msg, { metric: 'coreWeber', value: zs.coreWeber, limit: cp.min_core_structure });
+        }
+      }
+      // Cooked core (2026-11-08, M74 v7; calibrated on 5 user reference galaxies + approved NGC4490).
+      if (cp && Number.isFinite(cp.max_core_spectrum) && inv?.zones) {
+        const sp = await measureCoreSpectrum(ctx, viewId, inv);
+        if (sp.spectrum != null && sp.spectrum > cp.max_core_spectrum) {
+          const msg = `COOKED CORE: core texture spectrum (fine/coarse) ${sp.spectrum.toFixed(2)} > ${cp.max_core_spectrum} (${cp._spectrum_calibration || ''}). Fine texture now dominates the core: small-radius local contrast (LHE/HDRMT/MLT on the core) turned the dust lanes into a cell/worm pattern with dark outlines. Back off small-radius local contrast on the core; let the large-scale lanes carry the structure.`;
+          if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('core_cooked', msg, { metric: 'coreSpectrum', value: sp.spectrum, limit: cp.max_core_spectrum });
+        }
+      }
+      // Filled inter-arm gaps (2026-11-08, M74 "haze between the arms"; user refs 0.38-0.88, M74 ref 0.63).
+      const agp = profile?.arm_gaps;
+      if (agp && Number.isFinite(agp.min_depth) && inv?.zones) {
+        const ag = await measureArmGapDepth(ctx, viewId, inv);
+        if (ag.depth != null && ag.depth < agp.min_depth) {
+          const msg = `HAZY ARMS: arm/gap depth ${ag.depth.toFixed(3)} < ${agp.min_depth} (${agp._calibration || ''}). The gaps between the arms are filled: the arms do not separate. Typical causes: whole-disc lifts/midtone curves, large-radius LHE, chroma blurs spreading arm colour into the gaps. Lift only what the gaps do not hold (arms/outer zone through a mask) or deepen the gaps with a gap-selective curve.`;
+          if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('arm_gap_depth', msg, { metric: 'armGapDepth', value: ag.depth, limit: agp.min_depth });
+        }
+      }
+      // Ha knots lost (2026-11-08, M101 friend data): only armed when the prep found Ha knots (Ha data exists).
+      const hkp = profile?.ha_knots;
+      if (hkp && Number.isFinite(hkp.min_pink_frac) && inv?.haKnots) {
+        const hk = await measureHaKnotColour(ctx, viewId, inv.haKnots);
+        if (hk.evaluated && hk.pinkFrac < hkp.min_pink_frac) {
+          const msg = `HA KNOTS LOST: only ${(100 * hk.pinkFrac).toFixed(0)}% of the HII-knot pixels found in the prep Ha are still pink-red (< ${(100 * hkp.min_pink_frac).toFixed(0)}%; ${(100 * hk.whiteFrac).toFixed(0)}% clipped to white, median hue ${hk.medHue?.toFixed(0)}°; ${hkp._calibration || ''}). A hue shift toward blue, a global chroma/brightness push or a blue-violet palette match washed the Ha out. Keep the Ha-injected knot colour: shift hue through an inverted Ha-knot mask, protect knots from brightness gain, and do not chase the reference palette with a global hue rotation.`;
+          if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('ha_knots', msg, { metric: 'haKnotPinkFrac', value: hk.pinkFrac, limit: hkp.min_pink_frac });
+        }
+      }
+      // Mask-shaped outer edge (2026-11-08, M74 v7 "lumpy polygonal boundary, dark moat"; user refs <= 1.48).
+      if (envp && Number.isFinite(envp.max_edge_steepening) && inv?.zones) {
+        const es = edgeSteepening(await measureSectorProfiles(ctx, viewId, inv), inv.rDet);
+        if (es.evaluated && es.steepening > envp.max_edge_steepening) {
+          const msg = `MASK-LIKE GLOW EDGE: the outer glow fades x${es.steepening.toFixed(2)} faster at its edge than inside (> x${envp.max_edge_steepening}; ${envp._steepening_calibration || ''}). A lifted plateau ending in a cliff (excess 0.2 -> 0.03 of its 0.6 rDet level over only ${(es.tail * inv.rDet).toFixed(0)} px). Feather the outer-zone lift: a mask whose falloff extends past the detected radius (large blur), or a lift that tapers with radius, so the glow keeps fading into the sky.`;
+          if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('edge_softness', msg, { metric: 'edgeSteepening', value: es.steepening, limit: envp.max_edge_steepening });
+        }
+      }
+    } catch (e) { warnings.push(`Inventory-zone check error: ${e.message}`); }
+  }
+
   // Gate 8: Tonal presence — subject must be impactful, not merely safe
   // Adaptive threshold: small subjects (< 3% coverage) get relaxed gate (2.5×)
   // because global tonal curves to force 3× on tiny subjects destroy the core
@@ -928,6 +1134,7 @@ export async function evaluateFinishGates(ctx, store, brief, viewId, agentName, 
           if (refCmp.palette_l1 != null && refCmp.palette_l1 > maxL1) refMsg(`ADVISORY: palette differs from reference (palette_l1=${refCmp.palette_l1.toFixed(3)} > ${maxL1}; hue-family mix of saturated subject pixels). Steer hue balance toward the reference.`);
           if (refCmp.lab_emd != null && refCmp.lab_emd > maxLab) refMsg(`ADVISORY: subject chroma differs from reference (lab_emd=${refCmp.lab_emd.toFixed(1)} > ${maxLab}; chroma-only a*b* distance). Adjust colour balance/saturation toward the reference.`);
           if (refBlocking && refCmp.dark_depth_delta != null && profile.reference.max_dark_depth_delta != null && Math.abs(refCmp.dark_depth_delta) > profile.reference.max_dark_depth_delta) refMsg(`ADVISORY: dark-structure depth differs from reference (target ${refCmp.dark_depth_target.toFixed(3)} vs ref ${refCmp.dark_depth_ref.toFixed(3)}; |delta| > ${profile.reference.max_dark_depth_delta}). ${refCmp.dark_depth_delta > 0 ? 'Darken the dark nebulae / deepen the shadows relative to the field' : 'Shadows are too deep relative to the field: lift them'}.`);
+          if (refBlocking && refCmp.grain_halo_ratio != null && profile.reference.max_grain_ratio != null && refCmp.grain_halo_ratio > profile.reference.max_grain_ratio) refMsg(`ADVISORY: subject halos are ${refCmp.grain_halo_ratio.toFixed(2)}x as grainy as the reference (max ${profile.reference.max_grain_ratio}). Fix upstream: no LHE/MSE/sharpening after the last NoiseXTerminator, drop or reduce noisy L injection, denoise before local contrast.`);
           if (refBlocking && refCmp.lc_ratio != null && profile.reference.min_lc_ratio != null && refCmp.lc_ratio < profile.reference.min_lc_ratio) refMsg(`ADVISORY: local contrast is ${refCmp.lc_ratio.toFixed(2)}x the reference's (min ${profile.reference.min_lc_ratio}). The image reads flat: restore mid-scale contrast (local contrast / curves) rather than global colour.`);
           if (refBlocking && refCmp.bg_cast_delta != null && profile.reference.max_bg_cast_delta != null && refCmp.bg_cast_delta > profile.reference.max_bg_cast_delta) refMsg(`ADVISORY: background colour differs from reference (bg_cast_delta=${refCmp.bg_cast_delta.toFixed(1)} dE > ${profile.reference.max_bg_cast_delta}). Match the sky tint of the reference.`);
           if (refCmp.aspect_ok && refCmp.ms_ssim != null && refCmp.ms_ssim < 0.70) warnings.push(`Structural similarity to reference is low (ms_ssim=${refCmp.ms_ssim.toFixed(3)}, goal >0.70).`);
@@ -1378,7 +1585,41 @@ export const TOOL_CATALOG = {
     handler: async (ctx, _store, _brief, input) => {
       await runGC(ctx, input.view_id);
       const stats = await getStats(ctx, input.view_id);
-      return { type: 'text', text: `GC complete. Stats: median=${stats.median.toFixed(6)}, MAD=${stats.mad.toFixed(6)}` };
+      return { type: 'text', text: `GC complete. Stats: median=${stats.median.toFixed(6)}, MAD=${stats.mad.toFixed(6)}${await envelopeNote(ctx, _brief, input.view_id)}` };
+    }
+  },
+
+  measure_lum_tilt: {
+    category: 'measurement',
+    definition: {
+      name: 'measure_lum_tilt',
+      description: 'Measure the large-scale LUMINANCE tilt of a view (mono L or colour): robust sky-plane fit over a 12x8 grid of cell medians (subject cells rejected), judged in AUTO-STRETCHED units (target 0.10) because the stretch amplifies a linear tilt ~10-20x. Verdict: ppStretched < 0.008 FLAT, 0.008-0.015 MILD, > 0.015 VISIBLE TILT. measure_uniformity (absolute corner stddev) calls a 2%-of-sky linear tilt "flat"; use this instead on L. Pass stretched=true on non-linear data.',
+      input_schema: { type: 'object', properties: { view_id: { type: 'string' }, stretched: { type: 'boolean', description: 'View is already non-linear (default false)' } }, required: ['view_id'] }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const t = await measureLumTilt(ctx, input.view_id, { stretched: !!input.stretched });
+      if (t.error) return { type: 'text', text: `[LUM TILT: measurement failed] ${t.error}` };
+      return { type: 'text', text: `[LUM TILT: ${t.verdict}] ppStretched=${t.ppStretched.toFixed(4)} (linear pp=${t.ppLinear.toExponential(2)} = ${(100 * (t.relToSky ?? 0)).toFixed(2)}% of sky), ${t.direction}; ${t.skyCells} sky cells, ${t.rejectedCells} rejected.${t.verdict !== 'FLAT' && !input.stretched ? ' Fix on LINEAR data with subtract_sky_plane (3-parameter plane: cannot touch the subject or its envelope).' : ''}` };
+    }
+  },
+
+  subtract_sky_plane: {
+    category: 'gradient',
+    hidden: true, visibleTo: ['gradient_agent'],
+    definition: {
+      name: 'subtract_sky_plane',
+      description: 'LINEAR data only. Fit a plane (3 parameters) to the sky cells (subject rejected) and subtract its zero-mean TILT: sky level and subject unchanged. The safe fix for a pure luminance ramp on L (or RGB) where GC/ABE would also eat faint envelope. Reports tilt before/after.',
+      input_schema: { type: 'object', properties: { view_id: { type: 'string' } }, required: ['view_id'] }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const st = await getStats(ctx, input.view_id);
+      if (st.median > 0.02) return { type: 'text', text: `subtract_sky_plane REFUSED: ${input.view_id} looks stretched (median ${st.median.toFixed(4)}). It is a linear-only tool.` };
+      const t0 = await measureLumTilt(ctx, input.view_id);
+      if (t0.error) return { type: 'text', text: `subtract_sky_plane REFUSED: ${t0.error}` };
+      if (t0.verdict === 'FLAT') return { type: 'text', text: `subtract_sky_plane skipped: ${input.view_id} is already FLAT (ppStretched ${t0.ppStretched.toFixed(4)}).` };
+      await subtractSkyPlane(ctx, input.view_id, t0);
+      const t1 = await measureLumTilt(ctx, input.view_id);
+      return { type: 'text', text: `Sky plane subtracted from ${input.view_id}: ppStretched ${t0.ppStretched.toFixed(4)} (${t0.verdict}, ${t0.direction}) -> ${t1.ppStretched?.toFixed(4)} (${t1.verdict}). Median ${st.median.toFixed(6)} kept.` };
     }
   },
 
@@ -1405,7 +1646,7 @@ export const TOOL_CATALOG = {
         tolerance: input.tolerance
       });
       const stats = await getStats(ctx, input.view_id);
-      return { type: 'text', text: `ABE complete (degree=${abeDeg}). Stats: median=${stats.median.toFixed(6)}, MAD=${stats.mad.toFixed(6)}` };
+      return { type: 'text', text: `ABE complete (degree=${abeDeg}). Stats: median=${stats.median.toFixed(6)}, MAD=${stats.mad.toFixed(6)}${await envelopeNote(ctx, _brief, input.view_id)}` };
     }
   },
 
@@ -1436,7 +1677,7 @@ export const TOOL_CATALOG = {
         throw new Error(`run_per_channel_abe failed: ${abeRes.error?.message || abeRes.error || 'PJSR error'}`);
       }
       const stats = await getStats(ctx, input.view_id);
-      return { type: 'text', text: `Per-channel ABE complete (degree=${input.poly_degree || 1}). Stats: median=${stats.median.toFixed(6)}` };
+      return { type: 'text', text: `Per-channel ABE complete (degree=${input.poly_degree || 1}). Stats: median=${stats.median.toFixed(6)}${await envelopeNote(ctx, _brief, input.view_id)}` };
     }
   },
 
@@ -1478,7 +1719,13 @@ export const TOOL_CATALOG = {
         properties: {
           view_id: { type: 'string', description: 'View ID to process' },
           denoise: { type: 'number', description: 'Denoise strength (0.0-1.0, recommend 0.15-0.35)' },
-          detail: { type: 'number', description: 'Detail preservation (0.0-1.0, default 0.15)' }
+          detail: { type: 'number', description: 'Detail preservation (0.0-1.0, default 0.15)' },
+          frequency_separation: { type: 'boolean', description: 'NXT frequency separation: denoise is then the HIGH-frequency strength and denoise_lf the low-frequency one. RC-Astro starting point: HF 0.8-0.9, LF 0.5-0.7 (on linear data). Cleans the residual mottle that local contrast later turns into cells/worms.' },
+          denoise_lf: { type: 'number', description: 'Low-frequency luminance denoise (with frequency_separation)' },
+          frequency_scale: { type: 'number', description: 'Boundary between high and low frequencies in px (with frequency_separation; NXT default if omitted)' },
+          color_separation: { type: 'boolean', description: 'NXT colour separation: denoise_color / denoise_lf_color set the chroma strengths independently. Use this instead of chroma blurs (they paint flat knots).' },
+          denoise_color: { type: 'number', description: 'High-frequency colour denoise (with color_separation; 0.9-1.0 typical)' },
+          denoise_lf_color: { type: 'number', description: 'Low-frequency colour denoise (with color_separation and frequency_separation; ~1.0 typical)' }
         },
         required: ['view_id', 'denoise']
       }
@@ -1488,6 +1735,8 @@ export const TOOL_CATALOG = {
         var P = new NoiseXTerminator;
         P.denoise = ${input.denoise};
         P.detail = ${input.detail ?? 0.15};
+        ${input.frequency_separation ? `P.enableFrequencySeparation = true;${Number.isFinite(input.denoise_lf) ? ` P.denoiseLf = ${input.denoise_lf};` : ''}${Number.isFinite(input.frequency_scale) ? ` P.frequencyScale = ${input.frequency_scale};` : ''}` : ''}
+        ${input.color_separation ? `P.enableColorSeparation = true;${Number.isFinite(input.denoise_color) ? ` P.denoiseColor = ${input.denoise_color};` : ''}${Number.isFinite(input.denoise_lf_color) ? ` P.denoiseLfColor = ${input.denoise_lf_color};` : ''}` : ''}
         execOrThrow(P, ImageWindow.windowById('${input.view_id}').mainView, 'run_nxt');
       `, 'run_nxt');
       const stats = await getStats(ctx, input.view_id);
@@ -1501,7 +1750,7 @@ export const TOOL_CATALOG = {
           noiseLine = ` bgNoise=${(nz.bgNoise ?? 0).toFixed(4)} (HARD ${NOISE_BG_HARD}) dustNoise=${(nz.dustNoise ?? 0).toFixed(4)} (HARD ${NOISE_DUST_HARD}) ${nz.pass ? 'PASS' : 'FAIL'}`;
         } catch (e) { noiseLine = ` bgNoise: measurement failed (${e.message}).`; }
       }
-      return { type: 'text', text: `NXT complete (denoise=${input.denoise}). Stats: median=${stats.median.toFixed(6)}, MAD=${stats.mad.toFixed(6)}.${noiseLine}` };
+      return { type: 'text', text: `NXT complete (denoise=${input.denoise}${input.frequency_separation ? `, freq-sep LF=${input.denoise_lf ?? 'default'}` : ''}${input.color_separation ? `, colour-sep C=${input.denoise_color ?? 'default'}` : ''}). Stats: median=${stats.median.toFixed(6)}, MAD=${stats.mad.toFixed(6)}.${noiseLine}` };
     }
   },
 
@@ -3404,13 +3653,17 @@ export const TOOL_CATALOG = {
           out0: { type: 'number', description: 'Body exclusion ramp start, luminance (default 0.13; set between halo and body levels)' },
           out1: { type: 'number', description: 'Body exclusion ramp end (default 0.19)' },
           lhe_amount: { type: 'number', description: 'Cloud-shape LHE amount (default 0.35; 0 = off)' },
-          color: { type: 'boolean', description: 'Apply halo gold colour (default true)' }
+          color: { type: 'boolean', description: 'Apply halo palette colour boost (default true for SHO; default false for HOO, where the gold hue fold is also skipped)' },
+          override: { type: 'boolean', description: 'Lift even though the class profile sets faint_halo.lift=false. Only if the user asked for it.' }
         },
         required: ['view_id']
       }
     },
     handler: async (ctx, _store, _brief, input) => {
-      const r = await liftFaintHalo(ctx, input.view_id, input.ha_id || 'FILTER_Ha', { out0: input.out0, out1: input.out1, lhe_amount: input.lhe_amount, color: input.color });
+      const fh = _brief?.processingProfile?.faint_halo;
+      if (fh?.lift === false && !input.override) return { type: 'text', text: `lift_faint_halo refused for this class: ${fh.reason} Use compress_outer_haze (strength ${fh.compress_strength}) instead, or pass override=true only if the user asked for the lift.` };
+      const isHoo = nbPaletteOf(_brief) === 'hoo';
+      const r = await liftFaintHalo(ctx, input.view_id, input.ha_id || 'FILTER_Ha', { out0: input.out0, out1: input.out1, lhe_amount: input.lhe_amount, color: input.color ?? !isHoo, palette: isHoo ? 'hoo' : undefined });
       const bal = await measurePaletteBalance(ctx, input.view_id, { palette: nbPaletteOf(_brief) });
       return { type: 'text', text: `Halo lifted: sky lum ${r.sky?.toFixed(4)}, halo mask mean ${r.haloMaskMean?.toFixed(3)}, body-edge mask ${r.bodyMaskId} (mean ${r.bodyMaskMean?.toFixed(3)}), max ${r.max?.toFixed(3)}. Next: body_edge_contrast.\nPalette: ${bal.summary}` };
     }
@@ -3426,6 +3679,28 @@ export const TOOL_CATALOG = {
     handler: async (ctx, _store, _brief, input) => {
       const r = await bodyEdgeContrast(ctx, input.view_id, { amount: input.amount });
       return { type: 'text', text: `Body edge contrast applied (${r.result}).` };
+    }
+  },
+
+  compress_outer_haze: {
+    category: 'narrowband',
+    definition: {
+      name: 'compress_outer_haze',
+      description: 'The opposite of lift_faint_halo, USER-APPROVED on the NGC6992 Veil ("haze75"; the lifted grey-pink fog was "way too much"): compress the faint outer haze toward the per-channel sky, X\' = sky + (X - sky)(1 - strength*mask). Mask = faint luminance outside a grown bright-filament body, so filaments and core are untouched and the arc keeps a soft edge. Run on a clone, on the finished palette view, before stars. Verify at 1:1 that no mask edge shows: save_and_show_preview(view_id, label, region="subject").',
+      input_schema: {
+        type: 'object',
+        properties: {
+          view_id: { type: 'string', description: 'Finished colour view (modified in place, clone first)' },
+          strength: { type: 'number', description: '0-1 (default: profile faint_halo.compress_strength, else 0.75)' },
+          body_lo: { type: 'number', description: 'Luminance above which the bright body is protected (default 0.28)' }
+        },
+        required: ['view_id']
+      }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const strength = input.strength ?? _brief?.processingProfile?.faint_halo?.compress_strength;
+      const r = await compressOuterHaze(ctx, input.view_id, { strength, body_lo: input.body_lo });
+      return { type: 'text', text: `Outer haze compressed: strength ${r.strength}, sky lum ${r.skyLum?.toFixed(4)}, haze mask mean ${r.hazeMaskMean?.toFixed(3)}, median ${r.median?.toFixed(4)}. Check 1:1 for mask edges.` };
     }
   },
 
@@ -4311,7 +4586,7 @@ export const TOOL_CATALOG = {
         const result = await checkSaturation(ctx, input.view_id);
         const { maxP90, warnAt, failAt, targetP90 } = saturationThresholds(brief);
         let text = result.details;
-        text += `\n\nProfile thresholds: P90 target/warn above ${warnAt.toFixed(2)}${targetP90 !== undefined ? ' (look.target_p90)' : ''}; finish gate FAILS above ${failAt.toFixed(2)}.`;
+        text += `\n\nProfile thresholds: P90 target/warn above ${warnAt.toFixed(2)}${targetP90 !== undefined ? ' (look.target_p90)' : ''}; finish gate limit: P90 above ${failAt.toFixed(2)} is rejected.`;
 
         // Add repair policy if saturation exceeds limit
         if (result.p90S > warnAt) {
@@ -4337,6 +4612,23 @@ export const TOOL_CATALOG = {
       } catch (e) {
         return { type: 'text', text: `Saturation check error: ${e.message}` };
       }
+    }
+  },
+
+  stage_checkpoint: {
+    category: 'quality_gate',
+    definition: {
+      name: 'stage_checkpoint',
+      description: 'Measure the metrics of ONE processing stage on a view and record them (cheap, partial finish check). Recommended order — operations that move many metrics first: tone (core/disc vs prep, outer zone, sky, separation) -> local_contrast (mottle, core structure) -> detail_noise (fine detail vs prep, grain; sharpen and denoise judged together) -> colour (arm saturation floor, P90; colour tools move nothing else) -> stars. Call it when you finish a stage; if a later finish gate fails on a metric that passed here, the failure names the stage that drifted.',
+      input_schema: { type: 'object', properties: { view_id: { type: 'string' }, stage: { type: 'string', enum: ['tone', 'local_contrast', 'detail_noise', 'colour'] } }, required: ['view_id', 'stage'] }
+    },
+    handler: async (ctx, _store, brief, input) => {
+      const rows = await measureStage(ctx, brief, input.view_id, input.stage);
+      if (brief) { brief._stageLocks = brief._stageLocks || {}; brief._stageLocks[input.stage] = { view: input.view_id, rows }; }
+      const def = METRIC_STAGES.find(x => x.stage === input.stage);
+      const lines = rows.map(r => `- ${r.pass ? 'PASS' : 'FAIL'} ${r.gate}: ${r.metric} = ${r.value} (${r.limit})${r.note ? ` — ${r.note}` : ''}`);
+      const allPass = rows.every(r => r.pass);
+      return { type: 'text', text: `[STAGE ${input.stage.toUpperCase()}: ${allPass ? 'PASS' : 'FAIL'}] on ${input.view_id}\n${lines.join('\n') || '- (no gates configured for this stage)'}\nStage tools: ${def?.tools}.\n${allPass ? 'Recorded. Later stages should not move these; finish will attribute any drift to this stage.' : 'Fix this stage before moving on: later stages cannot repair it without side effects.'}` };
     }
   },
 
@@ -4403,8 +4695,12 @@ export const TOOL_CATALOG = {
       // A properly stretched star layer has bright star peaks spread across the range.
       // An unstretched one has median ~0 and only a handful of pixels above 0.1
       const stats = await getStats(ctx, input.view_id);
+      // 2026-11-08 (M74 v8): the old absolute "< 20000 sampled pixels above 0.005" was set on full frames
+      // (~3.8M samples, i.e. 0.5 %); a stretched 3000x2000 crop has only 375k samples and failed at 12k (3.3 %),
+      // which stalled the run. Use the FRACTION of samples (same 0.5 % at full frame).
+      const nzFrac = result.sampled_pixel_count > 0 ? result.nonzero_pixel_count / result.sampled_pixel_count : null;
       const isUnstretched = (stats.median < 0.001) && (result.max_value > 0.1) &&
-        (result.nonzero_pixel_count < 20000); // linear star layers have very few detectable pixels
+        (nzFrac != null ? nzFrac < 0.005 : result.nonzero_pixel_count < 20000); // linear star layers have very few detectable pixels
 
       // Store result in brief for star_protected_blend precondition check
       if (brief) {
@@ -5037,8 +5333,55 @@ export const AGENT_TOOL_EXCLUDES = {
   gradient_agent: new Set(['run_scnr']),
   // core_specialist gets the quality_gate category for check_ringing / scan_burnt_regions /
   // check_highlight_texture, but not the whole-image or star-layer gates (no star tools by design).
-  core_specialist: new Set(['run_quality_gates', 'check_star_quality', 'check_star_layer_integrity', 'check_tonal_presence']),
+  core_specialist: new Set(['run_quality_gates', 'check_star_quality', 'check_star_layer_integrity', 'check_tonal_presence', 'stage_checkpoint']),
 };
+
+// Automatic stage checkpoints (2026-11-08): the M74 v6 agent never called stage_checkpoint (0 calls), so the
+// staged order gave no early feedback. When the main agent first uses a tool of a LATER stage on the working
+// image, the pipeline measures every earlier stage not yet recorded — on the image as it is just before that
+// operation — records it (drift attribution at finish) and appends the report to the tool result.
+const TOOL_STAGE = {
+  run_lhe: 'local_contrast', run_hdrmt: 'local_contrast', multi_scale_enhance: 'local_contrast', shell_detail_enhance: 'local_contrast',
+  run_nxt: 'detail_noise',
+  chroma_smooth: 'colour', run_scnr: 'colour',
+  star_screen_blend: 'stars', star_protected_blend: 'stars',
+};
+const STAGE_ORDER = ['tone', 'local_contrast', 'detail_noise', 'colour', 'stars'];
+function STAGE_OF_TOOL(name) { return TOOL_STAGE[name] || (name === 'run_curves' ? 'colour?' : null); }
+async function isWorkingImage(ctx, brief, viewId) {
+  if (!viewId || /mask|star|_M$|__/i.test(viewId) || !brief?._inventory?.zones) return false;
+  const r = await ctx.pjsr(`var w = ImageWindow.windowById('${viewId}'); if (w.isNull) 'null'; else { var i = w.mainView.image; JSON.stringify({ c: i.isColor, w: i.width, h: i.height, m: i.median() }); }`);
+  const o = (() => { try { return JSON.parse(r.outputs?.consoleOutput?.trim() || 'null'); } catch { return null; } })();
+  if (!o || !o.c) return false;
+  const [cx, cy] = brief._inventory.centre || [0, 0];
+  return o.m > 0.03 && o.m < 0.35 && o.w > 1.6 * cx && o.h > 1.6 * cy;
+}
+function withAutoCheckpoint(name, handler) {
+  return async (ctx, store, brief, input, agentName) => {
+    let note = '';
+    try {
+      let st = STAGE_OF_TOOL(name);
+      if (st === 'colour?') st = input?.channel === 'S' ? 'colour' : null;
+      const k = STAGE_ORDER.indexOf(st);
+      const vid = input?.view_id || input?.starless_id || input?.target_id;
+      if (k > 0 && brief && await isWorkingImage(ctx, brief, vid)) {
+        brief._stageLocks = brief._stageLocks || {};
+        for (const prev of STAGE_ORDER.slice(0, k)) {
+          if (prev === 'stars' || brief._stageLocks[prev]) continue;
+          const rows = await measureStage(ctx, brief, vid, prev);
+          brief._stageLocks[prev] = { view: vid, rows, auto: true, before: name };
+          const bad = rows.filter(r => !r.pass);
+          note += `\n[AUTO CHECKPOINT ${prev.toUpperCase()}: ${bad.length ? 'FAIL' : 'PASS'}] measured on ${vid} before this ${name} (you moved to a later stage):\n` +
+            rows.map(r => `- ${r.pass ? 'PASS' : 'FAIL'} ${r.gate}: ${r.metric} = ${r.value} (${r.limit})`).join('\n') +
+            (bad.length ? `\n  The '${prev}' stage is not done: fix it before going further (later-stage tools cannot repair it without side effects).` : '');
+        }
+      }
+    } catch (e) { note += `\n[auto checkpoint skipped: ${e.message}]`; }
+    const res = await handler(ctx, store, brief, input, agentName);
+    if (note && res && res.type === 'text') res.text += note;
+    return res;
+  };
+}
 
 export function buildToolSet(agentName, extraCategories = []) {
   // If agent not in the map, give ALL categories (collect unique category values)
@@ -5056,7 +5399,7 @@ export function buildToolSet(agentName, extraCategories = []) {
     if (AGENT_TOOL_EXCLUDES[agentName]?.has(name)) continue;
     if (categories.has(tool.category)) {
       definitions.push(tool.definition);
-      handlers.set(name, tool.handler);
+      handlers.set(name, agentName === 'giga_orchestrator' && STAGE_OF_TOOL(name) ? withAutoCheckpoint(name, tool.handler) : tool.handler);
     }
   }
 

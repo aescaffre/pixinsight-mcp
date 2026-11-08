@@ -3,6 +3,7 @@
 // ============================================================================
 import fs from 'fs';
 import path from 'path';
+import { normalizeWinPathsInCode, piMemoryMB, piAlive } from './platform.mjs';
 import crypto from 'crypto';
 import os from 'os';
 
@@ -26,13 +27,7 @@ export class BridgeCrashError extends Error {
  * Check if PixInsight process is running.
  */
 function isPixInsightAlive() {
-  try {
-    const { execSync } = require('child_process');
-    const out = execSync("ps aux | grep '[P]ixInsight.app' | wc -l", { timeout: 5000 }).toString().trim();
-    return parseInt(out, 10) > 0;
-  } catch {
-    return false;
-  }
+  return piAlive() !== false;
 }
 
 // Lazy-load child_process for isPixInsightAlive (ESM compat)
@@ -50,15 +45,10 @@ export async function isAlive() {
   // 5 s timeout and returned false on timeout; under a heavy 100 MP operation (swap thrashing) ps
   // exceeded it, the run was aborted as "crashed" and the queue then killed a healthy PixInsight
   // (IC5146 babad074, 2026-10-30). Now: pgrep, 15 s timeout, 3 confirmations, timeouts = alive.
-  const execSync = await getExecSync();
+  // Platform-aware (pgrep on macOS/Linux, tasklist on Windows); null = unknown platform or slow system = alive.
   for (let i = 0; i < 3; i++) {
-    try {
-      execSync('pgrep -x PixInsight', { timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'] });
-      return true;                       // exit 0: process found
-    } catch (e) {
-      if (e && (e.code === 'ETIMEDOUT' || e.signal === 'SIGTERM')) return true;   // slow system, not dead
-      // pgrep exit 1 = no match; confirm twice more before declaring a crash
-    }
+    if (piAlive() !== false) return true;
+    // no match; confirm twice more before declaring a crash
     await new Promise(r => setTimeout(r, 2000));
   }
   return false;
@@ -121,6 +111,8 @@ export function createBridgeContext(opts = {}) {
     if (tool !== 'list_open_images') await waitForWarmWatcher();
     return new Promise(async (resolve, reject) => {
       const id = crypto.randomUUID();
+      // Windows: drive paths embedded in PJSR lose their backslashes; rewrite them to forward slashes.
+      if (params && typeof params.code === 'string') params = { ...params, code: normalizeWinPathsInCode(params.code) };
       const cmd = {
         id, timestamp: new Date().toISOString(), tool, process: proc,
         parameters: params,
@@ -215,11 +207,8 @@ export function createBridgeContext(opts = {}) {
 
   async function checkMemory(stepId, liveImages, onAbort) {
     try {
-      const execSync = await getExecSync();
-      const out = execSync("ps aux | grep '[P]ixInsight.app' | awk '{s+=$6} END{print s}'").toString().trim();
-      const memKB = parseInt(out, 10);
-      if (!memKB) return memKB;
-      const memMB = Math.round(memKB / 1024);
+      const memMB = piMemoryMB();          // null on unsupported platforms: skip silently (no ps/grep/awk on Windows)
+      if (!memMB) return 0;
       if (memMB > MEM_ABORT_MB) {
         logFn(`  [MEMORY] CRITICAL: PixInsight using ${memMB}MB`);
         if (onAbort) await onAbort(stepId);
@@ -232,8 +221,7 @@ export function createBridgeContext(opts = {}) {
           }
         }
         await pjsr('processEvents();');
-        const out2 = execSync("ps aux | grep '[P]ixInsight.app' | awk '{s+=$6} END{print s}'").toString().trim();
-        const memMB2 = Math.round(parseInt(out2, 10) / 1024);
+        const memMB2 = piMemoryMB() ?? 0;
         logFn(`  [MEMORY] After purge: ${memMB2}MB`);
         return memMB2;
       } else {
