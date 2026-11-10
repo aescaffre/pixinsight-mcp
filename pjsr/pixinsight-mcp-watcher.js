@@ -67,7 +67,7 @@ var BRIDGE_DIR = File.homeDirectory + "/.pixinsight-mcp/bridge";
 var COMMANDS_DIR = BRIDGE_DIR + "/commands";
 var RESULTS_DIR = BRIDGE_DIR + "/results";
 var LOGS_DIR = BRIDGE_DIR + "/logs";
-var POLL_INTERVAL_MS = 1000;
+var POLL_INTERVAL_MS = 100;
 var WATCHER_VERSION = "0.2.0-v8";
 
 // ============================================================================
@@ -231,6 +231,7 @@ function handleGetImageStatistics(command) {
 // ============================================================================
 
 function handleRunPixelMath(command) {
+   // Fix contributed by Andrei Gusan (PR #2, 2026-08): see the comments below.
    var P = new PixelMath;
    P.expression = command.parameters.expression || "";
    P.expression1 = command.parameters.expression1 || "";
@@ -241,12 +242,51 @@ function handleRunPixelMath(command) {
       P.newImageId = command.parameters.newImageId;
    }
 
+   // New-image color space: PixelMath defaults to SameAsTarget, which silently
+   // clones the anchor view's color space (e.g. mono) even when three separate
+   // R/G/B channel expressions were given. Verified empirically against
+   // PixInsight 1.9.4 / V8: combining three mono masters via expression/
+   // expression1/expression2 produced a 1-channel clone of the target until
+   // newImageColorSpace was set explicitly. Auto-detect RGB when multiple
+   // channel expressions are given and the caller hasn't asked for mono.
+   var colorSpaceMap = {
+      "rgb": PixelMath.RGB,
+      "gray": PixelMath.Gray,
+      "sameAsTarget": PixelMath.SameAsTarget
+   };
+   if (command.parameters.newImageColorSpace) {
+      P.newImageColorSpace = colorSpaceMap[command.parameters.newImageColorSpace] !== undefined
+         ? colorSpaceMap[command.parameters.newImageColorSpace]
+         : PixelMath.SameAsTarget;
+   } else if (P.createNewImage && !P.useSingleExpression) {
+      P.newImageColorSpace = PixelMath.RGB;
+   }
+
+   var view = null;
    if (command.targetView) {
-      var view = findViewById(command.targetView);
+      view = findViewById(command.targetView);
       if (!view) throw new Error("View not found: " + command.targetView);
+   }
+
+   if (view) {
       P.executeOn(view);
    } else {
-      P.executeGlobal();
+      // PixelMath cannot execute in the pure global context when its
+      // parameters reference specific source views (e.g. combining named
+      // images into a new one) -- it still needs *some* view for execution
+      // context, even though the output is a brand-new image. Verified
+      // empirically: executeGlobal() throws "Cannot execute instance in the
+      // global context" in that case. Fall back to any open window as anchor.
+      try {
+         P.executeGlobal();
+      } catch (e) {
+         var windows = ImageWindow.windows;
+         if (windows.length > 0) {
+            P.executeOn(windows[0].mainView);
+         } else {
+            throw e;
+         }
+      }
    }
    return {
       status: "success",
@@ -256,9 +296,28 @@ function handleRunPixelMath(command) {
 }
 
 function handleRemoveGradient(command) {
+   // Fix contributed by Andrei Gusan (PR #2, 2026-08): see the comments below.
    var P = new AutomaticBackgroundExtractor;
    P.polyDegree = command.parameters.polyDegree || 4;
    P.tolerance = command.parameters.tolerance || 1.0;
+
+   // Correction mode: ABE defaults to targetCorrection=Correction_None and
+   // replaceTarget=false, meaning by default it only produces a separate
+   // background-model preview window and never touches the target image --
+   // verified empirically against PixInsight 1.9.4 / V8. Default to actually
+   // correcting the target in place (Subtract), since that's what
+   // "remove_gradient" implies; allow override via parameters.
+   var correctionMap = {
+      "subtract": AutomaticBackgroundExtractor.Correction_Subtract,
+      "divide": AutomaticBackgroundExtractor.Correction_Divide,
+      "none": AutomaticBackgroundExtractor.Correction_None
+   };
+   var correctionParam = command.parameters.correction || "subtract";
+   P.targetCorrection = correctionMap[correctionParam] !== undefined
+      ? correctionMap[correctionParam]
+      : AutomaticBackgroundExtractor.Correction_Subtract;
+   P.replaceTarget = command.parameters.replaceTarget !== false;  // default true
+   P.discardModel = command.parameters.discardModel !== false;   // default true
 
    var view = findViewById(command.targetView);
    if (!view) throw new Error("View not found: " + command.targetView);
@@ -266,7 +325,7 @@ function handleRemoveGradient(command) {
    return {
       status: "success",
       outputs: {},
-      message: "Gradient removed from " + command.targetView + " (ABE, degree " + P.polyDegree + ")"
+      message: "Gradient removed from " + command.targetView + " (ABE, degree " + P.polyDegree + ", correction=" + correctionParam + ")"
    };
 }
 
@@ -776,20 +835,16 @@ function runWatcher() {
       var processed = processNextCommand();
       if (processed) {
          commandCount++;
-         // Yield heavily after command execution so UI can catch up
-         for (var y = 0; y < 20; ++y) {
-            CoreApplication.processEvents();
-            System.msleep(20);
-            if (shouldShutdown()) break;
-         }
+         // Yield after command execution so the UI can catch up — time-boxed (2026-11-10): 20 iterations of
+         // processEvents()+20 ms took far longer than 400 ms with large images open (processEvents repaints).
+         var yEnd = Date.now() + 120;
+         do { CoreApplication.processEvents(); System.msleep(10); } while (Date.now() < yEnd && !shouldShutdown());
       } else {
-         // No commands — yield frequently with short sleeps for UI responsiveness
-         // Total idle cycle: ~500ms (25 x 20ms) before re-checking commands
-         for (var i = 0; i < 25; ++i) {
-            System.msleep(20);
-            CoreApplication.processEvents();
-            if (shouldShutdown()) break;
-         }
+         // No commands — yield with short sleeps, re-check the command folder every ~100 ms of WALL time.
+         // (2026-11-10: the old 25 x (20 ms + processEvents) cycle measured 2-4 s per round trip with images
+         // open — a bare "1+1" took 3.5 s although it executed in 3 ms.)
+         var iEnd = Date.now() + 100;
+         do { System.msleep(10); CoreApplication.processEvents(); } while (Date.now() < iEnd && !shouldShutdown());
          maybeWarmUp();
       }
    }

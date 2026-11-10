@@ -1,6 +1,6 @@
 # PixInsight MCP -- Autonomous Deep Sky Astrophotography Processing
 
-An autonomous deep sky astrophotography processing pipeline that uses Claude (via Claude Code / Max subscription) to drive PixInsight through file-based IPC. The LLM acts as a processing director -- making creative decisions about stretching, detail enhancement, color saturation, and star management -- while code-enforced quality gates prevent common processing failures like ringing artifacts, core burning, and star destruction.
+An autonomous deep sky astrophotography processing pipeline that uses Claude (via Claude Code / Max subscription) to drive PixInsight through file-based IPC. The LLM acts as a processing director -- making creative decisions about stretching, detail enhancement, color saturation, and star management -- while code-enforced quality gates prevent common processing failures like ringing artifacts, core burning, and star destruction. Since v0.5.0 every gate measurement runs natively in **Rust** (`native/pixmetrics`, macOS and Windows): a full gate battery takes seconds instead of minutes, and results are identical to the PixInsight implementations.
 
 **Status**: Work in progress. Actively developed and used for production processing.
 
@@ -59,7 +59,7 @@ Mono narrowband masters (S/H/O or H/O) are detected automatically and routed thr
     | narrowband-prep.mjs   |           |                          |
     |                       |           | gradient sub-agent       |
     | open, align, combine, |           | giga orchestrator        |
-    | GC, BN, BXT, SPCC,   |           |   (100 MCP tools)        |
+    | GC, BN, BXT, SPCC,   |           |   (85-96 MCP tools)      |
     | NXT, SXT, stretch     |           | optional core specialist |
     +-----------+-----------+           | aesthetic critic + gates |
                 |                       +-------------+-------------+
@@ -67,19 +67,59 @@ Mono narrowband masters (S/H/O or H/O) are detected automatically and routed thr
                 +----> PixInsight (PJSR, V8) <--------+
                        via file-based bridge IPC
                        (~/.pixinsight-mcp/bridge/)
+                                  |
+                       view exported once per image state (XISF)
+                                  |
+                        +---------v-----------+
+                        | pixmetrics (Rust)    |
+                        | XISF reader + all    |
+                        | gate measurements    |
+                        | (PJSR fallback)      |
+                        +---------------------+
 ```
 
 ### Two-Phase Design
 
 **Phase 1: Deterministic Prep** (`agents/llm/deterministic-prep.mjs`) -- Zero LLM involvement. Opens calibrated masters, aligns channels via StarAlignment, combines RGB, runs the canonical linear processing sequence (gradient correction, BlurXTerminator correction, astrometric solution copy, SPCC color calibration, background neutralization, NoiseXTerminator, BlurXTerminator sharpening, StarXTerminator star extraction, Seti statistical stretch). Repeats for L and Ha channels if present. Every applied step is recorded in the prep result, and prep warns if the extracted star layer is not linear. This phase is deterministic and **cached**: a SHA-256 fingerprint of the script content plus input file headers (size + mtime + first/last 64KB) means identical inputs skip reprocessing entirely. When the config lists mono S/H/O masters and no R/G/B, prep is routed to `agents/llm/narrowband-prep.mjs` instead.
 
-**Phase 2+: Creative Agents** (`agents/llm/giga-run.mjs`) -- Claude agents spawned as `claude -p` subprocesses (running on a Max subscription, zero API cost). A dedicated **gradient sub-agent** first flattens the background on the linear data; the **giga orchestrator** then receives the prepped working assets and a system prompt dynamically built from the target's classification and processing profile, with access to 100 MCP tools that map to PixInsight operations. An optional **core specialist** post-pass (`--core-specialist`) and an **aesthetic critic** complete the roster. Each agent has an explicit model/effort/turn budget (`agents/llm/agent-models.mjs`).
+**Phase 2+: Creative Agents** (`agents/llm/giga-run.mjs`) -- Claude agents spawned as `claude -p` subprocesses (running on a Max subscription, zero API cost). A dedicated **gradient sub-agent** first flattens the background on the linear data; the **giga orchestrator** then receives the prepped working assets and a system prompt dynamically built from the target's classification and processing profile, with access to a fixed set of MCP tools that map to PixInsight operations (96 at most; data-aware, see The Tool Inventory). An optional **core specialist** post-pass (`--core-specialist`) and an **aesthetic critic** complete the roster. Each agent has an explicit model/effort/turn budget (`agents/llm/agent-models.mjs`).
 
 ### File-Based Bridge IPC
 
-Node.js communicates with PixInsight's PJSR scripting engine through a file-based bridge at `~/.pixinsight-mcp/bridge/`. A watcher script (`pjsr/pixinsight-mcp-watcher.js`) runs inside PixInsight, polls for JSON command files, executes them via the PJSR engine, and writes result files. This is the only way to programmatically control PixInsight -- there is no socket or HTTP API. Bridge latency is approximately 2 seconds per tool call.
+Node.js communicates with PixInsight's PJSR scripting engine through a file-based bridge at `~/.pixinsight-mcp/bridge/`. A watcher script (`pjsr/pixinsight-mcp-watcher.js`) runs inside PixInsight, polls for JSON command files, executes them via the PJSR engine, and writes result files. This is the only way to programmatically control PixInsight -- there is no socket or HTTP API. A round trip costs about **0.1 s** (v0.5.0: the watcher re-checks for commands every ~100 ms of wall time and the Node side polls every 100 ms; before, a bare `1+1` took 3.5 s because the idle loop was 25 x (sleep + UI events) and UI events are slow with large images open).
 
 **The watcher runs on PixInsight's V8 runtime** (`#engine v8` on its first line, PixInsight >= 1.9.5). Without that directive a script runs on the legacy SpiderMonkey runtime, whose garbage collector aborted PixInsight 1.9.5 on Apple Silicon with large images open (explicit `gc()` or automatic collections alike). The V8 watcher ships a small compatibility layer for command snippets written in the legacy style: `processEvents`/`msleep`/`sleep` globals, `gc()` as a no-op, and a rewrite of `Process.prototype.CONST` to `Process.CONST` before eval. It also includes the V8 ImageSolver library (`MCP_WITH_SOLVER`) so prep can plate-solve when the masters carry no astrometric solution. The SpiderMonkey version is kept as `pjsr/pixinsight-mcp-watcher-sm-legacy.js` for reference only.
+
+### Native Metrics in Rust (pixmetrics)
+
+Every measurement behind the quality gates, stage checkpoints and per-step metrics runs in **`native/pixmetrics`**, a Rust binary, instead of PixInsight's JavaScript engine. Those measurements used to dominate run time: on M74 (3000x2000) one `run_quality_gates` battery took ~350 s and checks were 61% of a 2 h 50 min run.
+
+**How it works**
+
+1. `agents/ops/native-metrics.mjs` asks PixInsight for a cheap fingerprint of the view (dimensions, channel means, a 64-point sample grid). Only when the image changed does PixInsight write it as an uncompressed Float32 XISF (~0.3 s).
+2. The binary reads it (~70 ms for 3000x2000x3) and computes the requested metrics **in parallel**, returning the same JSON keys as the JavaScript function it replaces.
+3. **Batching**: a gate battery is wrapped in `nativeBatch()`: one export, one binary call for every metric the same battery asked for last time (self-learning list, so nothing has to be kept in sync with the gate code).
+4. **Fallback**: every `measureX()` keeps its PixInsight implementation as `measureXPjsr()`. If the binary is missing, fails, or `PIXINSIGHT_MCP_NATIVE=0` is set, the old path runs unchanged.
+
+**What it contains**: an XISF 1.0 reader (attachment / inline / embedded blocks; planar or interleaved; UInt8/16/32, Float32/64; zlib, LZ4, LZ4-HC and Zstandard compression, each with or without byte shuffling -- all 27 variants PixInsight writes are tested), PNG and JPEG input (for user reference images), and 42 metrics: burn scan, core contrast/texture/troughs/spectrum/amplification, nucleus colour, zone structure, arm/gap depth, envelope sectors and profiles, outer arms, faint disc, signal inventory, scale bands, disc mottle, background noise/floor, subject detail, dust coverage, subject ROI, chroma noise, saturation, ringing, shell/highlight texture, colour gradient, palette balance/purity, outer-zone colour, Ha knots, star quality/field/layer integrity, bright chroma, PSF field, tonal presence and the full reference comparison (palette, Lab EMD, grain, MS-SSIM).
+
+**Identical results.** `scripts/native-parity.mjs` runs every metric both ways on images opened in PixInsight. On M74 every metric agrees to better than 1e-4 relative, most to 7-8 significant digits. Three PixInsight conventions had to be measured to get there (documented in `.claude/skills/pixinsight-pipeline/reference/pjsr-gotchas.md`):
+- `Convolution` (Gaussian) truncates its kernel at 1% of the peak (radius 3.035 sigma) and reflects at the borders.
+- `Image.median()` pools all channels and averages the two middle values; `MAD()` is unscaled.
+- `Resample` (Mitchell-Netravali, default smoothness 1.5) is separable, maps output pixel t to source t x scale, with a kernel radius of floor(scale) + 1.5 pixels.
+
+**Speed** (M74 3000x2000, same metrics):
+
+| | PixInsight JS | Rust |
+|---|---|---|
+| 33 gate metrics, one by one | 290 s | 12 s |
+| `disc_mottle` | 38 s | 0.5 s |
+| `core_texture` | 36 s | 0.5 s |
+| `compare_reference` (MS-SSIM), full image | > 27 min | 0.2 s |
+| full `run_quality_gates` battery in a run | ~350 s | ~6 s |
+| main agent, whole M74 run | 144 min (v11) | 12-24 min (v12-v16) |
+
+**Platforms**: pure Rust with no C dependencies (miniz_oxide, lz4_flex, ruzstd, png, jpeg-decoder), so it builds natively on macOS (arm64, x86_64), Windows (x86_64) and Linux, and cross-compiles to Windows from macOS. Prebuilt binaries are attached to each GitHub release; CI (`.github/workflows/pixmetrics.yml`) builds and tests all four targets.
 
 ### The Claude Max Engine
 
@@ -93,7 +133,7 @@ The creative agents run via `claude -p` subprocess (`agents/llm/engine-max.mjs`)
 
 ## The Tool Inventory
 
-100 tools organized into categories (`agents/llm/tools.mjs`, `TOOL_CATALOG`). A selection:
+Up to 96 tools organized into categories (`agents/llm/tools.mjs`, `TOOL_CATALOG`). Since v0.5.0 the set is **data-aware**: palette-only tools (`sho_*`, palette balance, synthetic luminance) exist only when the data has SII or OIII, and Ha-specific ones only when there is Ha -- an LRGB run gets 85 tools, HaLRGB 88, SHO 96. There is **no free-form PixelMath** for the creative agents: they use a fixed toolset (`adjust_levels`, `blend_images`, `zone_mask`, `mask_ops`, `lift_outer_disc`, `soft_glow`, `restrain_red_hue`, ...), as world-class processors do. A selection:
 
 | Category | Tools | Purpose |
 |----------|-------|---------|
@@ -102,9 +142,9 @@ The creative agents run via `claude -p` subprocess (`agents/llm/engine-max.mjs`)
 | image_mgmt | clone_image, restore_from_clone, close_image, purge_undo, list_open_images | State management and memory control (new windows refused above 12 open) |
 | gradient | run_gradient_correction, run_abe, run_per_channel_abe, run_scnr | Background flattening (masked per-channel ABE) and green cast removal |
 | denoise / sharpen / stretch | run_nxt, run_bxt, seti_stretch, auto_stretch, stretch_stars | NoiseXTerminator, BlurXTerminator (correct + sharpen), statistical and star stretch |
-| masks | create_luminance_mask, create_zone_masks, mask_ops, apply_mask, remove_mask, close_mask | Mask creation, core/shell/halo zones, mask arithmetic with statistics, geometry-checked apply |
-| detail | run_lhe, run_hdrmt | LocalHistogramEqualization, HDRMultiscaleTransform |
-| curves | run_curves, run_pixelmath | Tonal and color adjustments, arbitrary expressions |
+| masks | create_luminance_mask, zone_mask, create_zone_masks, mask_ops, apply_mask, remove_mask, close_mask | Mask creation, inventory-driven geometric zones, mask arithmetic (range windows < 0.3 widened: no threshold masks) |
+| detail | multi_scale_enhance, run_hdrmt, lift_outer_disc, lift_dust, inject_l_ifn | LocalHistogramEqualization + HDRMultiscaleTransform, self-weighted outer-disc lift |
+| curves | run_curves, adjust_levels, blend_images, soft_glow, restrain_red_hue | Tonal and colour adjustments through fixed tools (no free PixelMath); saturation curves are guarded (max 3 raising S curves per view, low-end gain capped at x2.5) |
 | lrgb | lrgb_combine, inject_luminance | LinearFit LRGB combination, PixelMath L injection for large median mismatch |
 | ha_injection | ha_inject_red, ha_inject_luminance | Narrowband Ha blending into RGB (soft-clamp prevents burning) |
 | narrowband | sho_combine, sho_hue_shift, measure_palette_balance, lift_faint_halo, body_edge_contrast, chroma_smooth, reload_narrowband_channel, lift_dust, inject_l_ifn, ... | SHO/HOO palettes, faint-halo and dust lifting, pseudo-OIII extraction |
@@ -120,7 +160,7 @@ The creative agents run via `claude -p` subprocess (`agents/llm/engine-max.mjs`)
 
 ### Quality Gates as Code-Enforced Constraints
 
-Quality gates (`agents/ops/quality-gates.mjs`, `agents/ops/subject-metrics.mjs`) execute actual PJSR pixel analysis inside PixInsight -- they are not prompt suggestions that the agent might ignore. The `finish` tool runs all gates automatically; only a result of "Finished (quality gates PASSED)" moves the state machine to finalize. `run_quality_gates` runs the same battery read-only at any time (results are persisted into the variant's metadata).
+Quality gates (`agents/ops/quality-gates.mjs`, `agents/ops/subject-metrics.mjs`) measure the actual pixels -- natively in Rust, with the PixInsight implementation as fallback -- they are not prompt suggestions that the agent might ignore. The `finish` tool runs all gates automatically; only a result of "Finished (quality gates PASSED)" moves the state machine to finalize. `run_quality_gates` runs the same battery read-only at any time (results are persisted into the variant's metadata).
 
 **One gate contract.** Every threshold lives in `agents/llm/gate-contract.mjs` (`BURN_CLIP` 0.95, `BRIGHT_BLOCK_LEVEL` 0.80, `NOISE_BG_HARD` 0.022, `SUBJECT_MIN` 0.25, `CONTRAST_GATE` 3.0 (2.0 for outer-halo targets), `TONAL` 3.0 (2.5 for small subjects), `STAR_CONTRAST` 4/3/2 by star prominence, `FWHM_HARD` 12, ...). `buildGateTable()` renders the same rows into the agent's system prompt, so the agent sees exactly what the finish handler will enforce.
 
@@ -140,6 +180,8 @@ The battery (blocking unless noted):
 - **L usage**: when an L master exists, clone-chain provenance must prove it was really incorporated.
 - **Palette balance** (SHO/HOO), **highlight texture** (emission), **ringing**, **over-denoising** (NXT above 0.25 flagged).
 - **Reference comparison** (`compare_to_reference`): palette L1, chroma-only Lab EMD and background-cast delta against a reference image -- `files.referencePath`, or auto-picked: the latest approved registry image for the same target.
+- **Galaxy colour and zones** (v0.4-v0.5, calibrated on the user's reference JPEGs and approved runs): `outer_zone` (outer disc not brown, outer arms present, outer blues not over-saturated, inner disc not dim), `palette_purity` (no lilac/teal disc on data without Ha), `core_amp` (no cooked bulge), `nucleus_colour` (not white, not orange), `core_structure`, `arm_gap_depth`, `edge_softness`, `envelope_clip`.
+- **Per-run reference targets**: `files.referenceGates` makes the reference comparison blocking (palette L1, local-contrast ratio min/max, grain, dark-lane depth, background cast); individual keys can be listed in `advisory` to warn only.
 - **Aesthetic critic**: advisory everywhere until >= 8 user-rated pairs agree with the judge for that class (`agents/llm/rate-critique.mjs` records ratings and reports agreement).
 
 Non-safety gates relax to warnings only when the agent has <= 10 turns left. New gates ship advisory and are promoted only after the back-test harness passes.
@@ -285,6 +327,7 @@ Successfully processed with zero target-specific code changes between runs:
   - NoiseXTerminator (NXT)
   - StarXTerminator (SXT)
 - **Node.js** v22+ (tested with v22.13.1)
+- **pixmetrics** (recommended): the prebuilt binary from the GitHub release for your platform, placed at `native/pixmetrics/bin/<platform>-<arch>/` (e.g. `darwin-arm64`, `win32-x64`) or pointed to with `PIXMETRICS_BIN`; or build it with a [Rust toolchain](https://rustup.rs) (`npm run build:native`). Without it every gate still runs, through PixInsight, much more slowly.
 - **Claude Code** with a **Max subscription** (the creative agent runs via `claude -p` subprocess -- no API key needed)
 - **Calibrated master frames** -- WBPP-stacked, debayered XISF files (R, G, B, optionally L and Ha; or mono S/H/O for narrowband)
 - **macOS or Windows** (and likely Linux):
@@ -301,6 +344,9 @@ Successfully processed with zero target-specific code changes between runs:
 ```bash
 # 1. Build the MCP server (from the repository folder)
 npm install && npm run build
+
+# 1b. Native metrics: build (needs Rust) or drop the release binary in native/pixmetrics/bin/<platform>-<arch>/
+npm run build:native && npm run test:native
 
 # 2. Point the watcher at your PixInsight install (writes pjsr/mcp-solver-paths.jsh for the ImageSolver
 #    plate-solve fallback). Auto-detects /Applications/PixInsight (macOS), C:/Program Files/PixInsight (Windows),
@@ -333,6 +379,9 @@ node agents/llm/giga-run.mjs --config /path/to/config.json --approve <runId>
 # 10. Back-test the gates against every registered image (PixInsight running); 11. unit tests (no PixInsight)
 node scripts/backtest-gates.mjs            # exit 1 = approved image rejected, 2 = rejected image passed
 npm test                                   # prompt goldens under test/golden, UPDATE_GOLDEN=1 to refresh
+
+# 12. Native vs PixInsight parity on a real image (PixInsight running)
+node scripts/native-parity.mjs --image /path/to/view.xisf --inv <run>/prep-metrics.json [--ref ref.xisf]
 ```
 
 Other useful flags: `--base-run <runId>` (warm start from a previous run), `--core-specialist` / `--post-pass-only <runId>`, `--keep-runs N`, `--model-giga opus`, `--effort-gradient medium`.
@@ -379,7 +428,9 @@ The legacy deterministic pipeline (no LLM) is still available: `node scripts/run
   - `distortionCorrection` -- enable StarAlignment distortion correction for drizzled or distorted sets.
   - `autoCropBorder` -- trim noisy low-coverage borders after SPCC.
   - `referencePath` -- a reference image for `compare_to_reference` / the reference gate; when absent, the latest approved registry image for the same target is used.
-- Optional `models.<agent>` block (`{ "model", "effort", "fallbackModel" }` for giga_orchestrator, gradient_agent, core_specialist, aesthetic_critic); CLI `--model-<alias>` / `--effort-<alias>` win over config.
+- Optional `models.<agent>` block (`{ "model", "effort", "fallbackModel" }` for giga_orchestrator, gradient_agent, core_specialist, aesthetic_critic); CLI `--model-<alias>` / `--effort-<alias>` win over config. Example: `"giga_orchestrator": { "model": "claude-fable-5-2", "effort": "xhigh" }`.
+- Optional `files.referenceGates` (with `referencePath`): `{ "blocking": true, "max_palette_l1": 0.30, "max_lc_ratio": 1.3, "max_grain_ratio": 1.3, "max_dark_depth_delta": 0.08, "advisory": ["max_lc_ratio"], "note": "..." }` -- the run must reach your reference rendering.
+- Optional `files.profileOverrides`: per-run gate thresholds merged over the class profile; each block needs a `_calibration` note (e.g. `"background": { "min_level": 0.085, "_calibration": "..." }`).
 
 ---
 
@@ -400,7 +451,7 @@ agents/
     disk-hygiene.mjs            -- Old-run cleanup, orphan swap cleanup, cache caps
     gate-contract.mjs           -- Single source of gate thresholds + calibrated override rules
     rate-critique.mjs           -- CLI: record user ratings vs critic verdicts, agreement report
-    tools.mjs                   -- 100 MCP tool definitions and handlers (TOOL_CATALOG)
+    tools.mjs                   -- MCP tool definitions and handlers (TOOL_CATALOG, data-aware toolset)
     state-machine.mjs, repair-policies.mjs -- Phase-gated tool availability, repair engine
     mcp-agent-tools.mjs         -- MCP server for agent tool access (swap guard, crash FATAL)
     aesthetic-critic.mjs, composer.mjs, warmstart.mjs, vision.mjs, trace-*.mjs
@@ -409,6 +460,7 @@ agents/
     llm/                        -- ARCHIVED API-provider engine (engine.mjs, orchestrator.mjs, 8 old stage prompts); not used by giga-run
   ops/
     bridge.mjs                  -- File-based IPC with PixInsight (command log, crash detection, safeClose)
+    native-metrics.mjs          -- Bridge to pixmetrics: view export + fingerprint cache, nativeOr fallback, nativeBatch
     quality-gates.mjs           -- Star field, ringing, burn, background floor, chroma noise checks (PJSR)
     subject-metrics.mjs         -- Subject brightness/contrast/detail, tonal presence, texture baselines
     stats.mjs                   -- Image statistics, uniformity and color-gradient measurement
@@ -427,8 +479,11 @@ agents/
   target-taxonomy.json          -- 12 categories with 7 trait dimensions each
   processing-profiles.json      -- Per-class defaults + calibrated gate blocks (+ narrowband_palette)
   scoring.mjs, ledger.mjs, artifact-store.mjs -- Scoring model, promotion ledger, per-run artifacts
+native/
+  pixmetrics/                   -- Rust: XISF reader + 42 gate metrics (src/metrics/{colour,core,zones,texture,stars}.rs), README
 scripts/
   backtest-gates.mjs            -- Gate back-test harness against the approved-image registry
+  native-parity.mjs             -- PixInsight vs Rust parity check, metric by metric
   pi-relaunch.sh                -- Headless PixInsight relaunch with RC-Astro module + watcher
   clean-swap.mjs, ping-watcher.mjs, relevel-legacy-universal.mjs
   run-pipeline.mjs              -- Legacy deterministic pipeline (~2000 lines)
@@ -438,6 +493,7 @@ pjsr/
 test/
   *.test.mjs                    -- node --test suite (gates, state machine, crash/resume, prompts, ...)
   golden/                       -- Prompt snapshot goldens
+.github/workflows/pixmetrics.yml -- CI: build + test pixmetrics on macOS (arm64, x64), Windows, Linux
 src/                            -- MCP server TypeScript source (for IDE/tool integration)
 editor/                         -- Web UI (server.mjs, index.html, default-config.json)
 AGENTIC_PIPELINE_PLAN_2026-10-28.md -- The improvement plan behind the current architecture (work items WI-01..27)
@@ -480,6 +536,20 @@ MIT
 ---
 
 ## Changelog
+
+### v0.5.0 -- 2026-11-11 -- Native Rust metrics, 0.1 s bridge, colour gates
+
+- **pixmetrics (Rust)**: XISF reader (all compression codecs and sample formats) and 42 gate metrics computed natively; Node bridge with per-view export cache, batching per gate battery and automatic PixInsight fallback. Parity with the PixInsight implementations verified metric by metric (< 1e-4). Gate battery ~350 s -> ~6 s. Builds on macOS and Windows (and Linux); prebuilt binaries attached to the release; CI for all platforms.
+- **Bridge latency 3.5 s -> 0.1 s per PixInsight call** (watcher idle loop and Node polling are now wall-clock based). On M74 the main agent went from 144 min to 12-24 min.
+- **Fixed toolset, no free PixelMath for the creative agents**; data-aware tool list (palette/Ha tools only when the data has them; LRGB 85 tools).
+- **New gates, calibrated on the user's reference images and approved runs**: brown/faint/over-saturated outer disc and dim inner disc (`outer_zone`), lilac/teal disc without Ha (`palette_purity`), cooked bulge (`core_amp`), white or orange nucleus (`nucleus_colour`), relative core-structure floor; per-run blocking reference targets with per-key advisory; upper local-contrast bound against the reference.
+- **Guards inside tools**: max 3 saturation-raising curves per view, saturation gain on near-grey pixels capped at x2.5 (it turned a faint outer disc brown), `restrain_red_hue` refused without Ha, narrow mask range windows widened, export falls back to the run folder if the output volume disappears.
+- **Community contributions**: two watcher bugs reported and fixed by Andrei Gusan (@andreigusan, PR #2): `run_pixelmath` combining three mono images now creates an RGB image (`newImageColorSpace` auto-detected; it silently produced a mono clone), and `remove_gradient` now applies the ABE correction to the target (it defaulted to `Correction_None` and only produced a model window). Thanks also to 4ndr3c0ut0 (PR #1) and Andrei Gusan for the independent V8 watcher ports, which v0.3.0 had already covered (including the V8 ImageSolver plate-solving that PR #1 left as a TODO).
+- Earlier unreleased work also included: per-step core metrics, unattended nudge loop, prep core guard and colour-preserving core, Ha re-registration on the prep cache path, advisory post-gradient tilt check, empty-footprint handling in all zone metrics.
+
+### v0.4.0 -- 2026-11-08 -- Signal inventory, reference-calibrated texture gates, Windows portability
+
+- See the GitHub release notes for v0.4.0.
 
 ### 2026-10-28 / 2026-10-30 -- V8 watcher, calibrated gates, crash resilience, narrowband
 

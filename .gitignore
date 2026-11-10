@@ -5,3 +5,5 @@ dist/
 .env
 .DS_Store
 pjsr/mcp-solver-paths.jsh
+native/pixmetrics/target/
+native/pixmetrics/target-win/

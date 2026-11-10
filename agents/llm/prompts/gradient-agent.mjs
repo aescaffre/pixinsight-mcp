@@ -26,7 +26,7 @@ When you find a winning scale (or a scale that ate signal), call \`save_memory\`
  * @param {object} brief - Processing brief
  * @returns {string} System prompt
  */
-export const GRADIENT_PROMPT_VERSION = 4; // 4: tilt ignores empty footprint cells; net respects tool=none. 3: // 3: L judged by measure_lum_tilt (stretched units) + subtract_sky_plane
+export const GRADIENT_PROMPT_VERSION = 5; // 5: post-gradient tilt net advisory only. 4: // 4: tilt ignores empty footprint cells; net respects tool=none. 3: // 3: L judged by measure_lum_tilt (stretched units) + subtract_sky_plane
 
 export function buildGradientAgentPrompt(brief) {
   const cls = brief.target.classification;

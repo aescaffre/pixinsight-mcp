@@ -15,7 +15,7 @@ import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
 import { getStats, measureUniformity } from '../ops/stats.mjs';
 import { setiStretch, masStretch } from '../ops/stretch.mjs';
-import { measureHaKnots } from '../ops/subject-metrics.mjs';
+import { measureHaKnots, measureCoreContrast, measureNucleus, measureCoreAmp } from '../ops/subject-metrics.mjs';
 import { runGC } from '../ops/gradient.mjs';
 import { createLumMask } from '../ops/masks.mjs';
 import { savePreview } from '../ops/preview.mjs';
@@ -296,6 +296,120 @@ export function bxtSharpenPjsr(viewId, bxt) {
   `;
 }
 
+
+// ============================================================================
+// Core-guarded stretch (2026-11-08, M81 run 8d9f420c): the prep Seti stretch handed the agent a core that was
+// already flat (relContrast 0.020 RGB / 0.013 L vs the 0.10 finish gate); the agent raised it 4x to 0.086 and still
+// failed, spending ~400 turns. Nothing downstream recovers structure the stretch flattened, so prep measures the core
+// right after the stretch and, if it fails, re-stretches from the linear copy with core protection:
+// Seti with its HDR soft-knee ENABLED (prep never enabled it before: the profile's headroom was ignored), stronger
+// knee, then MultiscaleAdaptiveStretch with dynamic-range compression. First that passes wins, else the best.
+// M74 (moderate core) passes the baseline (RGB relC 0.117) and is untouched.
+// ============================================================================
+async function coreProbe(ctx, viewId, cfg, nucInv) {
+  let out;
+  try { const c = await measureCoreContrast(ctx, viewId, 'galaxy_spiral', cfg); out = { relC: c.coreRelContrast ?? 0, white: c.coreWhiteFraction ?? 0, pass: !!c.pass, skipped: !!c.skipped }; }
+  catch (e) { out = { relC: 0, white: 0, pass: false, error: e.message }; }
+  if (nucInv) { try { const n = await measureNucleus(ctx, viewId, nucInv); out.nucSat = n.topSat; out.nucPeak = n.peak; } catch { /* mono or no nucleus */ } }
+  return out;
+}
+// Colour-preserving core (2026-11-09): MTF-type stretches bleach bright cores (M81 prep nucleus saturation 0.010-0.024
+// vs refs 0.07-0.18); ArcsinhStretch's principle — keep the linear R:G:B ratios at the stretched luminance — is applied
+// only where the stretched luminance is bright (weight 0 below 0.35, 1 above 0.65), so sky/disc noise colour is untouched.
+async function colourPreserveCore(ctx, viewId, linId, strength = 1) {
+  const r = await ctx.pjsr(`
+    var P = new PixelMath; P.useSingleExpression = false; P.symbols = 'Ls,Ll,k,w,m,r,g,b';
+    var pre = 'Ls = 0.2126*$T[0]+0.7152*$T[1]+0.0722*$T[2]; Ll = max(1e-7, 0.2126*${linId}[0]+0.7152*${linId}[1]+0.0722*${linId}[2]); k = Ls/Ll; ' +
+      'r = ${linId}[0]*k; g = ${linId}[1]*k; b = ${linId}[2]*k; m = max(1, max(r, max(g, b))); w = ${strength}*min(1, max(0, (Ls-0.35)/0.30)); ';
+    P.expression = pre + '(1-w)*$T[0] + w*r/m'; P.expression1 = pre + '(1-w)*$T[1] + w*g/m'; P.expression2 = pre + '(1-w)*$T[2] + w*b/m';
+    P.createNewImage = false; P.rescale = false; P.truncate = true;
+    P.executeOn(ImageWindow.windowById('${viewId}').mainView); 'ok';`);
+  if (r.status === 'error') throw new Error('colourPreserveCore: ' + (r.error?.message || 'PJSR error'));
+}
+// Nucleus-zone HDR (2026-11-09, M81 runs 4-6): the HDR knee over the whole bright range flattened the inner disc into
+// a featureless beige plateau (critic: "plastic", lanes lost); only the nucleus needs protection. A = plain Seti
+// stretch (keeps inner-disc lanes), B = HDR+colour core (unclipped, coloured nucleus); mask M from A's own luminance
+// (0 below 0.60, 1 above 0.85, blurred) = exactly where the plain stretch saturates. Result = A*(1-M) + B*M.
+async function nucleusZoneBlend(ctx, viewId, aId, { lo = 0.60, hi = 0.85, sigma = 15 } = {}) {
+  const r = await ctx.pjsr(`
+    var A = ImageWindow.windowById('${aId}'), T = ImageWindow.windowById('${viewId}'); if (A.isNull || T.isNull) throw new Error('nucleusZoneBlend: missing view');
+    var o = ImageWindow.windowById('NZ_M'); if (!o.isNull) o.forceClose();
+    var m = new ImageWindow(A.mainView.image.width, A.mainView.image.height, 1, 32, true, false, 'NZ_M');
+    var P = new PixelMath; P.expression = 'L = 0.2126*${aId}[0]+0.7152*${aId}[1]+0.0722*${aId}[2]; min(1, max(0, (L-${lo})/${(hi - lo).toFixed(4)}))';
+    P.symbols = 'L'; P.useSingleExpression = true; P.createNewImage = false; P.rescale = false; P.truncate = true; P.executeOn(m.mainView);
+    var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = ${sigma}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(m.mainView);
+    var Q = new PixelMath; Q.expression = '${aId}*(1-NZ_M) + $T*NZ_M'; Q.useSingleExpression = true; Q.createNewImage = false; Q.rescale = false; Q.truncate = true; Q.executeOn(T.mainView);
+    var cov = m.mainView.image.mean(); m.forceClose(); JSON.stringify({ maskMean: cov });`);
+  if (r.status === 'error') throw new Error('nucleusZoneBlend: ' + (r.error?.message || 'PJSR error'));
+  return JSON.parse(r.outputs?.consoleOutput?.trim() || '{}');
+}
+export async function stretchWithCoreGuard(ctx, viewId, o) {
+  const { target, headroom, hdrOpts, coreCfg, log, force = false, profileStretch = {}, isL = false, nucInv = null } = o;
+  const NUC_MIN = 0.04;   // nucleus colour floor (refs 0.066-0.176); colour candidates only for RGB
+  const hard = coreCfg?.rel_contrast_hard ?? 0.10;
+  const lin = `${viewId}__lin`;
+  await cloneImage(ctx, viewId, lin);
+  // nucleus locator for the colour probe (the signal inventory runs after the stretch): brightest 48 px block of the
+  // linear copy; size scale from the frame (only sets the measurement scale)
+  let nucLoc = nucInv;
+  if (!nucLoc && !isL) {
+    try {
+      const q = await ctx.pjsr(`var img=ImageWindow.windowById('${lin}').mainView.image, B=48, best=-1, bx=0, by=0;
+        for (var y=0; y+B<=img.height; y+=B) for (var x=0; x+B<=img.width; x+=B) { img.selectedRect=new Rect(x,y,x+B,y+B); var v; if (img.isColor) { img.selectedChannel=0; var a=img.median(); img.selectedChannel=1; var b=img.median(); img.selectedChannel=2; var c=img.median(); img.resetChannelSelection(); v=0.2126*a+0.7152*b+0.0722*c; } else v=img.median(); if (v>best){best=v;bx=x+B/2;by=y+B/2;} }
+        img.resetSelections(); JSON.stringify({c:[bx,by],W:img.width,H:img.height});`);
+      const j = JSON.parse(q.outputs?.consoleOutput?.trim() || '{}');
+      if (j.c) nucLoc = { centre: j.c, rDet: Math.round(0.25 * Math.min(j.W, j.H)) };
+    } catch { /* colour probe skipped */ }
+  }
+  const restore = async () => ctx.pjsr(`var s=ImageWindow.windowById('${lin}'), d=ImageWindow.windowById('${viewId}'); d.mainView.beginProcess(); d.mainView.image.assign(s.mainView.image); d.mainView.endProcess(); 'ok';`);
+  const tries = [
+    { name: 'seti', run: () => setiStretch(ctx, viewId, { targetMedian: target, hdrAmount: hdrOpts.hdrAmount, hdrKnee: hdrOpts.hdrKnee, hdrHeadroom: headroom }) },
+    { name: 'seti+hdr', run: () => setiStretch(ctx, viewId, { targetMedian: target, hdrCompress: true, hdrAmount: hdrOpts.hdrAmount ?? 0.25, hdrKnee: hdrOpts.hdrKnee ?? 0.35, hdrHeadroom: Math.max(headroom, 0.10) }) },
+    { name: 'seti+hdr strong', run: () => setiStretch(ctx, viewId, { targetMedian: target, hdrCompress: true, hdrAmount: 0.5, hdrKnee: 0.30, hdrHeadroom: Math.max(headroom, 0.12) }) },
+    // colour-core strengths: full colour preservation overshot on M81 (nucleus sat 0.244 vs refs 0.066-0.176), so try
+    // weaker blends; the ranking below prefers a nucleus near the refs' middle (0.12) inside 0.06-0.18.
+    // HIGH-KNEE candidates first (2026-11-10, M81 run 7): the nucleus-zone BLEND left a grey ring around the nucleus
+    // (the HDR version is darker than the plain stretch in the transition band). A soft knee placed HIGH (0.75-0.80)
+    // compresses only the top of the range, continuously: the inner disc keeps the plain stretch, no seam.
+    ...(!isL ? [[0.80, 0.3], [0.75, 0.3], [0.80, 0.5]].map(([kn, k]) => ({ name: `seti+hdr knee${kn}+colour ${k}`, run: async () => {
+      await setiStretch(ctx, viewId, { targetMedian: target, hdrCompress: true, hdrAmount: 0.6, hdrKnee: kn, hdrHeadroom: Math.max(headroom, 0.12) });
+      await colourPreserveCore(ctx, viewId, lin, k);
+    } })) : []),
+    ...(!isL ? [0.5, 0.3, 1.0].map(k => ({ name: `seti+hdr strong+colour core ${k}`, run: async () => { await setiStretch(ctx, viewId, { targetMedian: target, hdrCompress: true, hdrAmount: 0.5, hdrKnee: 0.30, hdrHeadroom: Math.max(headroom, 0.12) }); await colourPreserveCore(ctx, viewId, lin, k); } })) : []),
+    { name: 'mas drc0.6', run: () => masStretch(ctx, viewId, { targetBackground: Math.min(0.5, target), dynamicRangeCompression: 0.6, contrastRecovery: true, scaleSeparation: 256, saturationEnabled: false, ...(profileStretch.mas || {}) }) },
+    { name: 'mas drc0.85', run: () => masStretch(ctx, viewId, { targetBackground: Math.min(0.5, target), dynamicRangeCompression: 0.85, contrastRecovery: true, scaleSeparation: 256, saturationEnabled: false }) },
+  ];
+  const results = [];
+  let best = null;
+  try {
+    for (let i = 0; i < tries.length; i++) {
+      if (i > 0) await restore();
+      await tries[i].run();
+      const c = await coreProbe(ctx, viewId, coreCfg, isL ? null : nucLoc);
+      results.push({ method: tries[i].name, relC: +c.relC.toFixed(4), white: +(c.white || 0).toFixed(4), nucSat: c.nucSat != null ? +c.nucSat.toFixed(4) : null });
+      log(`    [core-guard] ${viewId} ${tries[i].name}: core relContrast ${c.relC.toFixed(3)} (gate ${hard}) white ${(100 * (c.white || 0)).toFixed(1)}%${c.nucSat != null ? ` nucleus saturation ${c.nucSat.toFixed(3)} (>= ${NUC_MIN})` : ''}`);
+      const nucOk = c.nucSat == null || c.nucSat >= NUC_MIN;
+      const ok = c.relC >= hard && (c.white || 0) < (coreCfg?.white_hard ?? 0.15) && nucOk && (c.nucSat == null || c.nucSat <= 0.18);
+      if (i === 0 && (ok || c.skipped) && !force) { best = { i, ...c }; break; }
+      // Rank: a core with almost no white clipping (<= 5 %) beats any clipped one (M81: the plain stretch had the
+      // highest relC 0.021 but 14 % white = the blown oval; Seti+HDR 0.018 with 0.6 %), then the higher relC.
+      // relC is raised later by the agent's core work (4x on M81); a clipped nucleus cannot be recovered.
+      // rank: (1) no white clipping (<= 5 %), (2) a coloured nucleus (>= NUC_MIN; burnt nuclei turn white),
+      // (3) higher relC. 2026-11-09: M81 run 1/2 nuclei were white (0.014/0.019) although white-clip was low.
+      // (2b) nucleus colour inside the reference band 0.06-0.18, closest to 0.12 (refs' middle) wins among those.
+      const inBand = (v) => v == null || (v >= 0.06 && v <= 0.18);
+      // inside the band, core contrast decides (the nucleus-zone blend keeps the plain-stretch inner disc: higher relC)
+      const rank = (r) => [((r.white || 0) <= 0.05) ? 1 : 0, (r.nucSat == null || r.nucSat >= NUC_MIN) ? 1 : 0, inBand(r.nucSat) ? 1 : 0, r.relC, r.nucSat == null ? 0 : -Math.abs(r.nucSat - 0.12)];
+      const better = (a, b) => { const ra = rank(a), rb = rank(b); for (let q = 0; q < ra.length; q++) if (ra[q] !== rb[q]) return ra[q] > rb[q]; return false; };
+      if (!best || better(c, best)) best = { i, ...c };
+      if (ok) break;
+    }
+    if (best.i !== results.length - 1) { await restore(); await tries[best.i].run(); }
+    log(`    [core-guard] ${viewId}: using ${tries[best.i].name} (relC ${best.relC.toFixed(3)}, white ${(100 * (best.white || 0)).toFixed(1)}%)`);
+    return { method: tries[best.i].name, relC: best.relC, white: best.white, results, triggered: results.length > 1 };
+  } finally { await closeImage(ctx, lin).catch(() => {}); }
+}
+
 /** Seti HDR params from the profile stretch block. */
 export function resolveHdrOptions(brief) {
   const s = brief?.processingProfile?.stretch || {};
@@ -386,16 +500,44 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
         if (mainHa && mainHa.id !== 'FILTER_Ha') {
           await ctx.pjsr(`var w=ImageWindow.windowById('${mainHa.id}');if(!w.isNull)w.mainView.id='FILTER_Ha';`);
         }
-        // Dimension-match Ha to the cached RGB (autocrop/align may have resized RGB)
-        const dimR = await ctx.pjsr(`var a=ImageWindow.windowById('${targetName}'),b=ImageWindow.windowById('FILTER_Ha');(a.isNull||b.isNull)?'missing':JSON.stringify({rw:a.mainView.image.width,rh:a.mainView.image.height,hw:b.mainView.image.width,hh:b.mainView.image.height});`);
-        const d = JSON.parse(dimR.outputs?.consoleOutput?.trim() || '{}');
-        if (d.rw && (d.rw !== d.hw || d.rh !== d.hh)) {
-          log(`  Ha ${d.hw}x${d.hh} != RGB ${d.rw}x${d.rh} — center-cropping Ha to match...`);
-          await ctx.pjsr(`var w=ImageWindow.windowById('FILTER_Ha');${WCS_CLEAR}var P=new DynamicCrop;P.centerX=0.5;P.centerY=0.5;P.width=${d.rw}/w.mainView.image.width;P.height=${d.rh}/w.mainView.image.height;P.angle=0;P.scaleX=1;P.scaleY=1;P.executeOn(w.mainView);`);
+        // REGISTER Ha to the cached reference (2026-11-09, M81 run 3: the old centre-crop left Ha ~150 px / 0.39 deg
+        // off the cached RGB — a false red blob beside the nucleus, and Ha-knot positions that meant nothing).
+        // StarAlignment onto the cached linear L (else the combined RGB) outputs the reference geometry.
+        if (!F.haIsStretched) {
+          const refId = hasL ? 'FILTER_L' : targetName;
+          const tmpDir = path.join(opts.runDir || '/tmp', 'tmp_align_ha');
+          fs.mkdirSync(tmpDir, { recursive: true });
+          const tmpRef = path.join(tmpDir, 'ha_ref.xisf'), tmpTgt = path.join(tmpDir, 'FILTER_Ha.xisf'), out = path.join(tmpDir, 'aligned_FILTER_Ha.xisf');
+          const q = (x) => x.replace(/'/g, "\\'");
+          await ctx.pjsr(`var w=ImageWindow.windowById('${refId}');var id=w.mainView.id;w.saveAs('${q(tmpRef)}',false,false,false,false);w.mainView.id=id;'ok';`);
+          await ctx.pjsr(`var w=ImageWindow.windowById('FILTER_Ha');w.saveAs('${q(tmpTgt)}',false,false,false,false);w.mainView.id='FILTER_Ha';'ok';`);
+          try { fs.unlinkSync(out); } catch { /* */ }
+          await ctx.pjsr(`
+            var P=new StarAlignment;
+            P.referenceImage='${q(tmpRef)}';P.referenceIsFile=true;
+            P.targets=[[true,true,'${q(tmpTgt)}']];
+            P.outputDirectory='${q(tmpDir)}';P.outputPrefix='aligned_';P.outputPostfix='';
+            P.overwriteExistingFiles=true;P.onError=StarAlignment.prototype.Continue;
+            P.useTriangles=true;P.polygonSides=5;P.sensitivity=0.50;P.noGUIMessages=true;
+            P.distortionCorrection=${F.distortionCorrection ? 'true' : 'false'};P.generateDrizzleData=false;
+            P.executeGlobal();`);
+          if (fs.existsSync(out)) {
+            await ctx.pjsr(`var w=ImageWindow.windowById('FILTER_Ha');if(!w.isNull)w.forceClose();`);
+            const before2 = (await ctx.listImages()).map(i => i.id);
+            await ctx.send('open_image', '__internal__', { filePath: out });
+            const new2 = (await ctx.listImages()).filter(i => !before2.includes(i.id));
+            for (const v of new2) if (/crop_mask/i.test(v.id)) await ctx.pjsr(`var w=ImageWindow.windowById('${v.id}');if(!w.isNull)w.forceClose();`);
+            const haW = new2.find(v => !/crop_mask/i.test(v.id));
+            if (haW && haW.id !== 'FILTER_Ha') await ctx.pjsr(`var w=ImageWindow.windowById('${haW.id}');if(!w.isNull)w.mainView.id='FILTER_Ha';`);
+            log(`  Ha registered to ${refId} (StarAlignment) on the cache-hit path.`);
+          } else {
+            throw new Error('Ha StarAlignment produced no output on the cache-hit path — refusing an unregistered Ha');
+          }
         }
         log('  FILTER_Ha restored.');
       } catch (e) {
-        log(`  WARN: failed to re-open Ha from cache path: ${e.message}`);
+        log(`  WARN: failed to re-open/register Ha from cache path: ${e.message} — Ha DROPPED (an unregistered Ha paints false knots)`);
+        await ctx.pjsr(`var w=ImageWindow.windowById('FILTER_Ha');if(!w.isNull)w.forceClose();'ok';`).catch(() => {});
       }
     }
   } else {
@@ -926,6 +1068,10 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     log(`  MAS stretch RGB (${JSON.stringify(mo)})...`);
     const mr = await masStretch(ctx, targetName, mo);
     noteApplied('MultiscaleAdaptiveStretch', targetName, { ...mr.params, roi: mr.roi });
+  } else if (isGalaxyBrief(brief)) {
+    const cg = await stretchWithCoreGuard(ctx, targetName, { target: rgbTarget, headroom, hdrOpts, coreCfg: brief?.processingProfile?.core_burn, log, profileStretch });
+    result.coreGuard = { rgb: cg };
+    noteApplied(cg.method.startsWith('mas') ? 'MultiscaleAdaptiveStretch' : 'SetiStretch', targetName, { targetMedian: rgbTarget, coreGuard: cg.method, coreRelC: cg.relC, tried: cg.results });
   } else {
   await setiStretch(ctx, targetName, { targetMedian: rgbTarget, hdrAmount: hdrOpts.hdrAmount, hdrKnee: hdrOpts.hdrKnee, hdrHeadroom: headroom });
   noteApplied('SetiStretch', targetName, { targetMedian: rgbTarget, hdrAmount: hdrOpts.hdrAmount, hdrKnee: hdrOpts.hdrKnee, hdrHeadroom: headroom });
@@ -1011,6 +1157,12 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
       log(`  MAS stretch L (${JSON.stringify(mo)})...`);
       const mr = await masStretch(ctx, 'FILTER_L', mo);
       noteApplied('MultiscaleAdaptiveStretch', 'FILTER_L', { ...mr.params, roi: mr.roi });
+    } else if (result.coreGuard?.rgb?.triggered) {
+      // the RGB core needed protection: same HDR target, so protect the L core too (L is stretched brighter, so
+      // its absolute relC runs lower than the RGB's: M74 L 0.041 vs RGB 0.117 — never gate L on its own)
+      const cg = await stretchWithCoreGuard(ctx, 'FILTER_L', { target: lTarget, headroom: Math.max(headroom, 0.05), hdrOpts, coreCfg: brief?.processingProfile?.core_burn, log, force: true, profileStretch, isL: true });
+      result.coreGuard.l = cg;
+      noteApplied(cg.method.startsWith('mas') ? 'MultiscaleAdaptiveStretch' : 'SetiStretch', 'FILTER_L', { targetMedian: lTarget, coreGuard: cg.method, coreRelC: cg.relC, tried: cg.results });
     } else {
     await setiStretch(ctx, 'FILTER_L', { targetMedian: lTarget, hdrAmount: hdrOpts.hdrAmount, hdrKnee: hdrOpts.hdrKnee, hdrHeadroom: Math.max(headroom, 0.05) });
     noteApplied('SetiStretch', 'FILTER_L', { targetMedian: lTarget, hdrAmount: hdrOpts.hdrAmount, hdrKnee: hdrOpts.hdrKnee, hdrHeadroom: Math.max(headroom, 0.05) });
@@ -1035,7 +1187,9 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
   // ========================================================================
   // STEP 6: Linear processing on Ha (if present)
   // ========================================================================
-  if (hasHa) {
+  const haPresent = hasHa && (await ctx.pjsr(`ImageWindow.windowById('FILTER_Ha').isNull ? 'no' : 'yes'`)).outputs?.consoleOutput === 'yes';
+  if (hasHa && !haPresent) log('  [PREP] Ha view missing (dropped on the cache path) — continuing without Ha.');
+  if (haPresent) {
     const haIsStretched = !!(F.haIsStretched);
 
     if (haIsStretched && F.haIsStarless) {
@@ -1174,6 +1328,9 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
     const previewDir = opts.runDir ? path.join(opts.runDir, 'diagnostics', 'inventory') : null;
     const inv = await measureSignalInventory(ctx, invView, { previewDir, log });
     if (inv && !inv.error) {
+      // Core texture baseline on the prep RGB (2026-11-09): finish compares the final core's fine texture against it.
+      try { if (result.views.rgb) { inv.prepCoreAmp = await measureCoreAmp(ctx, result.views.rgb, inv); log(`  [inventory] prep core texture: std600 ${inv.prepCoreAmp.std600.toFixed(4)} std300 ${inv.prepCoreAmp.std300.toFixed(4)}`); } }
+      catch (e) { log(`  [inventory] prep core texture failed: ${e.message}`); }
       // Ha knots (2026-11-08): where the HII regions are, so finish can check they stay pink-red.
       if (result.views.ha) {
         try {
@@ -1216,3 +1373,5 @@ export async function runDeterministicPrep(ctx, config, opts = {}) {
 
   return result;
 }
+
+function isGalaxyBrief(brief) { return String(brief?.target?.classification || '').startsWith('galaxy'); }

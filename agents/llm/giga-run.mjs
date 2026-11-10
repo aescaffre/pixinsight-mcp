@@ -368,13 +368,12 @@ The corrected views MUST stay under these exact IDs. Do NOT stretch, denoise, ru
           const t = await measureLumTilt(ctx, vid);
           if (t.error) { console.log(`  Lum tilt ${vid}: ${t.error}`); continue; }
           console.log(`  Lum tilt ${vid}: ${t.verdict} ppStretched=${t.ppStretched.toFixed(4)} (${(100 * (t.relToSky ?? 0)).toFixed(2)}% of sky, ${t.direction})`);
-          if (t.ppStretched > 0.015 && agentDeclined) {
-            console.log(`  Lum tilt ${vid}: NOT auto-corrected — the gradient agent deliberately applied no correction (tool=none); see gradient-result.md`);
-          } else if (t.ppStretched > 0.015) {
-            await subtractSkyPlane(ctx, vid, t);
-            const t1 = await measureLumTilt(ctx, vid);
-            console.log(`  Lum tilt ${vid}: sky plane subtracted by the pipeline -> ppStretched=${t1.ppStretched?.toFixed(4)} (${t1.verdict})`);
-            fs.appendFileSync(path.join(store.baseDir, 'trace.jsonl'), JSON.stringify({ type: 'run_meta', ts: Date.now(), event: 'lum_tilt_autofix', view: vid, before: t.ppStretched, after: t1.ppStretched }) + '\n');
+          // ADVISORY ONLY (2026-11-08): an automatic plane subtraction overrode the gradient agent twice — M101 (zero
+          // drizzle corners made the reading false) and M81 (the agent had tried the plane and rejected it with
+          // evidence: it followed IFN/halo structure). The agent owns the decision; the pipeline only reports.
+          if (t.ppStretched > 0.015) {
+            console.log(`  Lum tilt ${vid}: residual VISIBLE tilt left by the gradient agent${agentDeclined ? ' (it declined deliberately)' : ''} — advisory, not corrected; see gradient-result.md`);
+            fs.appendFileSync(path.join(store.baseDir, 'trace.jsonl'), JSON.stringify({ type: 'run_meta', ts: Date.now(), event: 'lum_tilt_residual', view: vid, ppStretched: t.ppStretched, agentDeclined }) + '\n');
           }
         } catch (e) { console.log(`  Lum tilt check ${vid} skipped: ${e.message}`); }
       }
@@ -548,7 +547,9 @@ RULES:
     agentName: 'giga_orchestrator',
     maxTurns: mainMaxTurns,
     // Wall clock scales with the turn budget (~9 s/turn observed; default 120 min cut a 540-turn run short).
-    timeoutMs: Math.max(120, Math.ceil(mainMaxTurns * 15 / 60)) * 60 * 1000,
+    // 20 s/turn (was 15): per-step core metrics add ~8 s per image-changing step on 26 MP frames (M81 run 5 hit
+    // the 135-min wall clock while still working, 2026-11-09).
+    timeoutMs: Math.max(120, Math.ceil(mainMaxTurns * 20 / 60)) * 60 * 1000,
     model: AGENT_MODELS.giga_orchestrator.model,
     effort: AGENT_MODELS.giga_orchestrator.effort,
     fallbackModel: AGENT_MODELS.giga_orchestrator.fallbackModel,
@@ -565,23 +566,34 @@ RULES:
   // Unattended-run nudge (2026-11-08, M74 v8): the agent ended its turn to ASK the user a question at turn 230/540
   // with no finish; nobody answers in a queued run, so the run fell back to a best-effort export. PixInsight still
   // holds every view: resume the SAME session (same cwd) and tell it to decide and continue to finish.
-  let usedTurns = result.turnCount || 0;
+  // A timed-out agent (exit 143) reports no num_turns; count its tool calls in the session transcript instead,
+  // so a resume gets only the REMAINING budget (M81 run 6 was given a fresh 540 after 304 turns, 2026-11-09).
+  const sessionTurns = (sid) => {
+    try {
+      const slug = agent.cwd.replace(/[\/.]/g, '-');
+      const f = path.join(os.homedir(), '.claude', 'projects', slug, `${sid}.jsonl`);
+      let n = 0; for (const l of fs.readFileSync(f, 'utf8').split('\n')) { if (l.includes('"type":"assistant"')) n += (l.match(/"type":"tool_use"/g) || []).length; }
+      return n;
+    } catch { return 0; }
+  };
+  let usedTurns = result.turnCount || (result.sessionId ? sessionTurns(result.sessionId) : 0);
   for (let nudge = 1; nudge <= 2; nudge++) {
     if (result.crashError || result.timedOut || result.maxTurnsHit || store.readFinalSelection()) break;
     const left = mainMaxTurns - usedTurns;
     if (left < 40) break;
-    console.log(`\n--- Agent stopped without finish (${usedTurns}/${mainMaxTurns} turns): unattended nudge ${nudge}/2, resuming session ${result.sessionId} ---`);
+    const why = (result.exitCode === 143 || result.signal === 'SIGTERM') ? 'wall-clock timeout (exit 143) while working' : 'stopped without finish';
+    console.log(`\n--- Agent ${why} (${usedTurns}/${mainMaxTurns} turns): unattended nudge ${nudge}/2, resuming session ${result.sessionId} ---`);
     try { fs.appendFileSync(path.join(store.baseDir, 'trace.jsonl'), JSON.stringify({ type: 'run_meta', ts: Date.now(), event: 'unattended_nudge', nudge, usedTurns }) + '\n'); } catch { /* */ }
     const again = new MaxAgent('giga_orchestrator', {
       systemPrompt, agentName: 'giga_orchestrator', maxTurns: left,
-      timeoutMs: Math.max(60, Math.ceil(left * 15 / 60)) * 60 * 1000,
+      timeoutMs: Math.max(60, Math.ceil(left * 20 / 60)) * 60 * 1000,
       model: AGENT_MODELS.giga_orchestrator.model, effort: AGENT_MODELS.giga_orchestrator.effort,
       fallbackModel: AGENT_MODELS.giga_orchestrator.fallbackModel, store, brief,
       extraArgs: ['--resume', result.sessionId], cwd: agent.cwd,
     });
     const t1 = Date.now();
     result = await again.run(`UNATTENDED RUN: nobody will answer questions — the user is not watching this session. Take the decision yourself: pick the option you recommended (or the most conservative one that keeps the image honest), note the decision in remaining_flaws, and continue the plan through to finish. ${left} turns remain. Do not end your turn without calling finish.`);
-    elapsed += Date.now() - t1; usedTurns += result.turnCount || 0;
+    elapsed += Date.now() - t1; usedTurns = result.turnCount ? usedTurns + result.turnCount : Math.max(usedTurns, sessionTurns(result.sessionId));
     recordAgent('giga_orchestrator', result);
   }
   }
@@ -609,8 +621,15 @@ RULES:
   // Source of truth: final-selection.json written by the finish tool
   // ================================================================
   const targetName = config.files?.targetName || 'Target';
-  const outputDir = config.files?.outputDir || path.join(home, 'Desktop');
-  fs.mkdirSync(outputDir, { recursive: true });
+  // An external output volume can disappear during a long run (M74 v12, 2026-11-10: /Volumes/Extension unmounted,
+  // EACCES on mkdir killed the run after the agent had finished). Fall back to the run folder; never lose the result.
+  let outputDir = config.files?.outputDir || path.join(home, 'Desktop');
+  try { fs.mkdirSync(outputDir, { recursive: true }); fs.accessSync(outputDir, fs.constants.W_OK); }
+  catch (e) {
+    const fallback = path.join(store.baseDir || path.join(home, '.pixinsight-mcp', 'runs', store.runId), 'output');
+    console.warn(`  [EXPORT] output folder ${outputDir} unavailable (${e.code || e.message}) — exporting to ${fallback}`);
+    outputDir = fallback; fs.mkdirSync(outputDir, { recursive: true });
+  }
 
   const xisfPath = path.join(outputDir, `${targetName}_giga.xisf`);
   const pngPath = path.join(outputDir, `${targetName}_giga.png`);

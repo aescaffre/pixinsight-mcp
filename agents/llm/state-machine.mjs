@@ -56,6 +56,10 @@ const COMPOSE_TOOLS = new Set([
     // WI-05: dust/mask/detail/denoise tools stay usable after a REJECTED finish
     'lift_dust', 'inject_l_ifn', 'run_nxt', 'run_scnr', 'run_hdrmt', 'create_zone_masks',
     'inject_luminance', 'stretch_stars', 'check_star_layer_integrity',
+    // 2026-11-09 fixed toolset: no free PixelMath for the agent, so these must be reachable in compose/finalize
+    // (M81: ha_inject_red was refused in compose and the agent hand-wrote Ha PixelMath instead).
+    'ha_inject_red', 'ha_inject_luminance', 'adjust_levels', 'blend_images', 'zone_mask', 'lift_outer_disc',
+    'continuous_clamp', 'run_curves', 'run_lhe', 'multi_scale_enhance', 'blend_regions',
 ]);
 
 /** Tools restricted to specific states.  Anything NOT here and NOT internal
@@ -80,6 +84,7 @@ const STATE_TOOLS = {
     'run_spcc', 'run_background_neutralization',
     // Ha / narrowband
     'ha_inject_red', 'ha_inject_luminance', 'continuum_subtract_ha',
+    'adjust_levels', 'blend_images', 'zone_mask', 'lift_outer_disc', 'blend_regions',
     'extract_pseudo_oiii', 'dynamic_narrowband_blend', 'create_synthetic_luminance',
     // Masks
     'create_luminance_mask', 'apply_mask', 'remove_mask', 'close_mask',
@@ -113,7 +118,7 @@ const STATE_TOOLS = {
   finalize: new Set([
     ...COMPOSE_TOOLS,
     'finish',
-    'run_pixelmath', 'run_curves', 'continuous_clamp',
+    'run_pixelmath', 'run_curves', 'continuous_clamp', 'ha_inject_red', 'ha_inject_luminance', 'adjust_levels', 'blend_images', 'zone_mask', 'lift_outer_disc',
     'run_nxt', 'run_scnr', // the finish noise/green gates DEMAND these — must be runnable in finalize (was the blocked-final-denoise bug)
     'lift_dust', 'inject_l_ifn', // IFN/dust + noise/color polish in finalize
     'star_protected_blend', 'stretch_stars', 'check_star_layer_integrity', // safety net: allow star blend in finalize

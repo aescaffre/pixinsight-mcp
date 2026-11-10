@@ -390,3 +390,82 @@ Config flags in `files`: `pixelScale` (arcsec/px seed for the plate-solve fallba
   prep finds HII knots in the starless Ha (g1-g8 band-pass > max(p99.5, 6 sigma) within 1.1 rDet); finish measures
   the pink-red share (hue >= 290 or < 35, sat >= 0.10) at those pixels. Old results 0.079/0.107, variant_12 0.005,
   prep RGB without Ha 0.015 -> min 0.04. Armed only when Ha data exists.
+- POST-GRADIENT TILT NET IS ADVISORY (2026-11-08): it auto-subtracted a sky plane twice against a correct gradient-agent
+  decision (M101: zero corners; M81: the agent tried the plane, saw it follow IFN/halo structure at the bottom-right
+  and widen the clean-corner spread, and reverted). It now only logs `lum_tilt_residual`. The agent owns the call.
+
+### M81 HaLRGB full frame (run 8d9f420c, 2026-11-08)
+- Inventory OK on a two-galaxy field: centre = M81 (brightest block), rDet 1450, M82 in the frame; Ha knots 10781 px.
+  The hard-stretched L preview shows the IFN filaments clearly (data holds them).
+- Result vs March (KEEP_SUPER, 30 March giga): M82 best of the three (crisp lanes, red Ha filaments, no posterised
+  patches), arms crisp with pink-red knots on a clean dark sky; BUT the M81 nucleus is a flat white oval: the only
+  failing finish gate (check_core_contrast relC 0.086 < 0.10). One finish call; the agent burned the rest of the
+  540-turn budget on the core; the core specialist merge did not beat it -> best-variant fallback export.
+- measureScaleBands used a pure-JS separable blur: with the M81+M82+IFN bright area the kernel reached ~240 px over
+  16 MP and ran > 20 min single-threaded. Replaced by native Convolution (5 s; ratio 1.450 vs 1.482 on M74 v3).
+- Next for bright cores: compress the core during the stretch (DRC) / large-scale contrast recovery, not more clamping.
+- M81 run 2 (93ea1fea, core guard: prep core 0.2 % white instead of 14.4 %): passed ALL gates incl. core relC 0.170,
+  but by COOKING the core (crunchy mottled bulge, near-black lanes; M82 lanes over-darkened); critic 5.2, worse
+  than run 1. The core_cooked spectrum read 0.81 (inside the reference range): calibrated on M74-size cores, it does
+  not transfer to a large bulge (rDet 1450, u = 4.8 px). LESSON (2nd time after M74 v7): a FLOOR on core contrast
+  drives over-processing. Proposed: core relC gate advisory unless white-clipped; block white-clipping only;
+  recalibrate the cooked-core metric on bulge-dominated galaxies.
+
+### Core gates redesigned (2026-11-09 night, after M81 runs 1/2 — user: "this is deceptive")
+- Calibration set (Python then PJSR): M74 prep + v3-v9, M81 run 1 (burnt white oval), run 2 (cooked bulge), KEEP_SUPER,
+  30 March, 5 user refs, approved NGC4490. Candidate metrics that did NOT separate: peak brightness (refs 0.86-0.94),
+  plateau area ratios, trough depth, core spectrum on a large bulge.
+- WHAT SEPARATES:
+  * cooked bulge = core fine-texture AMPLIFICATION vs prep (std of (g_s-g_4s)/(g_4s-sky), s = rDet/600, /300, r<0.22 rDet):
+    M81 run 2 x9.3/x5.5; everything else x0.86-1.9 -> gate core_amp max 3.0 (measureCoreAmp; prep baseline stored in
+    inventory.prepCoreAmp from the prep RGB).
+  * burnt nucleus = WHITE nucleus: median HSV saturation of nucleus pixels > 0.9 x p99.9: refs 0.066-0.176, NGC4490 0.067,
+    M74 0.11-0.21; M81 runs 0.014/0.019 -> gate nucleus_colour min 0.04 (measureNucleus).
+  * M74 v7's cooked core = large flattened top; still caught by core_cooked (spectrum).
+- core relC floor -> advisory for galaxy_spiral (core_burn.rel_contrast_blocking=false): it drove cooking twice.
+- ROOT CAUSE IS PREP: M81's prep nucleus is already white (sat 0.010-0.024; M74 prep 0.061). MTF-type stretches bleach
+  bright cores. Core guard ranks candidates by (no white clip) > (nucleus sat >= 0.04) > relC and now includes
+  "colour core" candidates: Seti+HDR luminance, then the LINEAR R:G:B ratios rebuilt at that luminance where L > 0.35
+  (full weight > 0.65) — ArcsinhStretch's colour-preservation principle applied only to the bright core.
+- M81 run 3 (0bc9cb35) findings: (1) core_structure FLOOR 0.06 (M74-calibrated) unreachable on a smooth bulge (prep
+  0.0028) without cooking (agent hit x10 core texture for 0.059, rejected it) -> floor = min(0.06, 3 x prep), M74
+  unchanged (3 x 0.0195 = 0.059). Third time a floor drove cooking: every "minimum structure/contrast" gate must be
+  relative to what the prep data holds. (2) PREP BUG: on a phase-1 cache hit, Ha was re-opened and centre-cropped
+  WITHOUT registration (~150 px / 0.39 deg off -> false red blob by the nucleus, Ha-knot gate meaningless). Now
+  StarAlignment onto the cached L/RGB; if it fails Ha is dropped. Earlier cached Ha runs (M81 2026-11-08 runs 1/2 used
+  the cache) carried a misregistered Ha.
+- Per-step metrics in action (run 3): the agent got 3 COOKED CORE warnings and backed off; composition held x0.98-1.14
+  of prep core texture with nucleus saturation 0.24-0.26 (run 2 ended x9.3 / 0.019).
+- Colour-core strength (2026-11-09 night): full colour preservation over-saturated the M81 nucleus (0.244 final / 0.253
+  prep) AND turned M82's bright centre into an orange-red patch (the blend acts on every bright area, not just the
+  subject nucleus) — runs 3/4. Core guard now tries strengths 0.5/0.3/1.0 and prefers the nucleus inside the refs' band
+  0.06-0.18 closest to 0.12 (M81: 0.5 -> 0.140, 0.3 -> 0.090). Finish adds max_nucleus_sat 0.22.
+- Run 4 (dff987b2, Ha aligned normally, relative core floor): finished with all gates (proper finish) but critic 5.2:
+  orange nucleus, orange M82 centre, M81 inner disc HDR-flattened to featureless tan ("airbrushed"). The strong HDR
+  knee (amount 0.5) trades inner-disc contrast for an unclipped nucleus; next lever: restrict the HDR knee / colour
+  core to the nucleus zone instead of the whole bright range.
+
+### M74 v10 (2026-11-10, run b505768f): fixed toolset, colour went wrong — critic 4.9 vs v9 6.2
+- The fixed tools ran correctly; the agent misused them: `restrain_red_hue` 0.55 + SCNR 0.35 on LRGB data with NO Ha (stripped the warm tones),
+  7 stacked saturation-raising S curves on the final view (lilac/magenta knots, 12% of the disc), and an arm mask made with
+  `mask_ops` clip 0.44-0.56 after a 3 px blur (near-binary) blended at weight 1 (bright inner disc ending in a dark moat).
+- Fixes: `restrain_red_hue` refused when the run has no Ha (and no narrowband); max 3 raising S curves per view (4th refused:
+  go back to a checkpoint and apply ONE curve); `mask_ops` range windows < 0.3 are widened; new finish/colour-stage gate
+  `palette_purity` (galaxy_spiral, no-Ha runs only): disc lilac (HSV 250-335°) <= 5%, teal (165-195°) <= 10% of disc pixels.
+  Calibration M74 v3-v9 lilac <= 0.021, teal <= 0.046; v4 teal 0.148 (user: cyan haze); v10 lilac 0.120. PJSR ~1 s.
+
+### M74 v10-v12 "brown dome" (2026-11-10): low-end saturation boost on the faint outer disc
+- Traced variant by variant (run 91923ff9): the outer zone (0.6-1.0 rDet) was neutral at prep (warm 0.000) and after
+  detail work (0.057); ONE S curve [[0.03,0.12],[0.06,0.2],[0.12,0.3]] (x4 on near-grey) took it to 0.505 warm, median
+  saturation 0.022 -> 0.064. The faint outer disc has only noise-level chroma (R-B +0.002); boosting it creates false
+  colour. The disc looked "cold" only by contrast with the brown around it (v9's disc is MORE cyan than v12's).
+- Fixes: run_curves S caps the gain y/x at x2.5 for x < 0.06; new gate outer_zone (galaxy_spiral, native metric):
+  outer warm share <= 0.15, outer/inner excess >= 0.04. Calibration: user refs warm 0.020-0.110, rel 0.021-0.128;
+  v9 (user best) 0.005 / 0.064; v3/v5/v10/v11/v12 warm 0.31-0.51; v11/v12 rel 0.031-0.033.
+- The existing edge_steepening gate did NOT see the "dome" (v11 0.92, v12 0.66): the dome was colour, not a profile cliff.
+
+### M74 v16 violet-blue outer arm (2026-11-10)
+- User: "the blue right hand outer arm is really terrible". Traced: sho_hue_saturation (an SHO palette tool) with
+  magenta -0.8 / blue +0.3, then an "outer_blue" boost: outer blue p90 saturation 0.20 -> 0.375, vivid share 0 -> 5.5%.
+- Fixes: palette-only tools hidden for broadband data (dataToolExcludes: no S/O -> no sho_*, no Ha either -> no
+  continuum/dynamic/pseudo-OIII); gate outer_zone blue p90 S <= 0.30 and vivid (S > 0.35) <= 2% (refs 0.158-0.272 / <= 1.1%).

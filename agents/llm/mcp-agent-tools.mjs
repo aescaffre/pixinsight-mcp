@@ -32,7 +32,10 @@ export const AGENT_MAX_TURNS = parseInt(process.argv[5], 10) || null;
 export const AGENT_MODEL = process.argv[6] || 'inherit';
 
 // Build tool set for this agent
-const { definitions, handlers } = buildToolSet(agentName);
+// Data-aware toolset: the brief (argv[4]) decides which palette/Ha tools exist for this run.
+let _briefForTools = null;
+try { if (briefPath && fs.existsSync(briefPath)) _briefForTools = JSON.parse(fs.readFileSync(briefPath, 'utf-8')); } catch {}
+const { definitions, handlers } = buildToolSet(agentName, [], { brief: _briefForTools });
 
 // Create bridge context
 // WI-07b: crash sentinel at the producer. The bridge calls onCrash when the PI process is gone; CRASH.json is

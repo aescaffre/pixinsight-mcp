@@ -198,9 +198,15 @@ export function buildGateTable(brief) {
   const sfl = profile?.saturation?.min_arm_p50;
   if (Number.isFinite(sfl)) add('saturation_floor', 'finish (measureZoneStructure arms)', sfl, `ARM pixels median saturation >= ${sfl} (inter-arm gaps do not count; replaces the subject-median floor when a prep inventory exists)`, 'BLOCKING', emergency);
   const envc = profile?.envelope || {};
+  if (Number.isFinite(cpc.max_core_amp)) add('core_amp', 'finish (measureCoreAmp vs prep)', cpc.max_core_amp, `core fine texture <= x${cpc.max_core_amp} of the prep core (no cooked bulge)`, 'BLOCKING', emergency);
+  if (Number.isFinite(cpc.min_nucleus_sat)) add('nucleus_colour', 'finish (measureNucleus)', cpc.min_nucleus_sat, `nucleus colour: saturation of its brightest pixels >= ${cpc.min_nucleus_sat} (no white burnt nucleus)`, 'BLOCKING', emergency);
   if (Number.isFinite(cpc.max_core_spectrum)) add('core_cooked', 'finish (measureCoreSpectrum)', cpc.max_core_spectrum, `core texture spectrum fine/coarse <= ${cpc.max_core_spectrum} (no cell/worm core from small-radius local contrast)`, 'BLOCKING', emergency);
   const agc = profile?.arm_gaps || {};
   if (Number.isFinite(agc.min_depth)) add('arm_gap_depth', 'finish (measureArmGapDepth)', agc.min_depth, `arm/gap depth >= ${agc.min_depth} (gaps between the arms stay dark: no haze)`, 'BLOCKING', emergency);
+  const ozc = profile?.outer_zone || {};
+  if (Number.isFinite(ozc.max_warm_frac)) add('outer_zone', 'finish (native outer_zone)', ozc.max_warm_frac, `outer disc (0.6-1.0 rDet) warm/brown share <= ${ozc.max_warm_frac}; outer/inner excess >= ${ozc.min_rel_brightness} (blue, visible outer arms)`, 'BLOCKING', emergency);
+  const ppc = profile?.palette_purity || {};
+  if (Number.isFinite(ppc.max_lilac_frac)) add('palette_purity', 'finish (measurePalettePurity; no-Ha runs only)', ppc.max_lilac_frac, `disc lilac/magenta share <= ${ppc.max_lilac_frac}, teal/cyan share <= ${ppc.max_teal_frac} (no stacked-saturation or red-removal artefacts)`, 'BLOCKING', emergency);
   const hkc = profile?.ha_knots || {};
   if (Number.isFinite(hkc.min_pink_frac)) add('ha_knots', 'finish (prep Ha knot pixels)', hkc.min_pink_frac, `HII knots found in the prep Ha stay pink-red (share >= ${hkc.min_pink_frac}); only when Ha data exists`, 'BLOCKING', emergency);
   if (Number.isFinite(envc.max_edge_steepening)) add('edge_softness', 'finish (outer-glow radial profile)', envc.max_edge_steepening, `outer glow fades at the edge no more than x${envc.max_edge_steepening} faster than inside (no mask-shaped boundary)`, 'BLOCKING', emergency);

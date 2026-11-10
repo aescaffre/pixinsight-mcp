@@ -53,3 +53,12 @@ test('edgeSteepening: a steady exponential fade is ~1, a plateau ending in a cli
   const cliff = edgeSteepening(mk(r => r < 0.95 ? 0.3 * Math.exp(-2.5 * (r - 0.6)) : 0.3 * Math.exp(-2.5 * 0.35) * Math.exp(-40 * (r - 0.95))), rDet);
   assert.ok(cliff.evaluated && cliff.steepening > 2.5, JSON.stringify(cliff));
 });
+
+import { coreStructureFloor } from '../agents/llm/tools.mjs';
+test('coreStructureFloor: relative to prep, capped at the absolute floor', () => {
+  const cp = { min_core_structure: 0.06, min_core_structure_vs_prep: 3 };
+  assert.ok(Math.abs(coreStructureFloor(cp, { prepCoreWeber: 0.0195 }) - 0.0585) < 1e-9);   // M74
+  assert.ok(Math.abs(coreStructureFloor(cp, { prepCoreWeber: 0.0028 }) - 0.0084) < 1e-9);   // M81 smooth bulge
+  assert.equal(coreStructureFloor(cp, { prepCoreWeber: 0.05 }), 0.06);                       // cap
+  assert.equal(coreStructureFloor({ min_core_structure: 0.06 }, { prepCoreWeber: 0.0028 }), 0.06);
+});

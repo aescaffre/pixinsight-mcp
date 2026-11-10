@@ -20,14 +20,27 @@ export function registerProcessingTools(server: McpServer, bridge: BridgeClient)
   // run_pixelmath
   server.tool(
     "run_pixelmath",
-    "Execute a PixelMath expression on an image",
+    "Execute a PixelMath expression on an image. To combine separate mono " +
+    "images into a new RGB image, pass expression/expression1/expression2 " +
+    "(one per R/G/B source), createNewImage=true, and leave newImageColorSpace " +
+    "unset (it auto-detects RGB in that case) or set it explicitly.",
     {
       expression: z.string().describe("Math expression (e.g. '$T * 0.5')"),
       expression1: z.string().optional().describe("Green channel expression (if different)"),
       expression2: z.string().optional().describe("Blue channel expression (if different)"),
-      targetViewId: z.string().optional().describe("Apply to this view in-place"),
+      targetViewId: z.string().optional().describe(
+        "Apply to this view in-place. When createNewImage is true, this is only used as " +
+        "execution context (e.g. for combining other named views) -- omit it and any open " +
+        "window will be used as anchor."
+      ),
       createNewImage: z.boolean().default(false).describe("Create a new image instead"),
       newImageId: z.string().optional().describe("ID for new image"),
+      newImageColorSpace: z.enum(["rgb", "gray", "sameAsTarget"]).optional().describe(
+        "Color space for the new image (only relevant when createNewImage is true). " +
+        "Defaults to 'rgb' automatically when expression1/expression2 are given (multi-channel " +
+        "combine), otherwise 'sameAsTarget'. PixelMath does NOT infer this from the expressions " +
+        "on its own -- without it, combining 3 mono images silently produces a mono clone."
+      ),
     },
     async (params) => {
       const result = await bridge.sendCommand("run_pixelmath", "PixelMath", {
@@ -37,6 +50,7 @@ export function registerProcessingTools(server: McpServer, bridge: BridgeClient)
         useSingleExpression: !params.expression1 && !params.expression2,
         createNewImage: params.createNewImage,
         newImageId: params.newImageId ?? "",
+        newImageColorSpace: params.newImageColorSpace,
       }, {
         executeMethod: params.targetViewId ? "executeOn" : "executeGlobal",
         targetView: params.targetViewId,
@@ -48,21 +62,37 @@ export function registerProcessingTools(server: McpServer, bridge: BridgeClient)
   // remove_gradient
   server.tool(
     "remove_gradient",
-    "Remove background gradients using AutomaticBackgroundExtractor (ABE)",
+    "Remove background gradients using AutomaticBackgroundExtractor (ABE). " +
+    "By default this actually corrects the target image in place (subtracting " +
+    "the modeled background) and discards the intermediate background-model " +
+    "preview window.",
     {
       viewId: z.string().describe("View ID of the image"),
       polyDegree: z.number().min(1).max(6).default(4).describe("Polynomial degree (1-6)"),
       tolerance: z.number().default(1.0).describe("Sample rejection tolerance"),
+      correction: z.enum(["subtract", "divide", "none"]).default("subtract").describe(
+        "How to apply the modeled background to the target. 'none' only produces a preview " +
+        "background-model window without touching the target image."
+      ),
+      replaceTarget: z.boolean().default(true).describe(
+        "Overwrite the target view with the corrected result (vs. leaving it untouched)."
+      ),
+      discardModel: z.boolean().default(true).describe(
+        "Don't keep the intermediate background-model window open after correction."
+      ),
     },
-    async ({ viewId, polyDegree, tolerance }) => {
+    async ({ viewId, polyDegree, tolerance, correction, replaceTarget, discardModel }) => {
       const result = await bridge.sendCommand("remove_gradient", "AutomaticBackgroundExtractor", {
         polyDegree,
         tolerance,
+        correction,
+        replaceTarget,
+        discardModel,
       }, {
         executeMethod: "executeOn",
         targetView: viewId,
       });
-      return processResult(result, `Gradient removed from **${viewId}** (ABE, degree ${polyDegree})`);
+      return processResult(result, `Gradient removed from **${viewId}** (ABE, degree ${polyDegree}, correction=${correction})`);
     }
   );
 

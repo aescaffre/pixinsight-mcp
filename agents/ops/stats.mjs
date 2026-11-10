@@ -1,3 +1,4 @@
+import { nativeOr } from './native-metrics.mjs';
 // ============================================================================
 // Image statistics and quality measurement
 // ============================================================================
@@ -167,7 +168,7 @@ export function bandFromCells(cells, cols, rows, minBgCells) {
 // Used by the agent to iterate gradient-correction scale until the background
 // is color-flat WITHOUT eating faint signal.
 // ============================================================================
-export async function measureColorGradient(ctx, viewId, opts = {}) {
+export async function measureColorGradientPjsr(ctx, viewId, opts = {}) {
   const cols = opts.cols ?? 8;
   const rows = opts.rows ?? 6;
   const minBg = opts.minBgCells ?? 12;
@@ -409,4 +410,10 @@ export async function subtractSkyPlane(ctx, viewId, tilt) {
   `);
   if (r.status === 'error') throw new Error(r.error?.message || 'subtractSkyPlane failed');
   return { expression: expr };
+}
+
+
+// Native-first wrapper (2026-11-10): Rust pixmetrics; the …Pjsr version above is the fallback.
+export async function measureColorGradient(ctx, viewId, opts = {}) {
+  return nativeOr(ctx, viewId, 'color_gradient', { opts }, () => measureColorGradientPjsr(ctx, viewId, opts));
 }

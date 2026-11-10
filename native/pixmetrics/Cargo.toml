@@ -1,0 +1,26 @@
+[package]
+name = "pixmetrics"
+version = "0.5.0"
+edition = "2021"
+description = "Native image metrics for pixinsight-mcp: XISF reader + quality-gate measurements (macOS, Windows, Linux)"
+license = "MIT"
+
+[[bin]]
+name = "pixmetrics"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+roxmltree = "0.20"
+miniz_oxide = "0.8"
+lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-decode"] }
+ruzstd = "0.7"
+rayon = "1.10"
+png = "0.17"
+jpeg-decoder = { version = "0.3", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

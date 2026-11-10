@@ -152,8 +152,8 @@ export function createBridgeContext(opts = {}) {
           } catch (e) { /* retry */ }
         }
         att++;
-        // Every 20 polls (~10 seconds), check if PixInsight is still alive
-        if (att % 20 === 0 && att > 0) {
+        // Every 100 polls (~10 seconds), check if PixInsight is still alive
+        if (att % 100 === 0 && att > 0) {
           const alive = await isAlive();
           if (!alive) {
             clearInterval(poll);
@@ -163,8 +163,8 @@ export function createBridgeContext(opts = {}) {
             reject(err);
           }
         }
-        if (att > 2400) { clearInterval(poll); reject(new Error('Timeout: ' + tool)); }
-      }, 500);
+        if (att > 12000) { clearInterval(poll); reject(new Error('Timeout: ' + tool)); }   // 20 min
+      }, 100);   // 2026-11-10: was 500 ms (with the watcher's slow idle cycle, 2-4 s per round trip)
     });
   }
 

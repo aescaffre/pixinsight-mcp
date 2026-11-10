@@ -254,3 +254,17 @@ Scenarios on a fresh PI+watcher: T1 (open 60 MP via open_image, idle, gc()) → 
 - **V8 update (2026-10-29):** under V8 process constants are `Process.CONST` (e.g. `AutomaticBackgroundExtractor.Subtract` if exposed); the watcher rewrites `.prototype.` spelling, so the undefined-constant failure below was a legacy-engine symptom. The numeric `P.targetCorrection = 1` (Subtraction) in `agents/ops/gradient.mjs`, `scripts/run-pipeline.mjs`, `scripts/process-rosetta-v2.mjs` stays valid under V8 and was validated live: per-channel ABE deg 1 moved the color-gradient score 0.0133 -> 0.0093; ABE on L changed uniformity x7. Keep the numeric form.
 - `AutomaticBackgroundExtractor.prototype.Subtract`, `.f32`, `.SameAsTarget` are **undefined** in PI 1.9.5 → "invalid argument type: unsigned integer value expected". Module strings expose `Subtraction` / `Division` / `None`; do NOT set the sample-format params (defaults are f32 / SameAsTarget). `agents/ops/gradient.mjs` runABE used to swallow this as a WARN → silent no-op (memory claims of "run_abe deg=1 converged 0.0133→0.0093" are suspect). Now it throws. (Validated live under V8 on 2026-10-29: run_abe is no longer a no-op.)
 - **NEVER enumerate a process prototype with `for (k in Process.prototype)` in PJSR** — doing it on AutomaticBackgroundExtractor killed PixInsight instantly (no crash log). Probe individual constants with `typeof` instead.
+
+## Bridge latency (2026-11-10)
+- A bare `ctx.pjsr('1+1')` round trip took 3.5-4 s although the script executed in 3 ms: the watcher's idle loop
+  was 25 x (msleep 20 + processEvents) and processEvents is slow with large images open; the Node side polled
+  every 500 ms. Fixed with wall-clock-boxed loops (re-check every ~100 ms, 120 ms yield after a command) and a
+  100 ms Node poll: round trip ~105 ms. Restart the watcher (scripts/pi-relaunch.sh --kill) after editing it.
+
+## PixInsight conventions needed to reproduce measurements outside PI (verified 2026-11-10)
+- `Convolution` Parametric Gaussian: kernel truncated at 1% of the peak (radius round(3.035 sigma)), reflected
+  borders (d c b a | a b c d). Matches scipy `gaussian_filter(mode='reflect', truncate=sqrt(2 ln 100))` to 1e-6.
+- `Image.median()` with no channel selected pools all channels; even counts average the two middle values.
+  `Image.MAD()` is the raw (unscaled) median absolute deviation.
+- `FileFormatInstance.writeImage(img)` without a description wrote a Float32 view as UInt16 — to export a float
+  copy, assign into a 32-bit `ImageWindow` and `saveAs(path, false, false, false, false)`.

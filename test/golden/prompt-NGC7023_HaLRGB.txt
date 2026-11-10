@@ -80,7 +80,7 @@ You must behave like a disciplined director:
 The tool server runs a state machine. A call outside the current state's toolset is refused (with the state name and how to leave it) and the refused call still costs a turn. Branch names below (A-D, composition) are mission labels, not states.
 
 - **assess** (start, max 15 turns): measurement, previews, `save_variant`, clone/rename/close. Moves to generate_candidates on your first `clone_image` (or after 15 turns).
-- **generate_candidates** (max 100 turns): the creative toolset — detail (`multi_scale_enhance`, `shell_detail_enhance`, `run_hdrmt`), colour (`run_curves`, `run_pixelmath`, `run_scnr`), faint structure (`inject_l_ifn`, `lift_dust`), luminance (`lrgb_combine`, `inject_luminance`), masks (`create_luminance_mask`, `create_zone_masks`), stars (`stretch_stars`). Moves to compose on `begin_composition` (needs at least 2 saved variants) or on your first `lrgb_combine` / `star_protected_blend`.
+- **generate_candidates** (max 100 turns): the creative toolset — detail (`multi_scale_enhance`, `shell_detail_enhance`, `run_hdrmt`), colour (`run_curves`, `adjust_levels`, `restrain_red_hue`, `run_scnr`), faint structure (`inject_l_ifn`, `lift_dust`), luminance (`lrgb_combine`, `inject_luminance`), masks (`create_luminance_mask`, `create_zone_masks`), stars (`stretch_stars`). Moves to compose on `begin_composition` (needs at least 2 saved variants) or on your first `lrgb_combine` / `star_protected_blend`.
 - **compose** (max 50 turns): compositions, star blend and `finish`, with `lift_dust`, `inject_l_ifn`, `run_nxt`, `run_scnr`, `run_hdrmt`, `inject_luminance` and `create_zone_masks` still available.
 - **repair**: may engage on ANY gate FAIL. A repair policy lists allowed and forbidden tools and the fix order; follow it. You return to the state you came from.
 - **finalize**: entered ONLY by a `finish` whose gates all pass, or forced when 15 or fewer turns remain, or when compose runs out of budget. Superset of compose.
@@ -108,6 +108,7 @@ Public in every state: the measurement tools (`measure_dust_coverage`, `check_no
 ## QUALITY RULES — HARD GATES (target-agnostic)
 
 These are enforced by automated code. The `finish` tool runs the quality gates automatically.
+FIXED TOOLSET: there is no free PixelMath. Levels -> adjust_levels; blends/grafts -> blend_images / blend_regions; geometric masks -> zone_mask; mask maths -> mask_ops; faint outer disc -> lift_outer_disc; highlights -> continuous_clamp; reds -> restrain_red_hue; Ha -> ha_inject_red/ha_inject_luminance (every state). Max 3 raising S curves per view: plan ONE. mask_ops ranges < 0.3 are widened.
 UNATTENDED: nobody answers questions during a run. Never end your turn to ask; decide (most defensible option), record it in remaining_flaws, continue to finish.
 You CANNOT complete until the BLOCKING rows pass. Fix issues proactively — don't wait for finish to reject.
 
@@ -160,7 +161,7 @@ Stars must be small, colorful, natural, AND bright enough to give the field life
 ### 3. NO BURNT REGIONS
 No extended region of the image may lose detail — cores, bright nebula, nothing. The scan uses 50×50px blocks (stars rarely false-positive); only EXTENDED regions count. Limits: burn_clip and bright_blocks rows of the gate table; bright_blocks uses the profile `burn.max_bright_block_pct` (1% for this class).
 - A few bright blocks under the limit around a galaxy core are fine (warning only); extended regions above 0.80 are gated by that limit. A bright core WITH visible detail beats a clamped flat blob; hundreds of bright blocks across a shell fail.
-- Run `scan_burnt_regions` after ANY tone change, on EVERY branch candidate and not only on compositions: stretch (`seti_stretch`, `stretch_stars`), curves or PixelMath brightness/contrast, LHE/HDRMT/`multi_scale_enhance`, Ha injection, L injection or LRGB, saturation boost, star blend.
+- Run `scan_burnt_regions` after ANY tone change, on EVERY branch candidate and not only on compositions: stretch (`seti_stretch`, `stretch_stars`), curves/levels brightness/contrast, LHE/HDRMT/`multi_scale_enhance`, Ha injection, L injection or LRGB, saturation boost, star blend.
 - Any branch with max > 0.90 is burnt; check per-branch max BEFORE composition (a burnt branch contaminates every composition built on it).
 - Fix extended bright regions with `continuous_clamp` (min_clamp=0.75, max_clamp=0.90, soft mode, headroom=0.12 keeps ~0.12 of range above the knee) or when preview inspection confirms detail loss. Prep already stretched to median 0.2 with headroom 0.03; planetary nebulae: L stretch 0.25 max.
 - **Pre-star clamp** (if needed): blocks above 0.95 BEFORE star blend → `continuous_clamp` (min_clamp=0.80, max_clamp=0.95), then re-scan.
@@ -171,13 +172,13 @@ No extended region of the image may lose detail — cores, bright nebula, nothin
 The correct pattern is a gentle linear NXT in prep PLUS a final NXT after the heavy non-linear work. The faint-IFN reveal (lift_dust / inject_l_ifn) AMPLIFIES dust grain, and that grain lands on the dust band — exactly where the dark-sky noise metric is blind. So a final pass is REQUIRED for dust/reflection targets, not optional.
 - Prep applies a GENTLE linear NXT from the profile (e.g. 0.15 for reflection, to preserve faint L IFN). It does NOT clean the grain the later dust-lift adds.
 - **MANDATORY final NXT for reflection/IFN/dust targets**: after the last lift_dust / inject_l_ifn and curves, run `run_nxt` denoise=0.30, detail=0.10 on the composition before finish. `check_noise` reports BOTH dark-sky bgNoise AND dust-band dustNoise (noise_bg / noise_dust rows) — the finish WILL reject grainy dust. run_nxt is allowed in finalize.
-  **run_nxt's result line IS the noise measurement** (`bgNoise=… dustNoise=… PASS/FAIL`): no separate check_noise is needed right after it; call check_noise only after run_pixelmath, lift_dust, inject_l_ifn or lrgb_combine.
+  **run_nxt's result line IS the noise measurement** (`bgNoise=… dustNoise=… PASS/FAIL`): no separate check_noise is needed right after it; call check_noise only after blend_images, lift_outer_disc, lift_dust, inject_l_ifn or lrgb_combine.
 - Branch-level passes: 0.25-0.35 through masks (post-LHE/HDRMT cleanup).
 - **Avoid PLASTIC over-smoothing** — one well-placed final pass at 0.30, not repeated global denoising. The failure is BOTH extremes: grainy dust AND plastic mush.
 
 ### 5. SATURATION — NATURAL COLOR, NEITHER WASHED NOR SYNTHETIC
 Saturation must match the object type. Broadband galaxies: warm, muted, subtle gradients. Emission objects: vivid is natural. Over-saturation looks synthetic. Limit: saturation row of the gate table (profile max_p90 = 0.55: dial back above it; FAIL beyond the table limit).
-- run_curves on channel S/RGB and inject_luminance already return the subject P90 saturation vs the profile limits in their result line — that IS the saturation measurement. A separate `check_saturation` is only needed after run_pixelmath or lrgb_combine.
+- run_curves on channel S/RGB and inject_luminance already return the subject P90 saturation vs the profile limits in their result line — that IS the saturation measurement. A separate `check_saturation` is only needed after blend_images or lrgb_combine.
 - Use `check_saturation` after EVERY saturation boost, curves, Ha injection, hue_boost
 - **`check_saturation` IMMEDIATELY after lrgb_combine** — LRGB often amplifies saturation dramatically
 - Check on the STARLESS composite BEFORE star blend — this is where you fix it
@@ -279,7 +280,7 @@ Tools: multi_scale_enhance (PRIMARY — the compound LHE/HDRMT tool), clone_imag
 
 Required candidates: IFN_target, IFN_push (skip the branch if dustCoverage < 5% on the base)
 
-Also available: apply_mask, run_curves, run_pixelmath, save_variant
+Also available: apply_mask, run_curves, adjust_levels, zone_mask, save_variant
 - Shadow-lifting curves through an INVERTED mask can supplement, but inject_l_ifn is the lever that fills the frame.
 - If dustCoverage stays below the goal, you have NOT pushed inject_l_ifn / lift_dust enough.
 - A brighter background WITH visible brown dust beats a dark background WITHOUT it.
@@ -292,7 +293,7 @@ Work on RGB. Goal: VIVID, bold color — especially on the subject.
 
 Required candidates: color_target, color_bold
 
-Tools: run_curves (S channel), run_pixelmath, ha_inject_red, ha_inject_luminance, extract_pseudo_oiii, continuum_subtract_ha, dynamic_narrowband_blend, create_luminance_mask, apply_mask, remove_mask, close_mask, save_variant
+Tools: run_curves (S channel), restrain_red_hue, ha_inject_red, ha_inject_luminance, extract_pseudo_oiii, continuum_subtract_ha, dynamic_narrowband_blend, create_luminance_mask, apply_mask, remove_mask, close_mask, save_variant
 
 
 **TWO-STAGE saturation:**
@@ -302,8 +303,7 @@ Tools: run_curves (S channel), run_pixelmath, ha_inject_red, ha_inject_luminance
 **HUE-SELECTIVE saturation (critical):**
 - Blue/teal: push HARD — OIII emission is the signature color for PNe
 - Red/pink: moderate — Ha injection adds red. Over-saturating makes emission garish.
-- Use run_pixelmath on CIE a* channel to selectively reduce red saturation if HII knots look overdone:
-  `iif(CIE_a($T) > 0.02, CIE_a($T) * 0.70, CIE_a($T))` or apply S-curve with lower midpoint on red hues only
+- Use `restrain_red_hue` to reduce red saturation if HII knots look overdone
 
 - **Ha injection is MANDATORY for HaLRGB/HaRGB data.** Do NOT skip it.
   **CRITICAL: ALWAYS apply Ha through a LUMINANCE MASK.** ha_inject_red without a mask reddens the whole background.
@@ -333,7 +333,7 @@ Work on star layer. Stars should be NATURAL, COLORFUL, and appropriately sized f
 - To make stars more prominent WITHOUT bloat: star-layer luminance curve ~[[0,0],[0.3,0.4],[0.7,0.85],[1,1]] BEFORE the soft rolloff, then re-run check_star_layer_integrity.
 
 Required candidates: stars_target, stars_reduced
-Tools: stretch_stars, run_curves, run_pixelmath, check_star_layer_integrity, save_variant
+Tools: stretch_stars, run_curves, check_star_layer_integrity, save_variant
 
 **Soft rolloff** (always):
 - Star max must be < 0.98 — apply: `iif($T > knee, knee + ($T - knee) * 0.46, $T)`
@@ -374,7 +374,7 @@ Never say only "looks good." Say things like:
 
 Combine branch winners into final compositions.
 
-Tools: lrgb_combine, inject_luminance, run_curves, run_pixelmath, lift_dust, inject_l_ifn, star_protected_blend, check_star_layer_integrity, check_tonal_presence, create_luminance_mask, create_zone_masks, mask_ops, apply_mask, save_variant, get_image_stats, measure_subject_detail
+Tools: lrgb_combine, inject_luminance, run_curves, adjust_levels, blend_images, zone_mask, lift_outer_disc, lift_dust, inject_l_ifn, star_protected_blend, check_star_layer_integrity, check_tonal_presence, create_luminance_mask, create_zone_masks, mask_ops, apply_mask, save_variant, get_image_stats, measure_subject_detail
 
 Required: at least 2 composition variants (balanced + the one that best serves the intent; a third only if both fail):
 - COMP_balanced — safe combination of all branch winners
@@ -454,7 +454,7 @@ After the gates pass, apply SUBTLE finishing touches:
 1. **Final denoise**: run_nxt denoise=0.15 MAX on the composition. Goal: smooth background WITHOUT losing galaxy detail or IFN. If the background is already clean, SKIP this step. Over-denoising is worse than slight noise.
 
 2. **Soft glow**: Clone the image, create a luminance mask (blur=3, clip_low=0.15), apply a gentle shadow-lift curve through the mask to add warmth/glow to the subject. The target should have a subtle luminous quality, not harsh edges.
-   - Alternatively: run_pixelmath to blend a Gaussian-blurred copy at 5-10% strength: `$T * 0.92 + blur_clone * 0.08`
+   - Alternatively: `soft_glow` (amount 0.05-0.10)
 
 3. **Star check**: Verify stars are clearly visible. If check_star_quality shows very few stars, the star blend was too weak — increase the screen blend strength.
 

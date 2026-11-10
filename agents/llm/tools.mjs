@@ -12,10 +12,17 @@ import {
   setiStretch,
   createLumMask, applyMask, removeMask, closeMask, shapeMask, measureMask, maskStatsText,
   checkStarQuality, measureStarField, checkRinging, checkSharpness, assessBurn, scanBurntRegions, checkSaturation, checkTonalPresence, checkStarLayerIntegrity, checkBrightChroma, checkHighlightTexture, measureShellTexture, measurePsfField,
-  measureSubjectDetail, evaluateDetailGain, summarizeDetail, locateSubjectROI, measureCoreContrast, measureBackgroundNoise, measureChromaNoise, measureDustCoverage, compareToReference, measureBackgroundFloor, measureScaleBands, measureDiscMottle, measureOuterArms, measureInventoryZones, measureZoneStructure, measureEnvelopeSectors, compareEnvelopeSectors, measureSectorProfiles, measureCoreSpectrum, edgeSteepening, measureArmGapDepth, measureHaKnotColour,
+  measureSubjectDetail, evaluateDetailGain, summarizeDetail, locateSubjectROI, measureCoreContrast, measureBackgroundNoise, measureChromaNoise, measureDustCoverage, compareToReference, measureBackgroundFloor, measureScaleBands, measureDiscMottle, measureOuterArms, measureInventoryZones, measureZoneStructure, measureEnvelopeSectors, compareEnvelopeSectors, measureSectorProfiles, measureCoreSpectrum, edgeSteepening, measureArmGapDepth, measureHaKnotColour, measureNucleus, measureCoreAmp, measurePalettePurity, measureOuterZone,
   multiScaleEnhance, shellDetailEnhance,
   extractPseudoOIII, continuumSubtractHa, dynamicNarrowbandBlend, createSyntheticLuminance, createZoneMasks, createAdaptiveZoneMasks, continuousClamp,
 } from '../ops/index.mjs';
+import { nativeBatch } from '../ops/native-metrics.mjs';
+
+/** True when the run has no Ha data at all (LRGB/RGB): red-restraint tools and Ha-knot gates do not apply. */
+const MAX_SAT_BOOSTS = 3;
+const MAX_LOW_SAT_GAIN = 2.5;
+const MIN_MASK_RANGE = 0.3;
+function noHaData(brief) { const c = brief?.dataDescription?.channels; return !!c && c.Ha === false && !c.S && !c.O; }
 import { shoCombine, shoHueShift, shoHueSaturation, measurePaletteBalance, computeNarrowbandBalance, repairStarResiduals, neutralizePaletteBackground, chromaSmooth, liftFaintHalo, bodyEdgeContrast, compressOuterHaze } from '../ops/sho-palette.mjs';
 import { checkHardConstraints, statsToScores, computeAggregate } from '../scoring.mjs';
 import { openXisfAs } from './prep-cache-util.mjs';
@@ -369,13 +376,26 @@ function verifyToolsForGates(failedGates) {
 // ============================================================================
 export const METRIC_STAGES = [
   { stage: 'tone', gates: ['core_preservation', 'outer_arms', 'envelope_clip', 'edge_softness', 'arm_gap_depth', 'sky_level', 'tonal_presence'], tools: 'stretch/global curves, black point, masked outer-zone lift' },
-  { stage: 'local_contrast', gates: ['disc_mottle', 'core_structure', 'core_cooked'], tools: 'LHE, HDRMT (HDRMT: +57% mottle, -24% core on M74), MSE' },
+  { stage: 'local_contrast', gates: ['disc_mottle', 'core_structure', 'core_cooked', 'core_amp', 'nucleus_colour'], tools: 'LHE, HDRMT (HDRMT: +57% mottle, -24% core on M74), MSE' },
   { stage: 'detail_noise', gates: ['fine_detail', 'noise_bg'], tools: 'BXT/MLT/USM sharpening and NXT together (USM: +50% grain)' },
   { stage: 'colour', gates: ['saturation_floor', 'saturation', 'ha_knots'], tools: 'chroma/S curves, chroma_smooth, SCNR (touch only saturation + chroma noise)' },
 ];
 export const STAGE_OF_GATE = Object.fromEntries(METRIC_STAGES.flatMap(s => s.gates.map(g => [g, s.stage])));
 
+// Core-structure floor relative to what the prep core holds (2026-11-09, M81 run 3): a fixed 0.06 (calibrated on
+// M74, prep 0.0195) is unreachable on a smooth bulge (M81 prep 0.0028) without cooking it — the agent hit x10 core
+// texture to get 0.059. Floor = min(min_core_structure, min_core_structure_vs_prep x prepCoreWeber).
+export function coreStructureFloor(cp, inv) {
+  const abs = cp?.min_core_structure;
+  if (!Number.isFinite(abs)) return null;
+  const k = cp?.min_core_structure_vs_prep, p = inv?.prepCoreWeber;
+  return (Number.isFinite(k) && Number.isFinite(p) && p > 0) ? Math.min(abs, k * p) : abs;
+}
+
 export async function measureStage(ctx, brief, viewId, stage) {
+  return nativeBatch(ctx, viewId, `stage:${stage}`, () => measureStageInner(ctx, brief, viewId, stage));
+}
+async function measureStageInner(ctx, brief, viewId, stage) {
   const profile = brief?.processingProfile || {}, inv = brief?._inventory, rows = [];
   const row = (gate, metric, value, limit, pass, note = '') => rows.push({ gate, metric, value: value == null ? null : +(+value).toFixed(4), limit, pass, note });
   if (stage === 'tone') {
@@ -395,7 +415,9 @@ export async function measureStage(ctx, brief, viewId, stage) {
   } else if (stage === 'local_contrast') {
     const ts = profile.texture_scale, cp = profile.core_preservation, rD = brief?._baselineDetail?.scale?.rDisc;
     if (Number.isFinite(ts?.max_mid_mottle)) { const m = await measureDiscMottle(ctx, viewId, { radius: rD }); row('disc_mottle', 'mid-disc mottle', m.mid, `<= ${ts.max_mid_mottle}`, m.mid != null && m.mid <= ts.max_mid_mottle); }
-    if (Number.isFinite(cp?.min_core_structure) && inv?.zones) { const zs = await measureZoneStructure(ctx, viewId, inv); row('core_structure', 'core fine structure', zs.coreWeber, `>= ${cp.min_core_structure}`, zs.coreWeber >= cp.min_core_structure); }
+    if (Number.isFinite(cp?.min_core_structure) && inv?.zones) { const fl = coreStructureFloor(cp, inv); const zs = await measureZoneStructure(ctx, viewId, inv); row('core_structure', 'core fine structure', zs.coreWeber, `>= ${fl.toFixed(4)}`, zs.coreWeber >= fl); }
+    if (Number.isFinite(cp?.max_core_amp) && inv?.prepCoreAmp) { const ca = await measureCoreAmp(ctx, viewId, inv); const amp = Math.max(ca.std600 / inv.prepCoreAmp.std600, ca.std300 / inv.prepCoreAmp.std300); row('core_amp', 'core fine-texture amplification vs prep', amp, `<= ${cp.max_core_amp}`, amp <= cp.max_core_amp, 'cooked bulge: fine texture pushed far above what the data holds'); }
+    if (Number.isFinite(cp?.min_nucleus_sat) && inv?.zones) { try { const nu = await measureNucleus(ctx, viewId, inv); if (nu.topSat != null) row('nucleus_colour', 'nucleus colour (saturation of the brightest 10%)', nu.topSat, `${cp.min_nucleus_sat}-${cp.max_nucleus_sat ?? 1}`, nu.topSat >= cp.min_nucleus_sat && nu.topSat <= (cp.max_nucleus_sat ?? 1), 'white = burnt; orange = overcooked colour'); } catch { /* mono */ } }
     if (Number.isFinite(cp?.max_core_spectrum) && inv?.zones) { const sp = await measureCoreSpectrum(ctx, viewId, inv); if (sp.spectrum != null) row('core_cooked', 'core texture spectrum (fine/coarse)', sp.spectrum, `<= ${cp.max_core_spectrum}`, sp.spectrum <= cp.max_core_spectrum, 'natural cores carry more structure at large scales; > limit = small-radius local contrast made cells'); }
   } else if (stage === 'detail_noise') {
     const ts = profile.texture_scale, prep = brief?._baselineDetail?.scale;
@@ -410,6 +432,8 @@ export async function measureStage(ctx, brief, viewId, stage) {
     const sat = await checkSaturation(ctx, viewId); const { failAt } = saturationThresholds(brief);
     row('saturation', 'subject P90 saturation', sat.p90S, `<= ${failAt.toFixed(2)}`, sat.p90S <= failAt);
     if (Number.isFinite(sp.min_p50) && !(Number.isFinite(sp.min_arm_p50) && inv?.zones)) row('saturation_floor', 'subject median saturation', sat.medianS, `>= ${sp.min_p50}`, sat.medianS >= sp.min_p50);
+    const ozp = profile.outer_zone; if (ozp && inv?.centre) { const oz = await measureOuterZone(ctx, viewId, inv).catch(() => null); if (oz) { if (Number.isFinite(ozp.min_inner_excess)) row('outer_zone', 'inner disc excess over sky', oz.innerExcess, `>= ${ozp.min_inner_excess}`, oz.innerExcess >= ozp.min_inner_excess); if (Number.isFinite(ozp.max_blue_p90s)) row('outer_zone', 'outer blue saturation p90 (vivid share)', oz.blueP90S, `<= ${ozp.max_blue_p90s} (vivid <= ${ozp.max_vivid_blue_frac})`, oz.blueP90S <= ozp.max_blue_p90s && oz.vividBlueFrac <= (ozp.max_vivid_blue_frac ?? 1), `vivid ${(100 * oz.vividBlueFrac).toFixed(1)}%`); row('outer_zone', 'outer-zone warm/brown share', oz.warmFrac, `<= ${ozp.max_warm_frac}`, oz.warmFrac <= ozp.max_warm_frac, `median hue ${oz.medHue?.toFixed(0)}°`); row('outer_zone', 'outer/inner disc excess', oz.relBrightness, `>= ${ozp.min_rel_brightness}`, oz.relBrightness >= ozp.min_rel_brightness); } }
+    const ppp = profile.palette_purity; if (ppp && inv?.zones && (!ppp.only_without_ha || noHaData(brief))) { try { const pp = await measurePalettePurity(ctx, viewId, inv); if (pp.n > 200) { row('palette_purity', 'lilac/magenta share of the disc (no Ha data)', pp.lilac, `<= ${ppp.max_lilac_frac}`, pp.lilac <= ppp.max_lilac_frac, 'stacked saturation curves + SCNR'); row('palette_purity', 'teal/cyan share of the disc', pp.teal, `<= ${ppp.max_teal_frac}`, pp.teal <= ppp.max_teal_frac, 'red chroma removed or green lifted'); } } catch { /* mono */ } }
     const hkp = profile.ha_knots; if (Number.isFinite(hkp?.min_pink_frac) && inv?.haKnots) { const hk = await measureHaKnotColour(ctx, viewId, inv.haKnots); if (hk.evaluated) row('ha_knots', 'Ha knots still pink-red (share of knot pixels)', hk.pinkFrac, `>= ${hkp.min_pink_frac}`, hk.pinkFrac >= hkp.min_pink_frac, `white-clipped ${(100 * hk.whiteFrac).toFixed(0)}%, median hue ${hk.medHue?.toFixed(0)}°`); }
   } else throw new Error(`unknown stage ${stage}`);
   return rows;
@@ -436,7 +460,11 @@ async function envelopeNote(ctx, brief, viewId) {
   } catch (e) { return ''; }
 }
 
+// Batched (2026-11-10): one export + one native call for the whole battery (see nativeBatch).
 export async function evaluateFinishGates(ctx, store, brief, viewId, agentName, opts = {}) {
+  return nativeBatch(ctx, viewId, 'finish-gates', () => evaluateFinishGatesInner(ctx, store, brief, viewId, agentName, opts));
+}
+async function evaluateFinishGatesInner(ctx, store, brief, viewId, agentName, opts = {}) {
   const mode = opts.mode || 'run';
   const variantId = opts.variantId || null;
   const profile = brief?.processingProfile || {};
@@ -926,9 +954,10 @@ export async function evaluateFinishGates(ctx, store, brief, viewId, agentName, 
       }
       if (cp && Number.isFinite(cp.min_core_structure) && inv?.zones) {
         const zs = await measureZoneStructure(ctx, viewId, inv);
-        if (zs.coreWeber < cp.min_core_structure) {
-          const msg = `FEATURELESS CORE: core fine-structure ${zs.coreWeber.toFixed(4)} < ${cp.min_core_structure} (prep ${inv.prepCoreWeber?.toFixed(4) ?? 'n/a'}; ${cp._structure_calibration || ''}). The core is bright but smooth — the nuclear dust lanes are gone. Use the core specialist / a core-masked HDRMT or fine-scale sharpening on the core; do not flatten it with curves.`;
-          if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('core_structure', msg, { metric: 'coreWeber', value: zs.coreWeber, limit: cp.min_core_structure });
+        const csFloor = coreStructureFloor(cp, inv);
+        if (zs.coreWeber < csFloor) {
+          const msg = `FEATURELESS CORE: core fine-structure ${zs.coreWeber.toFixed(4)} < ${csFloor.toFixed(4)} (= min(${cp.min_core_structure}, ${cp.min_core_structure_vs_prep ?? '-'} x prep); prep ${inv.prepCoreWeber?.toFixed(4) ?? 'n/a'}; ${cp._structure_calibration || ''}). The core is bright but smooth — the nuclear dust lanes are gone. Use the core specialist / a core-masked HDRMT or fine-scale sharpening on the core; do not flatten it with curves.`;
+          if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('core_structure', msg, { metric: 'coreWeber', value: zs.coreWeber, limit: csFloor });
         }
       }
       // Cooked core (2026-11-08, M74 v7; calibrated on 5 user reference galaxies + approved NGC4490).
@@ -956,6 +985,70 @@ export async function evaluateFinishGates(ctx, store, brief, viewId, agentName, 
           const msg = `HA KNOTS LOST: only ${(100 * hk.pinkFrac).toFixed(0)}% of the HII-knot pixels found in the prep Ha are still pink-red (< ${(100 * hkp.min_pink_frac).toFixed(0)}%; ${(100 * hk.whiteFrac).toFixed(0)}% clipped to white, median hue ${hk.medHue?.toFixed(0)}°; ${hkp._calibration || ''}). A hue shift toward blue, a global chroma/brightness push or a blue-violet palette match washed the Ha out. Keep the Ha-injected knot colour: shift hue through an inverted Ha-knot mask, protect knots from brightness gain, and do not chase the reference palette with a global hue rotation.`;
           if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('ha_knots', msg, { metric: 'haKnotPinkFrac', value: hk.pinkFrac, limit: hkp.min_pink_frac });
         }
+      }
+      // Brown outer disc / faint outer arms (2026-11-10, M74 v10-v12: a low-end saturation boost x4 turned the faint
+      // outer disc's noise-level warm tint into a brown dome; v11/v12 outer arms at half v9's relative brightness).
+      const ozp = profile?.outer_zone;
+      if (ozp && inv?.centre && inv?.rDet) {
+        const oz = await measureOuterZone(ctx, viewId, inv).catch(() => null);
+        if (!oz) warnings.push('outer_zone gate skipped: native metrics unavailable (build native/pixmetrics)');
+        else {
+          if (Number.isFinite(ozp.max_warm_frac) && oz.warmFrac != null && oz.warmFrac > ozp.max_warm_frac) {
+            const msg = `BROWN OUTER DISC: ${(100 * oz.warmFrac).toFixed(0)}% of the outer-zone pixels (0.6-1.0 rDet) are warm/brown (> ${(100 * ozp.max_warm_frac).toFixed(0)}%; median hue ${oz.medHue?.toFixed(0)}°; ${ozp._calibration || ''}). The faint outer disc has almost no colour signal; boosting low saturation turns its noise-level warm tint into a brown haze. Go back before the saturation step and use a curve that does not lift the low end (y <= 2.5x for x < 0.06), or saturate through a mask that excludes the faint outer disc.`;
+            if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('outer_zone', msg, { metric: 'outerWarmFrac', value: oz.warmFrac, limit: ozp.max_warm_frac });
+          }
+          // Disc presence (2026-11-10, M74 v13-v15: inner disc excess 0.21-0.26 vs the user's best v5 0.30 — dim, grey disc).
+          if (Number.isFinite(ozp.min_inner_excess) && oz.innerExcess != null && oz.innerExcess < ozp.min_inner_excess) {
+            const msg = `DIM DISC: the inner disc (0.3-0.5 rDet) sits only ${oz.innerExcess.toFixed(3)} above the sky (< ${ozp.min_inner_excess}; ${ozp._inner_calibration || ''}). The galaxy reads grey and recessed. Raise the disc midtones (luminance curve or adjust_levels midtones through a galaxy mask) — not the sky, not the core highlights.`;
+            if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('outer_zone', msg, { metric: 'innerExcess', value: oz.innerExcess, limit: ozp.min_inner_excess });
+          }
+          // Over-saturated outer blues (2026-11-10, M74 v16: hue/sat "outer_blue" boost -> vivid violet-blue outer arm).
+          if (Number.isFinite(ozp.max_blue_p90s) && oz.blueP90S != null && (oz.blueP90S > ozp.max_blue_p90s || (Number.isFinite(ozp.max_vivid_blue_frac) && oz.vividBlueFrac > ozp.max_vivid_blue_frac))) {
+            const msg = `OVER-SATURATED OUTER BLUE: outer-arm blues reach saturation ${oz.blueP90S.toFixed(3)} (p90; limit ${ozp.max_blue_p90s}) with ${(100 * oz.vividBlueFrac).toFixed(1)}% vivid pixels (limit ${(100 * ozp.max_vivid_blue_frac).toFixed(0)}%; ${ozp._blue_calibration || ''}). The faint outer arms read as painted violet-blue patches. Undo the blue/saturation boost on the outer disc; outer arms should be a soft, muted blue.`;
+            if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('outer_zone', msg, { metric: 'outerBlueP90S', value: oz.blueP90S, limit: ozp.max_blue_p90s });
+          }
+          if (Number.isFinite(ozp.min_rel_brightness) && oz.relBrightness != null && oz.relBrightness < ozp.min_rel_brightness) {
+            const msg = `FAINT OUTER ARMS: outer-zone excess is ${oz.relBrightness.toFixed(3)} of the inner disc's (< ${ozp.min_rel_brightness}; ${ozp._calibration || ''}). Lift the faint outer disc (lift_outer_disc) and do not let later tone curves pull it back down.`;
+            if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('outer_zone', msg, { metric: 'outerRelBrightness', value: oz.relBrightness, limit: ozp.min_rel_brightness });
+          }
+        }
+      }
+      // Lilac/teal disc without Ha (2026-11-10, M74 v10: stacked saturation curves + SCNR made lilac-magenta knots).
+      const ppp = profile?.palette_purity;
+      if (ppp && inv?.zones && (!ppp.only_without_ha || noHaData(brief))) {
+        try {
+          const pp = await measurePalettePurity(ctx, viewId, inv);
+          if (pp.n > 200 && pp.lilac > ppp.max_lilac_frac) {
+            const msg = `LILAC DISC: ${(100 * pp.lilac).toFixed(1)}% of the disc pixels are lilac/magenta (> ${(100 * ppp.max_lilac_frac).toFixed(0)}%; ${ppp._calibration || ''}). There is no Ha data, so this hue is an artefact of stacked saturation curves / SCNR. Go back to a checkpoint before the saturation steps and apply ONE gentle saturation curve; skip SCNR unless a green cast is measured.`;
+            if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('palette_purity', msg, { metric: 'lilacFrac', value: pp.lilac, limit: ppp.max_lilac_frac });
+          }
+          if (pp.n > 200 && pp.teal > ppp.max_teal_frac) {
+            const msg = `TEAL DISC: ${(100 * pp.teal).toFixed(1)}% of the disc pixels are teal/cyan (> ${(100 * ppp.max_teal_frac).toFixed(0)}%; ${ppp._calibration || ''}). Typical causes: red chroma removed, a green-channel lift, or blue pushed into the inter-arm haze. Undo those steps; keep the arms blue and the inter-arm neutral.`;
+            if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('palette_purity', msg, { metric: 'tealFrac', value: pp.teal, limit: ppp.max_teal_frac });
+          }
+        } catch { /* mono image */ }
+      }
+      // Cooked bulge and white nucleus (2026-11-09, M81 runs 1/2; calibrated on M74 v3-v9, M81, KEEP_SUPER, user refs).
+      if (cp && Number.isFinite(cp.max_core_amp) && inv?.prepCoreAmp) {
+        const ca = await measureCoreAmp(ctx, viewId, inv);
+        const amp = Math.max(ca.std600 / inv.prepCoreAmp.std600, ca.std300 / inv.prepCoreAmp.std300);
+        if (amp > cp.max_core_amp) {
+          const msg = `COOKED CORE (texture x${amp.toFixed(1)} of prep > x${cp.max_core_amp}; ${cp._amp_calibration || ''}): small-scale local contrast in the bulge pushed its fine texture far above what the data holds — crunchy mottling, near-black lanes. Undo the core-area LHE/HDRMT/MSE/sharpening; keep the prep core texture and lift only large scales.`;
+          if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('core_amp', msg, { metric: 'coreAmp', value: amp, limit: cp.max_core_amp });
+        }
+      }
+      if (cp && Number.isFinite(cp.min_nucleus_sat) && inv?.zones) {
+        try {
+          const nu = await measureNucleus(ctx, viewId, inv);
+          if (nu.topSat != null && Number.isFinite(cp.max_nucleus_sat) && nu.topSat > cp.max_nucleus_sat) {
+            const msg = `OVER-COLOURED NUCLEUS: the brightest nucleus pixels have saturation ${nu.topSat.toFixed(3)} (> ${cp.max_nucleus_sat}; ${cp._nucleus_calibration || ''}) — an orange/peach core. Desaturate the nucleus through a core mask toward a cream-yellow (refs 0.07-0.18).`;
+            if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('nucleus_colour', msg, { metric: 'nucleusSat', value: nu.topSat, limit: cp.max_nucleus_sat });
+          }
+          if (nu.topSat != null && nu.topSat < cp.min_nucleus_sat) {
+            const msg = `WHITE NUCLEUS: the brightest nucleus pixels have saturation ${nu.topSat.toFixed(3)} (< ${cp.min_nucleus_sat}; ${cp._nucleus_calibration || ''}) — it reads as a burnt white oval. Restore the nucleus colour: colour-preserving treatment of the core (keep the linear R:G:B ratios at the current luminance through a core mask), and keep highlight headroom; do not raise its brightness.`;
+            if (isEmergency) warnings.push(`[RELAXED] ${msg}`); else fail('nucleus_colour', msg, { metric: 'nucleusSat', value: nu.topSat, limit: cp.min_nucleus_sat });
+          }
+        } catch { /* mono image */ }
       }
       // Mask-shaped outer edge (2026-11-08, M74 v7 "lumpy polygonal boundary, dark moat"; user refs <= 1.48).
       if (envp && Number.isFinite(envp.max_edge_steepening) && inv?.zones) {
@@ -1130,12 +1223,17 @@ export async function evaluateFinishGates(ctx, store, brief, viewId, agentName, 
           // reference.blocking (set per run from config.files.referenceGates, 2026-10-30): the user
           // provides a target rendering and wants the run to REACH it, so palette/chroma become blocking.
           const refBlocking = profile?.reference?.blocking === true;
-          const refMsg = (m) => { if (refBlocking && !isEmergency) fail('reference', m.replace(/^ADVISORY: /, 'REFERENCE MISMATCH: ')); else warnings.push(refBlocking ? `[RELAXED] ${m}` : m); };
+          // reference.advisory (2026-11-10): per-key opt-out from blocking, e.g. ['max_lc_ratio','max_grain_ratio'] — the
+          // user's reference sets tone/colour, but its texture is not the target (M74 v5 is softer than every user ref).
+          const refAdvisory = new Set(profile?.reference?.advisory || []);
+          const refMsg = (m, key) => { if (refBlocking && !isEmergency && !(key && refAdvisory.has(key))) fail('reference', m.replace(/^ADVISORY: /, 'REFERENCE MISMATCH: ')); else warnings.push(refBlocking && !(key && refAdvisory.has(key)) ? `[RELAXED] ${m}` : m); };
           if (refCmp.palette_l1 != null && refCmp.palette_l1 > maxL1) refMsg(`ADVISORY: palette differs from reference (palette_l1=${refCmp.palette_l1.toFixed(3)} > ${maxL1}; hue-family mix of saturated subject pixels). Steer hue balance toward the reference.`);
           if (refCmp.lab_emd != null && refCmp.lab_emd > maxLab) refMsg(`ADVISORY: subject chroma differs from reference (lab_emd=${refCmp.lab_emd.toFixed(1)} > ${maxLab}; chroma-only a*b* distance). Adjust colour balance/saturation toward the reference.`);
           if (refBlocking && refCmp.dark_depth_delta != null && profile.reference.max_dark_depth_delta != null && Math.abs(refCmp.dark_depth_delta) > profile.reference.max_dark_depth_delta) refMsg(`ADVISORY: dark-structure depth differs from reference (target ${refCmp.dark_depth_target.toFixed(3)} vs ref ${refCmp.dark_depth_ref.toFixed(3)}; |delta| > ${profile.reference.max_dark_depth_delta}). ${refCmp.dark_depth_delta > 0 ? 'Darken the dark nebulae / deepen the shadows relative to the field' : 'Shadows are too deep relative to the field: lift them'}.`);
-          if (refBlocking && refCmp.grain_halo_ratio != null && profile.reference.max_grain_ratio != null && refCmp.grain_halo_ratio > profile.reference.max_grain_ratio) refMsg(`ADVISORY: subject halos are ${refCmp.grain_halo_ratio.toFixed(2)}x as grainy as the reference (max ${profile.reference.max_grain_ratio}). Fix upstream: no LHE/MSE/sharpening after the last NoiseXTerminator, drop or reduce noisy L injection, denoise before local contrast.`);
+          if (refBlocking && refCmp.grain_halo_ratio != null && profile.reference.max_grain_ratio != null && refCmp.grain_halo_ratio > profile.reference.max_grain_ratio) refMsg(`ADVISORY: subject halos are ${refCmp.grain_halo_ratio.toFixed(2)}x as grainy as the reference (max ${profile.reference.max_grain_ratio}). Fix upstream: no LHE/MSE/sharpening after the last NoiseXTerminator, drop or reduce noisy L injection, denoise before local contrast.`, 'max_grain_ratio');
           if (refBlocking && refCmp.lc_ratio != null && profile.reference.min_lc_ratio != null && refCmp.lc_ratio < profile.reference.min_lc_ratio) refMsg(`ADVISORY: local contrast is ${refCmp.lc_ratio.toFixed(2)}x the reference's (min ${profile.reference.min_lc_ratio}). The image reads flat: restore mid-scale contrast (local contrast / curves) rather than global colour.`);
+          // Upper bound on local contrast vs the reference (2026-11-10, M74 v13: 1.45x v5's = mottled/crunchy disc).
+          if (refBlocking && refCmp.lc_ratio != null && profile.reference.max_lc_ratio != null && refCmp.lc_ratio > profile.reference.max_lc_ratio) refMsg(`ADVISORY: local contrast is ${refCmp.lc_ratio.toFixed(2)}x the reference's (> ${profile.reference.max_lc_ratio}): the disc reads mottled/crunchy. Back off small-radius local contrast (LHE/MSE/HDRMT) on the disc; keep large-scale structure.`, 'max_lc_ratio');
           if (refBlocking && refCmp.bg_cast_delta != null && profile.reference.max_bg_cast_delta != null && refCmp.bg_cast_delta > profile.reference.max_bg_cast_delta) refMsg(`ADVISORY: background colour differs from reference (bg_cast_delta=${refCmp.bg_cast_delta.toFixed(1)} dE > ${profile.reference.max_bg_cast_delta}). Match the sky tint of the reference.`);
           if (refCmp.aspect_ok && refCmp.ms_ssim != null && refCmp.ms_ssim < 0.70) warnings.push(`Structural similarity to reference is low (ms_ssim=${refCmp.ms_ssim.toFixed(3)}, goal >0.70).`);
           if (!refCmp.aspect_ok) warnings.push(`Reference aspect ratio differs — SSIM skipped; compared palette, chroma, luminance CDF (lum_cdf_dist=${refCmp.lum_cdf_dist != null ? refCmp.lum_cdf_dist.toFixed(3) : 'n/a'}) and coverage_delta only.`);
@@ -2338,6 +2436,7 @@ export const TOOL_CATALOG = {
           mask_id: { type: 'string', description: 'Source mono mask view ID' },
           output_id: { type: 'string', description: 'Optional new mask view ID (source untouched). Omit to modify mask_id in place.' },
           invert: { type: 'boolean', description: '1 - mask' },
+          donut: { type: 'boolean', description: 'Ring/donut shaping 4*m*(1-m) (applied first): peaks at mid-level, 0 at sky and at the brightest core — the core-protecting mask for HDRMT/LHE.' },
           dilate_px: { type: 'number', description: 'Grow white regions (morphological dilation iterations, 0-32)' },
           erode_px: { type: 'number', description: 'Shrink white regions (morphological erosion iterations, 0-32)' },
           blur_sigma: { type: 'number', description: 'Gaussian blur sigma in px (soft edge)' },
@@ -2351,12 +2450,31 @@ export const TOOL_CATALOG = {
     },
     handler: async (ctx, _store, _brief, input) => {
       const cap = (v) => Math.max(0, Math.min(32, Math.round(v || 0)));
+      let srcId = input.mask_id;
+      if (input.donut) {   // 4*m*(1-m) first (into output_id or in place), then the usual shaping
+        const tgt = input.output_id || input.mask_id;
+        await pjsrOrThrow(ctx, `var s=ImageWindow.windowById('${input.mask_id}'); if (s.isNull) throw new Error('mask not found');
+          ${input.output_id ? `var o=ImageWindow.windowById('${input.output_id}'); if(!o.isNull) o.forceClose(); var t=new ImageWindow(s.mainView.image.width, s.mainView.image.height, 1, 32, true, false, '${input.output_id}'); t.mainView.beginProcess(); t.mainView.image.assign(s.mainView.image); t.mainView.endProcess(); t.show();` : ''}
+          var P=new PixelMath; P.expression='4*$T*(1-$T)'; P.useSingleExpression=true; P.createNewImage=false; P.rescale=false; P.truncate=true; P.executeOn(ImageWindow.windowById('${tgt}').mainView);`, 'mask_ops donut');
+        srcId = tgt;
+      }
+      // Soft range (2026-11-10, M74 v10): clip 0.44-0.56 after a 3 px blur made a near-binary arm mask; blending
+      // through it at weight 1 drew a hard bright disc ending in a dark moat. Range windows narrower than
+      // MIN_MASK_RANGE are widened symmetrically (a mask transition, not a threshold).
+      let lo = input.clip_low, hi = input.clip_high, rangeNote = '';
+      if (Number.isFinite(lo) || Number.isFinite(hi)) {
+        const l0 = Number.isFinite(lo) ? lo : 0, h0 = Number.isFinite(hi) ? hi : 1;
+        if (h0 - l0 < MIN_MASK_RANGE) {
+          const mid = (l0 + h0) / 2; lo = Math.max(0, mid - MIN_MASK_RANGE / 2); hi = Math.min(1, lo + MIN_MASK_RANGE); lo = Math.max(0, hi - MIN_MASK_RANGE);
+          rangeNote = ` Range ${l0}-${h0} widened to ${lo.toFixed(2)}-${hi.toFixed(2)} (minimum transition ${MIN_MASK_RANGE}: narrower windows make hard-edged masks that draw a visible boundary).`;
+        }
+      }
       const r = await shapeMask(ctx, {
-        maskId: input.mask_id, outputId: input.output_id, invert: input.invert,
+        maskId: srcId, outputId: input.donut ? undefined : input.output_id, invert: input.invert,
         dilatePx: cap(input.dilate_px), erodePx: cap(input.erode_px), blurSigma: input.blur_sigma,
-        clipLow: input.clip_low, clipHigh: input.clip_high, gamma: input.gamma, multiplyWith: input.multiply_with
+        clipLow: lo, clipHigh: hi, gamma: input.gamma, multiplyWith: input.multiply_with
       });
-      return { type: 'text', text: `mask_ops complete: ${r.id} (${r.w}x${r.h}). ${maskStatsText(r)}` };
+      return { type: 'text', text: `mask_ops complete: ${r.id} (${r.w}x${r.h}). ${maskStatsText(r)}${rangeNote}` };
     }
   },
 
@@ -2421,6 +2539,23 @@ export const TOOL_CATALOG = {
     handler: async (ctx, _store, brief, input) => {
       // CurvesTransformation PJSR properties: R, G, B, K (RGB/K combined), L, S
       // Each is an array of [x, y] control points. Kt, Lt, St etc. set interpolation type.
+      // Saturation budget (2026-11-10, M74 v10: 7 stacked raising S curves on the final view -> lilac-magenta knots).
+      // At most MAX_SAT_BOOSTS raising saturation curves per view; then one combined curve from a checkpoint.
+      let satNote = '';
+      if (input.channel === 'S' && brief && input.points.some(([x, y]) => y > x + 0.01)) {
+        brief._satBoosts = brief._satBoosts || {};
+        const n = brief._satBoosts[input.view_id] || 0;
+        if (n >= MAX_SAT_BOOSTS) return { type: 'text', text: `run_curves REFUSED: this would be saturation boost #${n + 1} on ${input.view_id} (limit ${MAX_SAT_BOOSTS} per view). Stacked saturation curves compound non-linearly (M74 v10: 7 of them turned the knots lilac-magenta). Go back to a checkpoint/variant saved before the saturation steps (load it under a NEW view id) and apply ONE curve with the total boost you want.` };
+        brief._satBoosts[input.view_id] = n + 1;
+        satNote = ` [saturation boost ${n + 1}/${MAX_SAT_BOOSTS} on this view]`;
+      }
+      // Low-end saturation gain cap (2026-11-10, M74 v12: [0.03->0.12] = x4 on near-grey pixels turned the faint outer
+      // disc brown). Near-grey pixels carry noise-level chroma; the gain y/x for x < 0.06 is clipped to MAX_LOW_SAT_GAIN.
+      if (input.channel === 'S') {
+        const clipped = [];
+        input = { ...input, points: input.points.map(([x, y]) => { if (x > 0 && x < 0.06 && y > MAX_LOW_SAT_GAIN * x) { clipped.push(`${x}->${y}`); return [x, +(MAX_LOW_SAT_GAIN * x).toFixed(4)]; } return [x, y]; }) };
+        if (clipped.length) satNote += ` [low-end saturation gain capped at x${MAX_LOW_SAT_GAIN}: ${clipped.join(', ')} — near-grey pixels hold noise-level colour, boosting them makes false colour (M74 v12 brown outer disc)]`;
+      }
       const channelProp = { R: 'R', G: 'G', B: 'B', RGB: 'K', L: 'L', S: 'S' };
       const prop = channelProp[input.channel] || 'K';
       const pts = input.points.map(p => `[${p[0]},${p[1]}]`).join(',');
@@ -2441,7 +2576,7 @@ export const TOOL_CATALOG = {
           }
         } catch (e) { satLine = ` Saturation: measurement failed (${e.message}).`; }
       }
-      return { type: 'text', text: `Curves (${input.channel}) applied. ${statsLine(stats)}${satLine}` };
+      return { type: 'text', text: `Curves (${input.channel}) applied. ${statsLine(stats)}${satLine}${satNote}` };
     }
   },
 
@@ -2695,6 +2830,172 @@ export const TOOL_CATALOG = {
   },
 
   // B3b: region-graft — blend a donor (e.g. a recalled champion) into base by a mask.
+  // ===========================================================================
+  // FIXED TOOLSET (2026-11-09, user: "stop improvising PixelMath; experts use a fixed tool set"). The creative agent
+  // no longer has run_pixelmath: these deterministic operations cover every job it used hand-written formulas for
+  // (levels, blends/grafts, geometric zone masks, outer-disc lift); highlight compression = continuous_clamp,
+  // mask maths = mask_ops (incl. donut), Ha = ha_inject_red / ha_inject_luminance (now in every state).
+  // ===========================================================================
+  adjust_levels: {
+    category: 'curves',
+    definition: {
+      name: 'adjust_levels',
+      description: 'Levels via HistogramTransformation on the combined RGB/K channel: shadows clip (black point), midtones balance, highlights clip. Replaces hand-written rescale formulas (max(0,a*$T-b)). Honours an applied mask (apply_mask).',
+      input_schema: { type: 'object', properties: {
+        view_id: { type: 'string' },
+        shadows: { type: 'number', description: 'Black point 0..0.5 (default 0)' },
+        midtones: { type: 'number', description: 'Midtones balance 0..1 (default 0.5 = unchanged; < 0.5 brightens)' },
+        highlights: { type: 'number', description: 'White point 0.5..1 (default 1)' } }, required: ['view_id'] }
+    },
+    handler: async (ctx, _store, brief, input) => {
+      const sh = Math.max(0, Math.min(0.5, input.shadows ?? 0)), mt = Math.max(0.001, Math.min(0.999, input.midtones ?? 0.5)), hi = Math.max(0.5, Math.min(1, input.highlights ?? 1));
+      await pjsrOrThrow(ctx, `var P = new HistogramTransformation; P.H = [[0,0.5,1,0,1],[0,0.5,1,0,1],[0,0.5,1,0,1],[${sh},${mt},${hi},0,1],[0,0.5,1,0,1]];
+        execOrThrow(P, ImageWindow.windowById('${input.view_id}').mainView, 'adjust_levels');`, 'adjust_levels');
+      const st = await getStats(ctx, input.view_id);
+      return { type: 'text', text: `Levels applied (shadows ${sh}, midtones ${mt}, highlights ${hi}). Stats: median=${st.median.toFixed(5)}, max=${(st.max ?? 0).toFixed(4)}.` };
+    }
+  },
+
+  blend_images: {
+    category: 'curves',
+    definition: {
+      name: 'blend_images',
+      description: 'Blend source_id into target_id (target modified in place): target = target*(1 - w*M) + source*(w*M), M = optional mono mask (1 = full source). Replaces hand-written mixes (0.6*A+0.4*B, CORE_base*(1-M)+S*M). Same geometry required; mono source into colour target applies to every channel.',
+      input_schema: { type: 'object', properties: {
+        target_id: { type: 'string' }, source_id: { type: 'string' },
+        weight: { type: 'number', description: 'Source weight 0..1 (default 0.5)' },
+        mask_id: { type: 'string', description: 'Optional mono mask view (same size)' } }, required: ['target_id', 'source_id'] }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const w = Math.max(0, Math.min(1, input.weight ?? 0.5)), m = input.mask_id ? `${input.mask_id}` : '1';
+      const chk = await ctx.pjsr(`var a=ImageWindow.windowById('${input.target_id}'), b=ImageWindow.windowById('${input.source_id}')${input.mask_id ? `, c=ImageWindow.windowById('${input.mask_id}')` : ''};
+        (a.isNull||b.isNull${input.mask_id ? '||c.isNull' : ''}) ? 'missing' : ((a.mainView.image.width===b.mainView.image.width && a.mainView.image.height===b.mainView.image.height${input.mask_id ? ' && a.mainView.image.width===c.mainView.image.width && a.mainView.image.height===c.mainView.image.height' : ''}) ? (b.mainView.image.isColor ? 'colour' : 'mono') : 'geometry');`);
+      const k = chk.outputs?.consoleOutput;
+      if (k === 'missing' || k === 'geometry') return { type: 'text', text: `blend_images REFUSED: ${k === 'missing' ? 'a view is missing' : 'views differ in size'}.` };
+      const src = (c) => k === 'colour' ? `${input.source_id}[${c}]` : `${input.source_id}`;
+      const mk = (c) => `$T*(1-${w}*${m}) + ${src(c)}*(${w}*${m})`;
+      await pjsrOrThrow(ctx, `var P = new PixelMath; P.useSingleExpression = false; P.expression = '${mk(0)}'; P.expression1 = '${mk(1)}'; P.expression2 = '${mk(2)}';
+        P.createNewImage = false; P.rescale = false; P.truncate = true; execOrThrow(P, ImageWindow.windowById('${input.target_id}').mainView, 'blend_images');`, 'blend_images');
+      return { type: 'text', text: `Blended ${input.source_id} into ${input.target_id} (weight ${w}${input.mask_id ? `, mask ${input.mask_id}` : ''}).` };
+    }
+  },
+
+  zone_mask: {
+    category: 'masks',
+    definition: {
+      name: 'zone_mask',
+      description: 'Geometric zone mask from the PREP-MEASURED subject centre and detection radius rDet (signal inventory): nucleus (r < 0.05 rDet), core (< 0.22), disc (0.22-0.8), outer (0.8-1.05), galaxy (< 1.05), sky (> 1.15). Feathered edges. Replaces hand-written radial masks with hard-coded centres. Combine with luminance masks via mask_ops (multiply_with).',
+      input_schema: { type: 'object', properties: {
+        zone: { type: 'string', enum: ['nucleus', 'core', 'disc', 'outer', 'galaxy', 'sky'] },
+        output_id: { type: 'string', description: 'New mask view id (default ZONE_<zone>)' },
+        feather: { type: 'number', description: 'Edge feather as a fraction of rDet (default 0.05)' },
+        reference_id: { type: 'string', description: 'View whose geometry the mask takes (default: the main working view)' } }, required: ['zone'] }
+    },
+    handler: async (ctx, _store, brief, input) => {
+      const inv = brief?._inventory;
+      if (!inv?.centre || !inv?.rDet) return { type: 'text', text: 'zone_mask unavailable: no signal inventory for this run.' };
+      const [cx, cy] = inv.centre, rd = inv.rDet, f = Math.max(0.005, input.feather ?? 0.05) * rd;
+      const Z = { nucleus: [0, 0.05], core: [0, 0.22], disc: [0.22, 0.8], outer: [0.8, 1.05], galaxy: [0, 1.05], sky: [1.15, 99] }[input.zone];
+      const r0 = Z[0] * rd, r1 = Z[1] * rd, id = input.output_id || `ZONE_${input.zone}`;
+      // geometry: reference_id, else the prep frame size recorded by the inventory
+      let d = (inv.frameW && inv.frameH) ? `${inv.frameW}x${inv.frameH}` : '';
+      if (input.reference_id) {
+        const dims = await ctx.pjsr(`var w=ImageWindow.windowById('${input.reference_id}'); w.isNull ? 'missing' : w.mainView.image.width+'x'+w.mainView.image.height;`);
+        d = dims.outputs?.consoleOutput || '';
+      }
+      if (!/^\d+x\d+$/.test(d)) return { type: 'text', text: 'zone_mask: pass reference_id (a view with the working geometry).' };
+      const [W, H] = d.split('x').map(Number);
+      const rr = `sqrt((x()-${cx})*(x()-${cx})+(y()-${cy})*(y()-${cy}))`;
+      const up = r0 > 0 ? `min(1,max(0,(${rr}-${r0 - f / 2})/${f}))` : '1';
+      const dn = r1 < 99 * rd ? `min(1,max(0,(${r1 + f / 2}-${rr})/${f}))` : '1';
+      await pjsrOrThrow(ctx, `var o=ImageWindow.windowById('${id}'); if(!o.isNull) o.forceClose();
+        var w = new ImageWindow(${W}, ${H}, 1, 32, true, false, '${id}'); w.mainView.beginProcess(); w.mainView.image.fill(0); w.mainView.endProcess();
+        var P = new PixelMath; P.expression = '${up}*${dn}'; P.useSingleExpression = true; P.createNewImage = false; P.rescale = false; P.truncate = true; P.executeOn(w.mainView); w.show();`, 'zone_mask');
+      return { type: 'text', text: `Zone mask ${id}: ${input.zone} (r ${Math.round(r0)}-${r1 < 99 * rd ? Math.round(r1) : 'edge'} px around (${cx}, ${cy}), feather ${Math.round(f)} px).` };
+    }
+  },
+
+  lift_outer_disc: {
+    category: 'detail',
+    definition: {
+      name: 'lift_outer_disc',
+      description: 'Reveal the faint outer disc/arms WITHOUT a mask edge: the lift follows the galaxy\'s own large-scale light E (smoothed luminance above the sky): add = strength * E * (1 - E/E_disc), clamped >= 0 — zero at the sky, largest at the faint levels, zero again at the bright disc. Hue-preserving (RGB scaled by the new/old luminance). E_disc = the measured disc-zone level. Use instead of thresholded-mask lifts (they draw a plateau and a cliff — edge_softness gate).',
+      input_schema: { type: 'object', properties: {
+        view_id: { type: 'string' },
+        strength: { type: 'number', description: '0..1.5 (default 0.4)' },
+        scale_px: { type: 'number', description: 'Smoothing sigma of E in px (default rDet/25)' } }, required: ['view_id'] }
+    },
+    handler: async (ctx, _store, brief, input) => {
+      const inv = brief?._inventory;
+      if (!inv?.centre || !inv?.rDet) return { type: 'text', text: 'lift_outer_disc unavailable: no signal inventory for this run.' };
+      const k = Math.max(0, Math.min(1.5, input.strength ?? 0.4)), sig = input.scale_px || Math.max(8, Math.round(inv.rDet / 25));
+      const r = await ctx.pjsr(`
+        var w = ImageWindow.windowById('${input.view_id}'); if (w.isNull) throw new Error('view not found');
+        var img = w.mainView.image, W = img.width, H = img.height, col = img.isColor;
+        var t = new ImageWindow(W, H, 1, 32, true, false, 'LOD_E');
+        var P = new PixelMath; P.expression = col ? '0.2126*${input.view_id}[0]+0.7152*${input.view_id}[1]+0.0722*${input.view_id}[2]' : '${input.view_id}'; P.useSingleExpression = true; P.createNewImage = false; P.executeOn(t.mainView);
+        var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = ${sig}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(t.mainView);
+        var ti = t.mainView.image, cx = ${inv.centre[0]}, cy = ${inv.centre[1]}, rd = ${inv.rDet}, sky = [], disc = [], x, y;
+        for (y = 0; y < H; y += 8) for (x = 0; x < W; x += 8) { var d = Math.sqrt((x-cx)*(x-cx)+(y-cy)*(y-cy)), v = ti.sample(x, y, 0); if (v <= 1e-6) continue;
+          if (d >= 1.15*rd && d < 1.35*rd) sky.push(v); else if (d >= 0.35*rd && d < 0.55*rd) disc.push(v); }
+        function med(a){ if (!a.length) return null; a.sort(function(p,q){return p-q;}); return a[a.length>>1]; }
+        var s0 = med(sky), dz = med(disc); if (s0 === null) { s0 = med(disc) * 0.3; }
+        var E0 = Math.max(1e-4, dz - s0);
+        var e = 'max(0, LOD_E - ' + s0 + ')', add = 'max(0, ${k}*' + e + '*(1 - ' + e + '/' + E0 + '))';
+        var Q = new PixelMath;
+        if (col) { var y0 = '(0.2126*$T[0]+0.7152*$T[1]+0.0722*$T[2])', g = '((' + y0 + ' + ' + add + ')/max(1e-6,' + y0 + '))';
+          Q.useSingleExpression = true; Q.expression = '$T*' + g; }
+        else { Q.useSingleExpression = true; Q.expression = '$T + ' + add; }
+        Q.createNewImage = false; Q.rescale = false; Q.truncate = true; Q.executeOn(w.mainView); t.forceClose();
+        JSON.stringify({ sky: s0, E0: E0 });`);
+      if (r.status === 'error') return { type: 'text', text: `lift_outer_disc failed: ${r.error?.message}` };
+      const o = JSON.parse(r.outputs?.consoleOutput || '{}');
+      return { type: 'text', text: `Outer disc lifted (strength ${k}, scale ${sig} px; sky ${o.sky?.toFixed(4)}, disc excess ${o.E0?.toFixed(4)}): self-weighted, zero at the sky and at the bright disc — no mask edge.` };
+    }
+  },
+
+  restrain_red_hue: {
+    category: 'curves',
+    definition: {
+      name: 'restrain_red_hue',
+      description: 'Hue-selective restraint of over-saturated reds/pinks (HII knots, Ha): pulls the chroma of RED-dominant pixels toward their luminance by factor (weighted by how red the pixel is); blues, yellows and luminance untouched. Replaces the hand-written CIE a* recipe. Honours an applied mask.',
+      input_schema: { type: 'object', properties: { view_id: { type: 'string' }, factor: { type: 'number', description: '0.4..1 (default 0.7)' }, threshold: { type: 'number', description: 'Redness threshold (R-max(G,B))/R (default 0.02)' } }, required: ['view_id'] }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      // 2026-11-10 (M74 v10): on LRGB data there is no Ha red to restrain; the tool only stripped the warm tones (brown/teal disc).
+      if (noHaData(_brief)) return { type: 'text', text: 'restrain_red_hue REFUSED: this run has no Ha data, so there are no Ha-red knots to restrain — the tool would only strip the natural warm tones (M74 v10: brown/teal disc). If the knots look pink/lilac, the cause is stacked saturation curves or SCNR: go back to a checkpoint before them instead.' };
+      const f = Math.max(0.4, Math.min(1, input.factor ?? 0.7)), t = Math.max(0, input.threshold ?? 0.02);
+      // Luminance-preserving chroma reduction of RED-dominant pixels only (the old CIE_a($T) recipe is not valid
+      // PixelMath). w = redness weight: (R - max(G,B)) / R, ramped over 0..0.1 above the threshold; chroma toward Y by f.
+      const pre = `Y = 0.2126*$T[0]+0.7152*$T[1]+0.0722*$T[2]; rd = ($T[0] - max($T[1],$T[2]))/max($T[0],1e-6); w = min(1, max(0, (rd - ${t})/0.1)); k = 1 - (1-${f})*w; `;
+      await pjsrOrThrow(ctx, `var P = new PixelMath; P.useSingleExpression = false; P.symbols = 'Y,rd,w,k';
+        P.expression = '${pre}Y + ($T[0]-Y)*k'; P.expression1 = '${pre}Y + ($T[1]-Y)*k'; P.expression2 = '${pre}Y + ($T[2]-Y)*k';
+        P.createNewImage = false; P.rescale = false; P.truncate = true;
+        execOrThrow(P, ImageWindow.windowById('${input.view_id}').mainView, 'restrain_red_hue');`, 'restrain_red_hue');
+      const sat = await checkSaturation(ctx, input.view_id).catch(() => null);
+      return { type: 'text', text: `Red/pink restrained (chroma x${f} on red-dominant pixels, threshold ${t}).${sat ? ` Subject saturation p90S=${sat.p90S?.toFixed(3)}.` : ''}` };
+    }
+  },
+
+  soft_glow: {
+    category: 'curves',
+    definition: {
+      name: 'soft_glow',
+      description: 'Soft glow: blend a Gaussian-blurred copy of the view back in (screen-like lift of bright structures). Replaces the hand-written "$T*0.92 + blur*0.08" recipe. Use sparingly (amount 0.05-0.15).',
+      input_schema: { type: 'object', properties: { view_id: { type: 'string' }, sigma: { type: 'number', description: 'Blur sigma px (default 12)' }, amount: { type: 'number', description: '0..0.3 (default 0.08)' } }, required: ['view_id'] }
+    },
+    handler: async (ctx, _store, _brief, input) => {
+      const sg = Math.max(1, input.sigma ?? 12), a = Math.max(0, Math.min(0.3, input.amount ?? 0.08));
+      await pjsrOrThrow(ctx, `var w = ImageWindow.windowById('${input.view_id}'); var img = w.mainView.image;
+        var o=ImageWindow.windowById('SG_BLUR'); if(!o.isNull) o.forceClose();
+        var t = new ImageWindow(img.width, img.height, img.numberOfChannels, 32, true, img.isColor, 'SG_BLUR'); t.mainView.beginProcess(); t.mainView.image.assign(img); t.mainView.endProcess();
+        var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = ${sg}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(t.mainView);
+        var P = new PixelMath; P.expression = '$T*${(1 - a).toFixed(4)} + SG_BLUR*${a}'; P.useSingleExpression = true; P.createNewImage = false; P.rescale = false; P.truncate = true;
+        execOrThrow(P, w.mainView, 'soft_glow'); t.forceClose();`, 'soft_glow');
+      return { type: 'text', text: `Soft glow applied (sigma ${sg}, amount ${a}).` };
+    }
+  },
+
   blend_regions: {
     category: 'stars',
     definition: {
@@ -5331,9 +5632,12 @@ export const AGENT_TOOL_CATEGORIES = {
 // Tools withheld from a specific agent even when its category is allowed.
 export const AGENT_TOOL_EXCLUDES = {
   gradient_agent: new Set(['run_scnr']),
+  // 2026-11-09: no free PixelMath for the creative agents — fixed toolset (adjust_levels, blend_images, zone_mask,
+  // lift_outer_disc, continuous_clamp, mask_ops, ha_inject_*). Internal tools still use PixelMath.
+  giga_orchestrator: new Set(['run_pixelmath']),
   // core_specialist gets the quality_gate category for check_ringing / scan_burnt_regions /
   // check_highlight_texture, but not the whole-image or star-layer gates (no star tools by design).
-  core_specialist: new Set(['run_quality_gates', 'check_star_quality', 'check_star_layer_integrity', 'check_tonal_presence', 'stage_checkpoint']),
+  core_specialist: new Set(['run_quality_gates', 'check_star_quality', 'check_star_layer_integrity', 'check_tonal_presence', 'stage_checkpoint', 'run_pixelmath']),
 };
 
 // Automatic stage checkpoints (2026-11-08): the M74 v6 agent never called stage_checkpoint (0 calls), so the
@@ -5354,7 +5658,11 @@ async function isWorkingImage(ctx, brief, viewId) {
   const o = (() => { try { return JSON.parse(r.outputs?.consoleOutput?.trim() || 'null'); } catch { return null; } })();
   if (!o || !o.c) return false;
   const [cx, cy] = brief._inventory.centre || [0, 0];
-  return o.m > 0.03 && o.m < 0.35 && o.w > 1.6 * cx && o.h > 1.6 * cy;
+  // the subject centre must lie inside the image, and the image must be full-size (not a crop/thumbnail). The old
+  // "w > 1.6 cx" assumed a centred subject and rejected every M81 view (centre x 4596 in a 5890 px frame, 2026-11-08).
+  const fw = brief._inventory.frameW, fh = brief._inventory.frameH;
+  const sizeOk = (fw && fh) ? (o.w === fw && o.h === fh) : (Math.min(o.w, o.h) >= 1000);
+  return o.m > 0.03 && o.m < 0.35 && cx < o.w && cy < o.h && sizeOk;
 }
 function withAutoCheckpoint(name, handler) {
   return async (ctx, store, brief, input, agentName) => {
@@ -5383,7 +5691,56 @@ function withAutoCheckpoint(name, handler) {
   };
 }
 
-export function buildToolSet(agentName, extraCategories = []) {
+// Per-step metrics (2026-11-08, M81 run 8d9f420c): the core gate only ran at finish, so nobody saw for 2 h that the
+// core arrived flat from prep (relC 0.020) or which step moved it. After every image-changing tool on the working
+// colour image, measure the cheap core metric (relContrast + white-clipped share, a few seconds) and report the delta
+// vs the previous measurement of that view, flagging a drop. Full gate sets stay at stage checkpoints.
+const STEP_METRIC_CATEGORIES = new Set(['curves', 'detail', 'stretch', 'denoise', 'sharpen', 'lrgb', 'ha_injection', 'stars', 'narrowband']);
+function withStepMetrics(name, handler) {
+  return async (ctx, store, brief, input, agentName) => {
+    const res = await handler(ctx, store, brief, input, agentName);
+    try {
+      const vid = input?.view_id || input?.target_id;
+      const inv = brief?._inventory;
+      if (res && res.type === 'text' && brief && inv && await isWorkingImage(ctx, brief, vid)) await nativeBatch(ctx, vid, 'step-metrics', async () => {
+        // 2026-11-09: report what the core gates actually block — fine-texture amplification vs prep (cooked bulge)
+        // and nucleus colour (white = burnt). The relC floor is advisory now (it drove cooking).
+        const cp = brief?.processingProfile?.core_preservation || {};
+        const parts = [];
+        let amp = null, sat = null;
+        if (inv.prepCoreAmp) { const ca = await measureCoreAmp(ctx, vid, inv); amp = Math.max(ca.std600 / inv.prepCoreAmp.std600, ca.std300 / inv.prepCoreAmp.std300); parts.push(`core texture x${amp.toFixed(2)} of prep (limit x${cp.max_core_amp ?? 3})`); }
+        try { const nu = await measureNucleus(ctx, vid, inv); sat = nu.topSat; parts.push(`nucleus saturation ${sat.toFixed(3)} (band ${cp.min_nucleus_sat ?? 0.04}-${cp.max_nucleus_sat ?? 0.22})`); } catch { /* mono */ }
+        brief._stepMetrics = brief._stepMetrics || {};
+        const prev = brief._stepMetrics[vid];
+        brief._stepMetrics[vid] = { amp, sat, after: name };
+        const warn = [];
+        if (amp != null && amp > (cp.max_core_amp ?? 3)) warn.push(`⚠️ COOKED CORE: this ${name} pushed the core texture to x${amp.toFixed(1)} of prep — undo it or keep it off the core.`);
+        else if (amp != null && prev?.amp != null && amp > 1.5 * prev.amp) warn.push(`⚠️ core texture jumped x${(amp / prev.amp).toFixed(1)} with this ${name}.`);
+        if (sat != null && sat < (cp.min_nucleus_sat ?? 0.04)) warn.push(`⚠️ WHITE NUCLEUS: saturation ${sat.toFixed(3)}${prev?.sat != null ? ` (was ${prev.sat.toFixed(3)} after ${prev.after})` : ''} — this ${name} bleached the nucleus; undo it or protect the core.`);
+        if (parts.length) res.text += `\n[STEP METRICS] ${vid}: ${parts.join(', ')}${warn.length ? '\n' + warn.join('\n') : ''}`;
+      });
+    } catch (e) { /* metrics are advisory; never break the tool */ }
+    return res;
+  };
+}
+
+
+// False-colour palette tools (2026-11-10): an LRGB run used sho_hue_saturation (magenta -0.6, blue +0.2) to twist M74's
+// hues — free-form hue editing through the back door. Hidden when the data has no SII/OIII; the Ha-specific ones are
+// hidden as well when there is no Ha. General tools of the same family (chroma_smooth, zone masks, haze/halo) stay.
+const PALETTE_ONLY_TOOLS = ['sho_combine', 'sho_hue_shift', 'sho_hue_saturation', 'reload_narrowband_channel', 'measure_palette_balance', 'neutralize_palette_background', 'suggest_narrowband_balance', 'create_synthetic_luminance'];
+const HA_ONLY_TOOLS = ['continuum_subtract_ha', 'dynamic_narrowband_blend', 'extract_pseudo_oiii'];
+export function dataToolExcludes(brief) {
+  const c = brief?.dataDescription?.channels;
+  if (!c) return new Set();
+  const out = new Set();
+  if (!c.S && !c.O) PALETTE_ONLY_TOOLS.forEach(t => out.add(t));
+  if (!c.S && !c.O && !c.Ha) HA_ONLY_TOOLS.forEach(t => out.add(t));
+  return out;
+}
+
+export function buildToolSet(agentName, extraCategories = [], { brief = null } = {}) {
+  const dataExcl = dataToolExcludes(brief);
   // If agent not in the map, give ALL categories (collect unique category values)
   const allCategories = [...new Set(Object.values(TOOL_CATALOG).map(t => t.category))];
   const categories = new Set([
@@ -5397,9 +5754,13 @@ export function buildToolSet(agentName, extraCategories = []) {
   for (const [name, tool] of Object.entries(TOOL_CATALOG)) {
     if (tool.hidden && !(tool.visibleTo || []).includes(agentName)) continue;
     if (AGENT_TOOL_EXCLUDES[agentName]?.has(name)) continue;
+    if (dataExcl.has(name)) continue;
     if (categories.has(tool.category)) {
       definitions.push(tool.definition);
-      handlers.set(name, agentName === 'giga_orchestrator' && STAGE_OF_TOOL(name) ? withAutoCheckpoint(name, tool.handler) : tool.handler);
+      let h = tool.handler;
+      if (agentName === 'giga_orchestrator' && STAGE_OF_TOOL(name)) h = withAutoCheckpoint(name, h);
+      if (agentName === 'giga_orchestrator' && STEP_METRIC_CATEGORIES.has(tool.category)) h = withStepMetrics(name, h);
+      handlers.set(name, h);
     }
   }
 

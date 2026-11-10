@@ -74,7 +74,7 @@ export class MaxAgent {
     this.finishResult = null;
 
     // Build the allowed tools list from the agent's tool set
-    const toolSet = buildToolSet(this.agentName);
+    const toolSet = buildToolSet(this.agentName, [], { brief: this.brief });   // same data-aware list as the MCP server
     this._toolNames = toolSet.definitions.map(d => d.name);
   }
 

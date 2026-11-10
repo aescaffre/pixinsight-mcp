@@ -1,3 +1,4 @@
+import { nativeOr } from './native-metrics.mjs';
 // ============================================================================
 // SHO / HOO narrowband palette operations (Hubble palette and variants)
 //
@@ -275,7 +276,7 @@ export async function neutralizePaletteBackground(ctx, viewId, opts = {}) {
  * fraction of pixels per hue family + median saturation per family. A Hubble-look
  * target is gold/orange-dominant with real cyan/blue, and little green or magenta.
  */
-export async function measurePaletteBalance(ctx, viewId, opts = {}) {
+export async function measurePaletteBalancePjsr(ctx, viewId, opts = {}) {
   // opts.palette: 'hoo' switches the advice text (no foraxx/hue_screen/sho_hue_shift suggestions)
   const k = opts.sigma ?? 4;
   const r = await ctx.pjsr(`
@@ -610,4 +611,10 @@ export async function compressOuterHaze(ctx, viewId, opts = {}) {
   `);
   if (r.status === 'error') throw new Error('compressOuterHaze failed: ' + (r.error?.message || 'unknown'));
   return Object.assign(JSON.parse(r.outputs?.consoleOutput || '{}'), { strength: o.strength, maskId: o.keep_mask ? o.mask_id : null });
+}
+
+
+// Native-first wrapper (2026-11-10): Rust pixmetrics; the …Pjsr version above is the fallback.
+export async function measurePaletteBalance(ctx, viewId, opts = {}) {
+  return nativeOr(ctx, viewId, 'palette_balance', { opts }, () => measurePaletteBalancePjsr(ctx, viewId, opts));
 }

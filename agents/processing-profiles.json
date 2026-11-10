@@ -141,7 +141,9 @@
       "rel_contrast_hard": 0.1,
       "white_hard": 0.15,
       "_calibration": "Back-test 2026-10-28 (scripts/backtest-gates.mjs): NGC3628_giga_v3 (approved candidate, P90 0.372) relC 0.099 with struct 85%/halo 0.6% -> relC advisory, PASS; rejected NGC4490 white-blob core: relC 0.458 but white-burn clause FAILS (pass=false), coreFraction 0.0023 was below the 0.003 default floor so the gate was SKIPPED -> min_core_fraction 0.001 for galaxies (small galaxy in a 60 MP field). rel_contrast_hard 0.10 still provisional until the user confirms the NGC3628 file.",
-      "min_core_fraction": 0.001
+      "min_core_fraction": 0.001,
+      "rel_contrast_blocking": false,
+      "_rel_blocking_note": "2026-11-09: relC floor advisory for spirals — it drove cooked cores (M74 v7; M81 run 2 passed at 0.170 by cooking). White burn still blocks; cooked bulge -> core_preservation.max_core_amp; white nucleus -> min_nucleus_sat."
     },
     "description": "Face-on spiral. M81, M51, M33, M101, M106",
     "characteristics": {
@@ -262,7 +264,14 @@
       "min_core_structure": 0.06,
       "_structure_calibration": "2026-11-07: std(g1-g6)/level within 0.2 x rDet. User refs 0.062/0.089/0.069, M74 v3 0.065 (structured core), v5 0.053 (bright featureless core).",
       "max_core_spectrum": 1.2,
-      "_spectrum_calibration": "2026-11-08: std(g_u-g_2u)/std(g_4u-g_8u), r<0.22 rDet, u=rDet/300. User refs 0.68-0.86 (5 galaxies), approved NGC4490 0.68, M74 v3 0.81 v5 1.03 v6 1.12; cooked v7 1.69"
+      "_spectrum_calibration": "2026-11-08: std(g_u-g_2u)/std(g_4u-g_8u), r<0.22 rDet, u=rDet/300. User refs 0.68-0.86 (5 galaxies), approved NGC4490 0.68, M74 v3 0.81 v5 1.03 v6 1.12; cooked v7 1.69",
+      "max_core_amp": 3.0,
+      "_amp_calibration": "2026-11-09: max(std600,std300) of (g_s-g_4s)/(g_4s-sky) in r<0.22 rDet, final/prep RGB. M81 run 2 (cooked bulge) x9.3/x5.5; M81 run 1 x1.9; M74 v3-v9 x0.86-1.22; KEEP_SUPER x1.5",
+      "min_nucleus_sat": 0.04,
+      "_nucleus_calibration": "2026-11-09: median HSV saturation of nucleus pixels > 0.9 x p99.9 (r<0.12 rDet, sigma rDet/300). User refs 0.066-0.176, approved NGC4490 0.067, M74 0.11-0.21, KEEP_SUPER 0.099; burnt white M81 run 1 0.014, run 2 0.019; upper: M81 run 3 orange nucleus 0.244 (colour-core at full strength), refs max 0.176, M74 v5 0.207 -> max 0.22",
+      "min_core_structure_vs_prep": 3.0,
+      "_structure_vs_prep_note": "2026-11-09: floor = min(0.06, 3 x prep core structure). M74 prep 0.0195 -> 0.059 (v5 0.053 fails, v3 0.065 passes); M81 prep 0.0028 -> 0.0084 (run 3 0.015 passes; 0.06 was unreachable without cooking)",
+      "max_nucleus_sat": 0.22
     },
     "texture_scale": {
       "min_ratio_vs_prep": 1.0,
@@ -282,6 +291,20 @@
     "ha_knots": {
       "min_pink_frac": 0.04,
       "_calibration": "2026-11-08 M101 friend data (4096 crop), 3445 prep-Ha knot pixels: 2026-10-30 results with visible pink HII 0.079 / 0.107, 2026-11-08 variant_12 after a cool hue shift 0.005, prep RGB before Ha injection 0.015. Only armed when the prep found Ha knots (Ha data)."
+    },
+    "palette_purity": {
+      "max_lilac_frac": 0.05,
+      "max_teal_frac": 0.1,
+      "only_without_ha": true,
+      "_calibration": "2026-11-10 M74 3000x2000 crop, HSV hue of coloured disc pixels (0.15-0.8 rDet): v3-v9 lilac 0.000-0.021, teal 0.000-0.046; v4 teal 0.148 (user: cyan inter-arm haze); v10 lilac 0.119 (lilac-magenta knots after 7 stacked saturation curves + SCNR). Armed only without Ha data (with Ha, pink HII knots are wanted)."
+    },
+    "outer_zone": {
+      "max_warm_frac": 0.4,
+      "min_rel_brightness": 0.04,
+      "_calibration": "2026-11-10, pixmetrics outer_zone (0.6-1.0 rDet hue; (0.85-1.0)/(0.3-0.5) rDet excess). User refs: warm 0.020-0.110, rel 0.021-0.128 (4/5 >= 0.046). M74 v9 (user best) warm 0.005 rel 0.064; v3 (user: outer arms not visible) rel 0.004; v5 (visible) 0.065; brown-dome runs v3/v5/v10/v11/v12 warm 0.31-0.51; v11/v12 rel 0.031-0.033. | 2026-11-10 RECALIBRATED: the user's best M74 is v5 (not v9), outer warm 0.334 -> limit 0.40 (passes v5; still blocks v10/v12 at 0.51). Warm share alone does not separate v5 from v11 (0.309).",
+      "max_blue_p90s": 0.3,
+      "max_vivid_blue_frac": 0.02,
+      "_blue_calibration": "2026-11-10 outer zone (0.6-1.0 rDet) blue pixels (hue 200-270): p90 saturation user refs 0.158-0.272, v5 (user best) 0.200, v9 0.204, v13-v15 0.169-0.271; v16 0.365 (user: \"really terrible\" violet-blue right outer arm; SHO hue/sat outer_blue boost). Vivid share (S>0.35): refs 0-0.011, v16 0.046."
     }
   },
   "galaxy_edge_on": {

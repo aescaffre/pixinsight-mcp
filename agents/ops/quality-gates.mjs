@@ -8,6 +8,7 @@ import fs from 'fs';
 import path from 'path';
 import { BURN_CLIP, BRIGHT_BLOCK_LEVEL, STAR_CONTRAST, FWHM_HARD, STAR_COUNT_WARN,
   STAR_ELLIPTICITY_WARN, STAR_DARK_RING_WARN, STAR_FWHM_ADVISORY, STAR_CENTER_RADIUS_FRAC, STAR_KNOT_RATIO, STAR_SATURATED } from '../llm/gate-contract.mjs';
+import { nativeOr } from './native-metrics.mjs';
 
 /**
  * Check star quality: FWHM and color diversity.
@@ -18,7 +19,7 @@ import { BURN_CLIP, BRIGHT_BLOCK_LEVEL, STAR_CONTRAST, FWHM_HARD, STAR_COUNT_WAR
  * @param {string} viewId - View ID (should be the final composite with stars)
  * @returns {object} { pass, medianFWHM, colorDiversity, details, stars }
  */
-export async function checkStarQuality(ctx, viewId, opts = {}) {
+export async function checkStarQualityPjsr(ctx, viewId, opts = {}) {
   const r = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}');
     if (w.isNull) throw new Error('checkStarQuality: view not found: ${viewId}');
@@ -507,7 +508,7 @@ export function buildStarFieldPjsr(viewId, opts = {}) {
  * ADVISORY metric: does not replace the blocking checkStarQuality brightness/FWHM values.
  * opts: { centerRadiusPx, peaks:[{x,y}] (re-measure known star coordinates), maxStars }
  */
-export async function measureStarField(ctx, viewId, opts = {}) {
+export async function measureStarFieldPjsr(ctx, viewId, opts = {}) {
   const r = await ctx.pjsr(buildStarFieldPjsr(viewId, opts));
   if (r.status === 'error') throw new Error('measureStarField failed: ' + (r.error?.message || 'PJSR error'));
   let d;
@@ -542,7 +543,7 @@ export function summarizeStarField(d, thresholds = {}) {
  * @param {string} viewId - View ID to check
  * @returns {object} { pass, oscillations, maxAmplitude, details }
  */
-export async function checkRinging(ctx, viewId) {
+export async function checkRingingPjsr(ctx, viewId) {
   const r = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}');
     if (w.isNull) throw new Error('checkRinging: view not found: ${viewId}');
@@ -743,7 +744,7 @@ export async function checkSharpness(ctx, viewId, roi) {
  *   coreWhiteFraction = fraction of sampled pixels inside bright blocks whose three
  *   channels are all above 0.90 (a white blob, not a coloured bright region).
  */
-export async function assessBurn(ctx, viewId, opts = {}) {
+export async function assessBurnPjsr(ctx, viewId, opts = {}) {
   const clip = opts.clip ?? BURN_CLIP;
   const bright = opts.bright ?? BRIGHT_BLOCK_LEVEL;
   const blockSize = opts.blockSize ?? 50;
@@ -844,7 +845,7 @@ export async function assessBurn(ctx, viewId, opts = {}) {
  * @returns {object} { pass, burntBlockCount, totalBlocks, worstBlocks, brightBlocks, brightFraction,
  *   perChannelExceedance, coreWhiteFraction, details }
  */
-export async function scanBurntRegions(ctx, viewId, opts = {}) {
+export async function scanBurntRegionsPjsr(ctx, viewId, opts = {}) {
   const a = await assessBurn(ctx, viewId, { ...opts, clip: opts.clip ?? opts.threshold });
   if (a.error) return { pass: false, error: a.error, details: 'Burn scan failed' };
   const pass = a.clipBlocks === 0;
@@ -880,7 +881,7 @@ export async function scanBurntRegions(ctx, viewId, opts = {}) {
  * @param {string} viewId - View ID to check (should be the final composite, ideally before star blend)
  * @returns {object} { medianS, p90S, p99S, maxS, subjectPixelCount, details }
  */
-export async function checkSaturation(ctx, viewId) {
+export async function checkSaturationPjsr(ctx, viewId) {
   const r = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}');
     if (w.isNull) throw new Error('checkSaturation: view not found: ${viewId}');
@@ -983,7 +984,7 @@ export async function checkSaturation(ctx, viewId) {
  * @param {string} category - Target classification (e.g. 'galaxy_spiral')
  * @returns {object} { pass, tonal_verdict, separation, ... }
  */
-export async function checkTonalPresence(ctx, viewId, category) {
+export async function checkTonalPresencePjsr(ctx, viewId, category) {
   const r = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}');
     if (w.isNull) throw new Error('checkTonalPresence: view not found: ${viewId}');
@@ -1232,7 +1233,7 @@ export async function checkTonalPresence(ctx, viewId, category) {
  * @param {object} opts.roi - { cx, cy, radius } (computed internally if omitted)
  * @returns {object} metrics incl. roi, or { error }
  */
-export async function measureShellTexture(ctx, vid, opts = {}) {
+export async function measureShellTexturePjsr(ctx, vid, opts = {}) {
     const r = await ctx.pjsr(`
       var w = ImageWindow.windowById('${vid}');
       if (w.isNull) throw new Error('checkHighlightTexture: view not found: ${vid}');
@@ -1556,7 +1557,7 @@ export async function checkHighlightTexture(ctx, viewId, opts = {}) {
  * @param {string} viewId - Star layer view ID
  * @returns {object} { pass, verdict, max_value, clipped_fraction_98, ... }
  */
-export async function checkStarLayerIntegrity(ctx, viewId) {
+export async function checkStarLayerIntegrityPjsr(ctx, viewId) {
   const r = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}');
     if (w.isNull) throw new Error('checkStarLayerIntegrity: view not found: ${viewId}');
@@ -1729,7 +1730,7 @@ export async function checkStarLayerIntegrity(ctx, viewId) {
  * @param {number} brightnessThreshold - Luminance above which to measure (default 0.50)
  * @returns {object} { medianChroma, meanChroma, brightPixelCount, details }
  */
-export async function checkBrightChroma(ctx, viewId, brightnessThreshold = 0.50) {
+export async function checkBrightChromaPjsr(ctx, viewId, brightnessThreshold = 0.50) {
   const r = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}');
     if (w.isNull) throw new Error('checkBrightChroma: view not found: ${viewId}');
@@ -1973,7 +1974,7 @@ export function buildPsfFieldPjsr(viewId, o = {}) {
  * (closed in finally). Read-only on the source.
  * @returns {object} summarizePsfField result, or { ok:false, error }
  */
-export async function measurePsfField(ctx, viewId, opts = {}) {
+export async function measurePsfFieldPjsr(ctx, viewId, opts = {}) {
   const r = await ctx.pjsr(buildPsfFieldPjsr(viewId, opts));
   if (r.status === 'error') return { ok: false, error: r.error?.message || 'PJSR error' };
   let raw;
@@ -2049,4 +2050,43 @@ export async function measureBaselineTexture(ctx, views, opts = {}) {
     log(`  [baseline texture] skipped: ${e.message}`);
   }
   return out;
+}
+
+
+// ---------------------------------------------------------------------------
+// Native-first wrappers (2026-11-10): the Rust binary pixmetrics computes these from an exported XISF;
+// the PJSR implementations above (…Pjsr) are the fallback and the parity reference.
+// ---------------------------------------------------------------------------
+export async function checkRinging(ctx, viewId) {
+  return nativeOr(ctx, viewId, 'ringing', {}, () => checkRingingPjsr(ctx, viewId));
+}
+export async function assessBurn(ctx, viewId, opts = {}) {
+  return nativeOr(ctx, viewId, 'burn', { opts }, () => assessBurnPjsr(ctx, viewId, opts));
+}
+export async function scanBurntRegions(ctx, viewId, opts = {}) {
+  return nativeOr(ctx, viewId, 'scan_burnt_regions', { opts }, () => scanBurntRegionsPjsr(ctx, viewId, opts));
+}
+export async function checkSaturation(ctx, viewId) {
+  return nativeOr(ctx, viewId, 'saturation', {}, () => checkSaturationPjsr(ctx, viewId));
+}
+export async function measureShellTexture(ctx, viewId, opts = {}) {
+  return nativeOr(ctx, viewId, 'shell_texture', { opts }, () => measureShellTexturePjsr(ctx, viewId, opts));
+}
+export async function checkStarQuality(ctx, viewId, opts = {}) {
+  return nativeOr(ctx, viewId, 'star_quality', { ...opts }, () => checkStarQualityPjsr(ctx, viewId, opts));
+}
+export async function checkTonalPresence(ctx, viewId, category) {
+  return nativeOr(ctx, viewId, 'tonal_presence', { category }, () => checkTonalPresencePjsr(ctx, viewId, category));
+}
+export async function checkStarLayerIntegrity(ctx, viewId) {
+  return nativeOr(ctx, viewId, 'star_layer_integrity', {}, () => checkStarLayerIntegrityPjsr(ctx, viewId));
+}
+export async function checkBrightChroma(ctx, viewId, brightnessThreshold = 0.50) {
+  return nativeOr(ctx, viewId, 'bright_chroma', { brightnessThreshold }, () => checkBrightChromaPjsr(ctx, viewId, brightnessThreshold));
+}
+export async function measureStarField(ctx, viewId, opts = {}) {
+  return nativeOr(ctx, viewId, 'star_field', { ...opts }, () => measureStarFieldPjsr(ctx, viewId, opts));
+}
+export async function measurePsfField(ctx, viewId, opts = {}) {
+  return nativeOr(ctx, viewId, 'psf_field', { ...opts }, () => measurePsfFieldPjsr(ctx, viewId, opts));
 }

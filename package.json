@@ -1,6 +1,6 @@
 {
   "name": "pixinsight-mcp",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "MCP server bridging AI assistants with PixInsight for astrophotography processing",
   "type": "module",
   "main": "build/index.js",
@@ -10,7 +10,10 @@
     "start": "node build/index.js",
     "setup-bridge": "mkdir -p ~/.pixinsight-mcp/bridge/{commands,results,logs} ~/.pixinsight-mcp/catalog/recipes",
     "editor": "node editor/server.mjs",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "build:native": "cargo build --release --manifest-path native/pixmetrics/Cargo.toml",
+    "test:native": "cargo test --release --manifest-path native/pixmetrics/Cargo.toml",
+    "parity:native": "node scripts/native-parity.mjs"
   },
   "keywords": [
     "pixinsight",

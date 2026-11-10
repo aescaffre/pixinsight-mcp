@@ -25,6 +25,10 @@ node scripts/run-pipeline.mjs --config /path/to/config.json --restart-from stret
 
 # Start editor
 node editor/server.mjs
+
+# Native metrics (Rust, used by every quality gate; PixInsight fallback if absent)
+npm run build:native && npm run test:native
+node scripts/native-parity.mjs --image <view.xisf> --inv <run>/prep-metrics.json   # PJSR vs native
 ```
 
 ## Project Structure
@@ -34,6 +38,7 @@ editor/default-config.json — Default pipeline configuration
 editor/index.html          — Web UI for pipeline editor
 editor/server.mjs          — Editor backend (Express.js)
 src/                       — MCP server TypeScript source
+native/pixmetrics/         — Rust: XISF reader + all gate metrics (agents/ops/native-metrics.mjs bridges it)
 ```
 
 ## Skills

@@ -9,6 +9,7 @@
 import fs from 'fs';
 import path from 'path';
 import { gateThreshold, contrastGateFor, SUBJECT_MIN, DETAIL_MIN, NOISE_BG_HARD, NOISE_DUST_HARD } from '../llm/gate-contract.mjs';
+import { nativeOr } from './native-metrics.mjs';
 
 // ---------------------------------------------------------------------------
 // Detail-sampling helpers. Written in ES5 on purpose: the SAME source text is
@@ -74,7 +75,7 @@ export function blockSobelEnergy(getLum, x0, y0, size, step, blockMedian) {
  * @param {string} viewId - View ID to measure
  * @returns {object} { subjectBrightness, detailScore, detailRaw, detailCredible, detailWeber, noiseDominated, contrastRatio, subjectCount, backgroundMedian, details }
  */
-export async function measureSubjectDetail(ctx, viewId, opts = {}) {
+export async function measureSubjectDetailPjsr(ctx, viewId, opts = {}) {
   const roi = opts.roi && opts.roi.w > 0 && opts.roi.h > 0 ? opts.roi : null;
   const r = await ctx.pjsr(`
     ${stratifiedIndices.toString()}
@@ -345,7 +346,7 @@ export function evaluateDetailGain(measured, baseline, hasL, profile) {
  * @param {string} viewId - View ID to measure
  * @returns {object} { coreRelContrast, shellRelContrast, ratio, coreLum, coreFraction, pass, details }
  */
-export async function measureCoreContrast(ctx, viewId, classification, coreBurnCfg) {
+export async function measureCoreContrastPjsr(ctx, viewId, classification, coreBurnCfg) {
   const r = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}');
     if (w.isNull) throw new Error('measureCoreContrast: view not found: ${viewId}');
@@ -461,8 +462,10 @@ export async function measureCoreContrast(ctx, viewId, classification, coreBurnC
   const STRUCT_OK = (typeof cb.min_struct_frac === 'number') ? cb.min_struct_frac : 0.80;
   const HALO_OK = (typeof cb.max_halo_frac === 'number') ? cb.max_halo_frac : 0.03;
   const structuredCore = coreStructFrac >= STRUCT_OK && haloFrac <= HALO_OK && !whiteBurnt;
-  const relBlocking = cr < HARD && !structuredCore;
-  const relAdvisory = cr < HARD && structuredCore;
+  // 2026-11-09: a contrast FLOOR drove agents to cook cores (M74 v7, M81 run 2: relC 0.170 passed by over-processing).
+  // core_burn.rel_contrast_blocking=false makes relC advisory; white/cooked/nucleus-colour gates carry the burn check.
+  const relBlocking = cr < HARD && !structuredCore && cb.rel_contrast_blocking !== false;
+  const relAdvisory = cr < HARD && (structuredCore || cb.rel_contrast_blocking === false);
   const pass = !relBlocking && !whiteBurnt && !desatBurnt && !structBurnt && !haloBurnt;
   const msgs = [];
   if (structBurnt) {
@@ -517,7 +520,7 @@ export async function measureCoreContrast(ctx, viewId, classification, coreBurnC
  * @param {object} ifnCfg - optional { min_dust_mean_sat, min_field_p95, min_dust_coverage }
  * @returns {object} { dustCoverage, warmDustFraction, dustMeanSat, fieldP95, fieldP90, bg, coreThr, pass, details }
  */
-export async function measureDustCoverage(ctx, viewId, ifnCfg) {
+export async function measureDustCoveragePjsr(ctx, viewId, ifnCfg) {
   const r = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}');
     if (w.isNull) throw new Error('measureDustCoverage: view not found: ${viewId}');
@@ -608,7 +611,7 @@ export async function measureDustCoverage(ctx, viewId, ifnCfg) {
  * @param {string} viewId - View ID
  * @returns {object} { bgNoise, bgMedian, pass, details }
  */
-export async function measureBackgroundNoise(ctx, viewId, opts = {}) {
+export async function measureBackgroundNoisePjsr(ctx, viewId, opts = {}) {
   const r = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}');
     if (w.isNull) throw new Error('measureBackgroundNoise: view not found: ${viewId}');
@@ -691,7 +694,7 @@ function _median(a) {
  * ADVISORY metric (no pass/fail unless the profile supplies ceilings).
  * @returns {object} { chromaNoise, chromaToLumNoise, mottle16, mottle48, lumNoise, clean:{...}, dust:{...}, pass, details }
  */
-export async function measureChromaNoise(ctx, viewId, opts = {}) {
+export async function measureChromaNoisePjsr(ctx, viewId, opts = {}) {
   const r = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}');
     if (w.isNull) throw new Error('measureChromaNoise: view not found: ${viewId}');
@@ -794,7 +797,7 @@ export function summarizeChromaNoise(d, profile) {
  * @param {string} viewId - View ID to analyze
  * @returns {object} { cx, cy, radius, confidence, subjectPixelCount, subjectFraction }
  */
-export async function locateSubjectROI(ctx, viewId) {
+export async function locateSubjectROIPjsr(ctx, viewId) {
   const r = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}');
     if (w.isNull) throw new Error('locateSubjectROI: view not found: ${viewId}');
@@ -1012,7 +1015,7 @@ export function decileCdfDistance(sortedA, sortedB) {
   return s / 9;
 }
 
-export async function compareToReference(ctx, viewId, referencePath, opts = {}) {
+export async function compareToReferencePjsr(ctx, viewId, referencePath, opts = {}) {
   const refEsc = String(referencePath).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
   const tmpId = `__cmp_tgt_${Date.now().toString(36)}`;
   const targetWidth = opts.targetWidth ?? 1500;
@@ -1303,7 +1306,7 @@ export async function compareToReference(ctx, viewId, referencePath, opts = {}) 
  * Returns the sky level (median of those block medians), its p10/p90, and the fraction of
  * background blocks that are essentially black (< 0.015). Stretched images only.
  */
-export async function measureBackgroundFloor(ctx, viewId) {
+export async function measureBackgroundFloorPjsr(ctx, viewId) {
   const r = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}');
     if (w.isNull) throw new Error('measureBackgroundFloor: view not found: ${viewId}');
@@ -1378,7 +1381,7 @@ export function summarizeFaintDisc(grid, w, h) {
   return { faintFraction: gal ? faint / gal : 0, extent: gal / Math.max(bright, 1), galaxyBlocks: gal, sky };
 }
 
-export async function measureFaintDisc(ctx, viewId) {
+export async function measureFaintDiscPjsr(ctx, viewId) {
   const r = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}');
     if (w.isNull) throw new Error('measureFaintDisc: view not found: ${viewId}');
@@ -1407,7 +1410,7 @@ export async function measureFaintDisc(ctx, viewId) {
  * (fineRetention). M74 v2 measured 0.5-0.7 in the disc with the 3-6 px band boosted 1.6x.
  * ADVISORY only until calibrated on an approved galaxy run.
  */
-export async function measureScaleBands(ctx, viewId, { rDisc = null } = {}) {
+export async function measureScaleBandsPjsr(ctx, viewId, { rDisc = null } = {}) {
   // rDisc: fix the scale from the PREP disc radius — the final image's own radius grows when faint outskirts are
   // lifted, which coarsens the bands and lets a soft disc pass (M74 v4: 552 prep -> 681 final).
   const r = await ctx.pjsr(`
@@ -1433,12 +1436,12 @@ export async function measureScaleBands(ctx, viewId, { rDisc = null } = {}) {
         img.getSamples(c0, rect, 0); img.getSamples(c1, rect, 1); img.getSamples(c2, rect, 2);
         for (i = 0; i < n; i++) L[i] = 0.2126 * c0[i] + 0.7152 * c1[i] + 0.0722 * c2[i]; }
       else img.getSamples(L, rect, 0);
-      function blur(src, sig) { var rad = Math.ceil(3 * sig), kk = [], t = 0, j;
-        for (j = -rad; j <= rad; j++) { var v = Math.exp(-j * j / (2 * sig * sig)); kk.push(v); t += v; } for (j = 0; j < kk.length; j++) kk[j] /= t;
-        var tmp = new Float32Array(n), dst = new Float32Array(n), xx, yy, acc, q;
-        for (yy = 0; yy < bh; yy++) for (xx = 0; xx < bw; xx++) { acc = 0; for (j = -rad; j <= rad; j++) { q = xx + j; if (q < 0) q = 0; else if (q >= bw) q = bw - 1; acc += kk[j + rad] * src[yy * bw + q]; } tmp[yy * bw + xx] = acc; }
-        for (yy = 0; yy < bh; yy++) for (xx = 0; xx < bw; xx++) { acc = 0; for (j = -rad; j <= rad; j++) { q = yy + j; if (q < 0) q = 0; else if (q >= bh) q = bh - 1; acc += kk[j + rad] * tmp[q * bw + xx]; } dst[yy * bw + xx] = acc; }
-        return dst; }
+      // Native Convolution (2026-11-08, M81 full frame: the old pure-JS separable blur with kernels up to ~240 px
+      // over 16 MP ran > 20 min single-threaded; Convolution is the same Gaussian, multithreaded).
+      function blur(src, sig) { var bw2 = new ImageWindow(bw, bh, 1, 32, true, false, 'SB_T'); var R2 = new Rect(0, 0, bw, bh);
+        bw2.mainView.beginProcess(); bw2.mainView.image.setSamples(src, R2, 0); bw2.mainView.endProcess();
+        var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = sig; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(bw2.mainView);
+        var dst = new Float32Array(n); bw2.mainView.image.getSamples(dst, R2, 0); bw2.forceClose(); return dst; }
       var rD = ${Number.isFinite(rDisc) && rDisc > 0 ? Number(rDisc) : 'Math.sqrt(nd * B * B / Math.PI)'}, kS = Math.max(0.6, rD / 300);   // galaxy-size-relative scales (r_disc 300 px -> 0.7/3/6 px)
       var g07 = blur(L, 0.7 * kS), g3 = blur(L, 3 * kS), g6 = blur(L, 6 * kS);
       var sf = 0, sf2 = 0, sm = 0, sm2 = 0, cnt = 0;
@@ -1477,7 +1480,7 @@ export function galaxyBlockMask(grid, w, h) {
   return { bits, blocks: bestN, sky };
 }
 
-export async function measureDiscMottle(ctx, viewId, { radius = null } = {}) {
+export async function measureDiscMottlePjsr(ctx, viewId, { radius = null } = {}) {
   const B = 24;
   const g = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measureDiscMottle: view not found: ${viewId}');
@@ -1523,7 +1526,7 @@ export async function measureDiscMottle(ctx, viewId, { radius = null } = {}) {
 // Outer-arm visibility (2026-11-07, M74 v3: arms present in the linear L to ~6' but displayed at <0.01 above sky).
 // Spread (p90-p10) of the sigma-8 smoothed display luminance in an annulus [r0,r1] px around the galaxy core,
 // star pixels excluded (g2-g8 excess). Arms vs inter-arm contrast, insensitive to a uniform glow lift.
-export async function measureOuterArms(ctx, viewId, r0, r1, sigma = 8) {
+export async function measureOuterArmsPjsr(ctx, viewId, r0, r1, sigma = 8) {
   const B = 24;
   const g = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measureOuterArms: view not found: ${viewId}');
@@ -1577,7 +1580,7 @@ const EMPTY_PJSR = (sig) => `
         EMP = new Float32Array(n); ew.mainView.image.getSamples(EMP, new Rect(0,0,W,H), 0); ew.forceClose(); } })();
     function isEmpty(j) { return EMP !== null && EMP[j] > 0.002; }`;
 
-export async function measureRadialZones(ctx, viewId, centre, zones, { sigma = 8, withNoise = false, skyBits = null, gridW = 0, B = 24 } = {}) {
+export async function measureRadialZonesPjsr(ctx, viewId, centre, zones, { sigma = 8, withNoise = false, skyBits = null, gridW = 0, B = 24 } = {}) {
   const res = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measureRadialZones: view not found: ${viewId}');
     var img = w.mainView.image, W = img.width, H = img.height, n = W * H, i;
@@ -1702,7 +1705,7 @@ export async function measureSignalInventory(ctx, viewId, { previewDir = null, l
   try { prepCoreWeber = (await measureZoneStructure(ctx, viewId, { centre, rDet: inv.rDet, zones })).coreWeber; } catch (e) { log(`  [inventory] core structure failed: ${e.message}`); }
   let prepEnvelope = null;
   try { prepEnvelope = (await measureEnvelopeSectors(ctx, viewId, { centre, rDet: inv.rDet })).excess; } catch (e) { log(`  [inventory] envelope sectors failed: ${e.message}`); }
-  const out = { view: viewId, centre, rDet: inv.rDet, skySpread, prepCoreWeber, prepEnvelope, rFrameMax: rMax, sky, noise, zones, prepCoreIdx: idx.coreIdx, prepOuterNet: idx.outerNet, profile: inv.profile };
+  const out = { view: viewId, frameW: d.W, frameH: d.H, centre, rDet: inv.rDet, skySpread, prepCoreWeber, prepEnvelope, rFrameMax: rMax, sky, noise, zones, prepCoreIdx: idx.coreIdx, prepOuterNet: idx.outerNet, profile: inv.profile };
   out.text = `subject centre (${centre[0]}, ${centre[1]}); arm-scale structure detected (>= 3 sigma above the sky texture) out to r = ${inv.rDet} px` +
     `${inv.rDet + 250 > Math.min(centre[0], centre[1], d.W - centre[0], d.H - centre[1]) ? ' (close to the frame edge)' : ''}; ` +
     `outer zone ${zones.outer[0]}-${zones.outer[1]} px must stay VISIBLE in the final image; prep core/disc index ${idx.coreIdx?.toFixed(2)}.`;
@@ -1732,7 +1735,7 @@ export async function measureSignalInventory(ctx, viewId, { previewDir = null, l
 }
 
 /** Finish-side: same geometry on the candidate image. */
-export async function measureInventoryZones(ctx, viewId, inv) {
+export async function measureInventoryZonesPjsr(ctx, viewId, inv) {
   const z = inv.zones;
   const zz = await measureRadialZones(ctx, viewId, inv.centre, [z.core, z.disc, z.outer, z.sky]);
   return zoneIndices(zz.zones);
@@ -1746,7 +1749,7 @@ export async function measureInventoryZones(ctx, viewId, inv) {
  *   sigma-8 luminance) vs inter-arm GAP pixels (below the 40th), r in [0.2, 1.0] rDet. A saturation floor on the
  *   whole subject was met in v5 by tinting the gaps blue; on arms only that loophole closes.
  */
-export async function measureZoneStructure(ctx, viewId, inv) {
+export async function measureZoneStructurePjsr(ctx, viewId, inv) {
   const [cx, cy] = inv.centre, rDet = inv.rDet, rCore = Math.round(0.2 * rDet), r0 = Math.round(0.2 * rDet);
   const res = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measureZoneStructure: view not found: ${viewId}');
@@ -1793,7 +1796,7 @@ export async function measureZoneStructure(ctx, viewId, inv) {
  * [rDet+100, rDet+400]. Compared final vs prep (relative to each image's median sector), a sector that the data
  * fills but the final drops to sky is a threshold/mask clip. M74 prep L: right sector 0.73 of median; v6 0.004.
  */
-export async function measureEnvelopeSectors(ctx, viewId, inv) {
+export async function measureEnvelopeSectorsPjsr(ctx, viewId, inv) {
   const [cx, cy] = inv.centre, rd = inv.rDet;
   const res = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measureEnvelopeSectors: view not found: ${viewId}');
@@ -1844,7 +1847,7 @@ export function compareEnvelopeSectors(finalEx, prepEx, { minLevel = 0.005 } = {
  * the outer glow FALLS to the sky in the final vs the prep data (a global stretch can only widen the falloff of
  * faint signal; a narrower falloff, or a dip below the far sky, is a mask edge).
  */
-export async function measureSectorProfiles(ctx, viewId, inv, { bin = 15 } = {}) {
+export async function measureSectorProfilesPjsr(ctx, viewId, inv, { bin = 15 } = {}) {
   const [cx, cy] = inv.centre, rd = inv.rDet;
   const r0 = Math.round(0.4 * rd), r1 = rd + 450;
   const res = await ctx.pjsr(`
@@ -1878,7 +1881,7 @@ export async function measureSectorProfiles(ctx, viewId, inv, { bin = 15 } = {})
  * rel = (g1 - g6) / (g6 - sky) inside r < 0.25 x rDet; reports the negative tail (p2, p5), the positive tail
  * (p95, p98) and the fraction of pixels darker than -0.25 (outline pixels).
  */
-export async function measureCoreTroughs(ctx, viewId, inv, { fracs = [1 / 250, 1 / 60, 1 / 30], coreFrac = 0.25 } = {}) {
+export async function measureCoreTroughsPjsr(ctx, viewId, inv, { fracs = [1 / 250, 1 / 60, 1 / 30], coreFrac = 0.25 } = {}) {
   // Scales are FRACTIONS of rDet so images of different pixel scale / galaxy size compare (user reference JPEGs).
   const [cx, cy] = inv.centre, rC = Math.round(coreFrac * inv.rDet);
   const sig = fracs.map(f => Math.max(0.7, +(f * inv.rDet).toFixed(2)));
@@ -1919,7 +1922,7 @@ export async function measureCoreTroughs(ctx, viewId, inv, { fracs = [1 / 250, 1
  *  - lumTex: std of the band-pass (g_s - g_4s) luminance relative to the local level (g_4s - sky).
  *  - chromaTex: std of the band-pass of the two opponent chroma axes (R-G, (R+G)/2-B), relative to local luminance.
  */
-export async function measureCoreTexture(ctx, viewId, inv, { fracs = [1 / 120, 1 / 50], coreFrac = 0.25 } = {}) {
+export async function measureCoreTexturePjsr(ctx, viewId, inv, { fracs = [1 / 120, 1 / 50], coreFrac = 0.25 } = {}) {
   const [cx, cy] = inv.centre, rC = Math.round(coreFrac * inv.rDet);
   const sig = fracs.map(f => Math.max(0.8, +(f * inv.rDet).toFixed(2)));
   const res = await ctx.pjsr(`
@@ -1965,7 +1968,7 @@ export async function measureCoreTexture(ctx, viewId, inv, { fracs = [1 / 120, 1
  * v6 1.12. Local contrast at small radius inverts it into a cell/worm pattern: v7 1.71. Trough depth, coreWeber,
  * coherence, kurtosis and central concentration were all blind to it (v7 = v6 or = the M74 reference).
  */
-export async function measureCoreSpectrum(ctx, viewId, inv, { coreFrac = 0.22 } = {}) {
+export async function measureCoreSpectrumPjsr(ctx, viewId, inv, { coreFrac = 0.22 } = {}) {
   const [cx, cy] = inv.centre, rC = Math.round(coreFrac * inv.rDet), u = Math.max(0.6, inv.rDet / 300);
   const res = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measureCoreSpectrum: view not found: ${viewId}');
@@ -2018,7 +2021,7 @@ export function edgeSteepening(prof, rDet) {
  * v5 0.39, v6 0.34, v7 0.31 — each version filled the gaps more. Gap HUE was inside the reference range (not gated),
  * and knot hue is Ha-limited (refs have Ha; user: no H data yet), so neither is gated.
  */
-export async function measureArmGapDepth(ctx, viewId, inv) {
+export async function measureArmGapDepthPjsr(ctx, viewId, inv) {
   const [cx, cy] = inv.centre, rd = inv.rDet, u = Math.max(0.7, rd / 300);
   const res = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measureArmGapDepth: view not found: ${viewId}');
@@ -2056,7 +2059,7 @@ export async function measureArmGapDepth(ctx, viewId, inv) {
  * On the prep starless Ha (same geometry as RGB): band-pass g1 - g8 inside 1.1 x rDet; knot pixels = band-pass
  * above max(p99.5, 6 x its robust noise). Returns up to maxN [x, y] samples.
  */
-export async function measureHaKnots(ctx, haViewId, inv, { maxN = 6000 } = {}) {
+export async function measureHaKnotsPjsr(ctx, haViewId, inv, { maxN = 6000 } = {}) {
   const [cx, cy] = inv.centre, rMax = Math.round(1.1 * inv.rDet);
   const res = await ctx.pjsr(`
     var w = ImageWindow.windowById('${haViewId}'); if (w.isNull) throw new Error('measureHaKnots: view not found: ${haViewId}');
@@ -2083,7 +2086,7 @@ export async function measureHaKnots(ctx, haViewId, inv, { maxN = 6000 } = {}) {
  * Final-image colour at the prep Ha knots: 3x3-mean RGB -> HSV. pinkFrac = share with hue >= 290 or < 35 deg and
  * saturation >= 0.10 (pink-red); whiteFrac = share clipped to white (max > 0.92 and sat < 0.10).
  */
-export async function measureHaKnotColour(ctx, viewId, knots) {
+export async function measureHaKnotColourPjsr(ctx, viewId, knots) {
   if (!knots?.pts?.length) return { evaluated: false, reason: 'no Ha knots' };
   const res = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measureHaKnotColour: view not found: ${viewId}');
@@ -2101,4 +2104,185 @@ export async function measureHaKnotColour(ctx, viewId, knots) {
     }`, { timeout: 600000 });
   if (res.status === 'error') throw new Error('measureHaKnotColour: ' + (res.error?.message || 'PJSR error'));
   return JSON.parse(res.outputs?.consoleOutput || '{}');
+}
+
+/**
+ * NUCLEUS COLOUR + CORE TEXTURE AMPLIFICATION (2026-11-09, M81 runs 1/2).
+ * measureNucleus: inside r < 0.12 x rDet, smoothed (sigma rDet/300) luminance; topSat = median HSV saturation of the
+ * brightest pixels (> 0.9 x p99.9). A burnt nucleus clips in all channels and turns WHITE: M81 run 1 0.014, run 2
+ * 0.019; user refs 0.066-0.176, approved NGC4490 0.067, M74 versions 0.11-0.21. Peak brightness alone does not
+ * separate (refs peak 0.89-0.94).
+ * measureCoreAmp: inside r < 0.22 x rDet, std of the relative band-pass (g_s - g_4s)/(g_4s - sky) at s = rDet/600 and
+ * rDet/300. Compared with the same on the prep RGB: M81 run 2 (cooked bulge) x9.2 / x5.5, every natural or merely
+ * burnt image x0.9-1.9 (M74 v3-v9, M81 run 1, KEEP_SUPER).
+ */
+export async function measureNucleusPjsr(ctx, viewId, inv) {
+  const [cx, cy] = inv.centre, r = Math.round(0.12 * inv.rDet), sig = Math.max(1, inv.rDet / 300);
+  const res = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measureNucleus: view not found: ${viewId}');
+    var img = w.mainView.image; if (!img.isColor) throw new Error('measureNucleus: needs colour');
+    var cx = ${cx}, cy = ${cy}, r = ${r}, x0 = Math.max(0, cx - r), y0 = Math.max(0, cy - r), x1 = Math.min(img.width, cx + r), y1 = Math.min(img.height, cy + r);
+    var CW = x1 - x0, CH = y1 - y0, n = CW * CH, R = new Rect(x0, y0, x1, y1), RR = new Rect(0, 0, CW, CH), ch = [], k, i;
+    for (k = 0; k < 3; k++) { var a = new Float32Array(n); img.getSamples(a, R, k);
+      var bw = new ImageWindow(CW, CH, 1, 32, true, false, 'NU_T'); bw.mainView.beginProcess(); bw.mainView.image.setSamples(a, RR, 0); bw.mainView.endProcess();
+      var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = ${sig}; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(bw.mainView);
+      var o = new Float32Array(n); bw.mainView.image.getSamples(o, RR, 0); bw.forceClose(); ch.push(o); }
+    var L = new Float32Array(n), srt = [];
+    for (i = 0; i < n; i++) { L[i] = 0.2126 * ch[0][i] + 0.7152 * ch[1][i] + 0.0722 * ch[2][i]; if (i % 3 === 0) srt.push(L[i]); }
+    srt.sort(function(a,b){return a-b;}); var pk = srt[Math.min(srt.length - 1, Math.floor(0.999 * srt.length))], sats = [];
+    for (i = 0; i < n; i++) if (L[i] > 0.9 * pk) { var mx = Math.max(ch[0][i], ch[1][i], ch[2][i]), mn = Math.min(ch[0][i], ch[1][i], ch[2][i]); sats.push(mx > 1e-6 ? (mx - mn) / mx : 0); }
+    sats.sort(function(a,b){return a-b;});
+    JSON.stringify({ peak: pk, topSat: sats.length ? sats[sats.length >> 1] : null, topN: sats.length });`, { timeout: 600000 });
+  if (res.status === 'error') throw new Error('measureNucleus: ' + (res.error?.message || 'PJSR error'));
+  return JSON.parse(res.outputs?.consoleOutput || '{}');
+}
+
+export async function measureCoreAmpPjsr(ctx, viewId, inv) {
+  const [cx, cy] = inv.centre, rd = inv.rDet, r = Math.round(0.22 * rd), pad = Math.round(0.1 * rd);
+  const sig = [Math.max(0.7, rd / 600), Math.max(0.7, rd / 300)];
+  const res = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measureCoreAmp: view not found: ${viewId}');
+    var img = w.mainView.image, W = img.width, H = img.height;
+    var sk = [], st = 0; img.selectedRect = new Rect(0, 0, W, H);
+    // sky: 20th percentile of a sparse luminance sample of the whole frame (zeros of empty footprints excluded)
+    for (var yy = 0; yy < H; yy += 16) for (var xx = 0; xx < W; xx += 16) { var v = img.isColor ? 0.2126 * img.sample(xx, yy, 0) + 0.7152 * img.sample(xx, yy, 1) + 0.0722 * img.sample(xx, yy, 2) : img.sample(xx, yy, 0); if (v > 1e-6) sk.push(v); }
+    sk.sort(function(a,b){return a-b;}); var sky = sk.length ? sk[Math.floor(0.2 * sk.length)] : 0;
+    var cx = ${cx}, cy = ${cy}, r = ${r}, P = ${pad}, x0 = Math.max(0, cx - r - P), y0 = Math.max(0, cy - r - P), x1 = Math.min(W, cx + r + P), y1 = Math.min(H, cy + r + P);
+    var CW = x1 - x0, CH = y1 - y0, n = CW * CH, R = new Rect(x0, y0, x1, y1), RR = new Rect(0, 0, CW, CH), L = new Float32Array(n), i;
+    if (img.isColor) { var c = new Float32Array(n); img.getSamples(c, R, 0); for (i = 0; i < n; i++) L[i] = 0.2126 * c[i]; img.getSamples(c, R, 1); for (i = 0; i < n; i++) L[i] += 0.7152 * c[i]; img.getSamples(c, R, 2); for (i = 0; i < n; i++) L[i] += 0.0722 * c[i]; }
+    else img.getSamples(L, R, 0);
+    function blur(s) { var bw = new ImageWindow(CW, CH, 1, 32, true, false, 'CA_T'); bw.mainView.beginProcess(); bw.mainView.image.setSamples(L, RR, 0); bw.mainView.endProcess();
+      var C = new Convolution; C.mode = Convolution.prototype.Parametric; C.sigma = s; C.shape = 2; C.aspectRatio = 1; C.rotationAngle = 0; C.executeOn(bw.mainView);
+      var o = new Float32Array(n); bw.mainView.image.getSamples(o, RR, 0); bw.forceClose(); return o; }
+    var SIG = ${JSON.stringify(sig)}, out = { sky: sky };
+    for (var k = 0; k < SIG.length; k++) { var a = blur(SIG[k]), b = blur(4 * SIG[k]), s1 = 0, s2 = 0, m = 0, x, y;
+      for (y = 0; y < CH; y++) for (x = 0; x < CW; x++) { var dx = x + x0 - cx, dy = y + y0 - cy; if (dx*dx + dy*dy >= r*r) continue; i = y*CW + x; var v = (a[i] - b[i]) / Math.max(b[i] - sky, 0.02); s1 += v; s2 += v*v; m++; }
+      var mu = s1 / m; out[k === 0 ? 'std600' : 'std300'] = Math.sqrt(Math.max(0, s2 / m - mu*mu)); }
+    JSON.stringify(out);`, { timeout: 900000 });
+  if (res.status === 'error') throw new Error('measureCoreAmp: ' + (res.error?.message || 'PJSR error'));
+  return JSON.parse(res.outputs?.consoleOutput || '{}');
+}
+
+/**
+ * Palette purity of the disc (2026-11-10, M74 v10): share of disc pixels with a lilac/magenta hue (HSV 250-335°)
+ * or a teal hue (165-195°), among galaxy pixels (0.15-0.8 rDet, above sky+0.02, below the 98th percentile =
+ * stars out, saturation > 0.06 to count as coloured). Without Ha data neither hue exists in a galaxy disc: lilac
+ * comes from stacked saturation curves + SCNR, teal from red-chroma restraint or a green lift.
+ * Calibration on M74 PNGs (geometry of the 3000x2000 crop): v3-v9 lilac 0.000-0.021, teal 0.000-0.046 except
+ * v4 teal 0.148 (user: "cyan inter-arm haze"); v10 lilac 0.119 (critic + user: lilac-magenta knots).
+ */
+export async function measurePalettePurityPjsr(ctx, viewId, inv) {
+  const [cx, cy] = inv.centre, rd = inv.rDet;
+  const res = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}'); if (w.isNull) throw new Error('measurePalettePurity: view not found: ${viewId}');
+    var img = w.mainView.image; if (!img.isColor) throw new Error('measurePalettePurity: needs colour');
+    var W = img.width, H = img.height, cx = ${cx}, cy = ${cy}, rd = ${rd}, S = 4, x, y, sky = [], px = [];
+    for (y = 0; y < H; y += S) for (x = 0; x < W; x += S) {
+      var d = Math.sqrt((x-cx)*(x-cx)+(y-cy)*(y-cy)) / rd; if (d <= 0.15 || (d >= 0.8 && d <= 1.2) || d >= 1.32) continue;
+      var R = img.sample(x, y, 0), G = img.sample(x, y, 1), B = img.sample(x, y, 2), Y = 0.2126*R + 0.7152*G + 0.0722*B;
+      if (Y <= 1e-6) continue;   // empty footprint
+      if (d > 1.2) sky.push(Y); else px.push([R, G, B, Y]);
+    }
+    function med(a) { a.sort(function(p,q){return p-q;}); return a.length ? a[a.length >> 1] : 0; }
+    var s0 = med(sky), ys = px.map(function(p){return p[3];}).sort(function(p,q){return p-q;}), top = ys.length ? ys[Math.floor(0.98 * (ys.length - 1))] : 1;
+    var n = 0, lil = 0, teal = 0;
+    for (var i = 0; i < px.length; i++) { var p = px[i]; if (p[3] <= s0 + 0.02 || p[3] >= top) continue; n++;
+      var mx = Math.max(p[0], p[1], p[2]), mn = Math.min(p[0], p[1], p[2]), dd = mx - mn; if (mx <= 1e-6 || dd / mx <= 0.06) continue;
+      var h = mx === p[0] ? (((p[1]-p[2])/dd) % 6 + 6) % 6 : (mx === p[1] ? (p[2]-p[0])/dd + 2 : (p[0]-p[1])/dd + 4); h *= 60;
+      if (h >= 250 && h < 335) lil++; else if (h >= 165 && h < 195) teal++; }
+    JSON.stringify({ n: n, lilac: n ? lil / n : null, teal: n ? teal / n : null, sky: s0 });`, { timeout: 600000 });
+  if (res.status === 'error') throw new Error('measurePalettePurity: ' + (res.error?.message || 'PJSR error'));
+  return JSON.parse(res.outputs?.consoleOutput || '{}');
+}
+
+
+// ---------------------------------------------------------------------------
+// Native-first wrappers (2026-11-10): the Rust binary pixmetrics computes these from an exported XISF;
+// the PJSR implementations above (…Pjsr) are the fallback and the parity reference.
+// ---------------------------------------------------------------------------
+export async function measureZoneStructure(ctx, viewId, inv) {
+  return nativeOr(ctx, viewId, 'zone_structure', { inv }, () => measureZoneStructurePjsr(ctx, viewId, inv));
+}
+export async function measureSectorProfiles(ctx, viewId, inv, o = {}) {
+  return nativeOr(ctx, viewId, 'sector_profiles', { inv, opts: o }, () => measureSectorProfilesPjsr(ctx, viewId, inv, o));
+}
+export async function measureScaleBands(ctx, viewId, o = {}) {
+  return nativeOr(ctx, viewId, 'scale_bands', { opts: o }, () => measureScaleBandsPjsr(ctx, viewId, o));
+}
+export async function measureInventoryZones(ctx, viewId, inv) {
+  return nativeOr(ctx, viewId, 'inventory_zones', { inv }, () => measureInventoryZonesPjsr(ctx, viewId, inv));
+}
+export async function measureHaKnotColour(ctx, viewId, knots) {
+  return nativeOr(ctx, viewId, 'ha_knot_colour', { knots }, () => measureHaKnotColourPjsr(ctx, viewId, knots));
+}
+export async function measureDiscMottle(ctx, viewId, o = {}) {
+  return nativeOr(ctx, viewId, 'disc_mottle', { opts: o }, () => measureDiscMottlePjsr(ctx, viewId, o));
+}
+export async function measureCoreSpectrum(ctx, viewId, inv, o = {}) {
+  return nativeOr(ctx, viewId, 'core_spectrum', { inv, opts: o }, () => measureCoreSpectrumPjsr(ctx, viewId, inv, o));
+}
+export async function measureCoreAmp(ctx, viewId, inv) {
+  return nativeOr(ctx, viewId, 'core_amp', { inv }, () => measureCoreAmpPjsr(ctx, viewId, inv));
+}
+export async function measureBackgroundNoise(ctx, viewId, opts = {}) {
+  return nativeOr(ctx, viewId, 'background_noise', { opts }, () => measureBackgroundNoisePjsr(ctx, viewId, opts));
+}
+export async function measureArmGapDepth(ctx, viewId, inv) {
+  return nativeOr(ctx, viewId, 'arm_gap_depth', { inv }, () => measureArmGapDepthPjsr(ctx, viewId, inv));
+}
+export async function measureSubjectDetail(ctx, viewId, opts = {}) {
+  return nativeOr(ctx, viewId, 'subject_detail', { opts }, () => measureSubjectDetailPjsr(ctx, viewId, opts));
+}
+export async function measureOuterArms(ctx, viewId, r0, r1, sigma = 8) {
+  return nativeOr(ctx, viewId, 'outer_arms', { r0, r1, sigma }, () => measureOuterArmsPjsr(ctx, viewId, r0, r1, sigma));
+}
+export async function measureEnvelopeSectors(ctx, viewId, inv) {
+  return nativeOr(ctx, viewId, 'envelope_sectors', { inv }, () => measureEnvelopeSectorsPjsr(ctx, viewId, inv));
+}
+export async function measureDustCoverage(ctx, viewId, ifnCfg) {
+  return nativeOr(ctx, viewId, 'dust_coverage', { ifnCfg }, () => measureDustCoveragePjsr(ctx, viewId, ifnCfg));
+}
+export async function measureCoreContrast(ctx, viewId, classification, coreBurnCfg) {
+  return nativeOr(ctx, viewId, 'core_contrast', { classification, coreBurnCfg }, () => measureCoreContrastPjsr(ctx, viewId, classification, coreBurnCfg));
+}
+export async function measureChromaNoise(ctx, viewId, opts = {}) {
+  return nativeOr(ctx, viewId, 'chroma_noise', { opts }, () => measureChromaNoisePjsr(ctx, viewId, opts));
+}
+export async function measureBackgroundFloor(ctx, viewId) {
+  return nativeOr(ctx, viewId, 'background_floor', {}, () => measureBackgroundFloorPjsr(ctx, viewId));
+}
+export async function measureRadialZones(ctx, viewId, centre, zones, o = {}) {
+  return nativeOr(ctx, viewId, 'radial_zones', { centre, zones, opts: o }, () => measureRadialZonesPjsr(ctx, viewId, centre, zones, o));
+}
+export async function measureHaKnots(ctx, viewId, inv, o = {}) {
+  return nativeOr(ctx, viewId, 'ha_knots', { inv, maxN: o.maxN ?? 6000 }, () => measureHaKnotsPjsr(ctx, viewId, inv, o));
+}
+export async function measureCoreTexture(ctx, viewId, inv, o = {}) {
+  return nativeOr(ctx, viewId, 'core_texture', { inv, opts: o }, () => measureCoreTexturePjsr(ctx, viewId, inv, o));
+}
+export async function measureCoreTroughs(ctx, viewId, inv, o = {}) {
+  return nativeOr(ctx, viewId, 'core_troughs', { inv, opts: o }, () => measureCoreTroughsPjsr(ctx, viewId, inv, o));
+}
+export async function measureFaintDisc(ctx, viewId) {
+  return nativeOr(ctx, viewId, 'faint_disc', {}, () => measureFaintDiscPjsr(ctx, viewId));
+}
+export async function locateSubjectROI(ctx, viewId) {
+  return nativeOr(ctx, viewId, 'subject_roi', {}, () => locateSubjectROIPjsr(ctx, viewId));
+}
+export async function measureNucleus(ctx, viewId, inv) {
+  return nativeOr(ctx, viewId, 'nucleus', { inv }, () => measureNucleusPjsr(ctx, viewId, inv));
+}
+export async function measurePalettePurity(ctx, viewId, inv) {
+  return nativeOr(ctx, viewId, 'palette_purity', { inv }, () => measurePalettePurityPjsr(ctx, viewId, inv));
+}
+export async function compareToReference(ctx, viewId, referencePath, opts = {}) {
+  return nativeOr(ctx, viewId, 'compare_reference', { reference_path: referencePath, ...opts }, () => compareToReferencePjsr(ctx, viewId, referencePath, opts));
+}
+
+/**
+ * Outer-zone colour + presence (2026-11-10, M74 "brown dome"): native only (pixmetrics outer_zone); returns null
+ * when the native binary is unavailable (the gate is then skipped with a warning). See native/pixmetrics colour.rs.
+ */
+export async function measureOuterZone(ctx, viewId, inv) {
+  return nativeOr(ctx, viewId, 'outer_zone', { inv: { centre: inv.centre, rDet: inv.rDet } }, async () => null);
 }
