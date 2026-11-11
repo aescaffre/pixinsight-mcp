@@ -230,6 +230,34 @@ function handleGetImageStatistics(command) {
 // Process Execution Handlers
 // ============================================================================
 
+// Cheap fingerprint of a view's pixels: per-channel mean plus a weighted sum over a
+// ~64x64 sample grid. Used to tell whether a process actually changed the image.
+function viewSignature(view) {
+   var img = view.image;
+   var sig = [];
+   for (var c = 0; c < img.numberOfChannels; ++c) {
+      img.selectedChannel = c;
+      sig.push(img.mean());
+   }
+   img.resetSelections();
+   var stepX = Math.max(1, Math.floor(img.width / 64));
+   var stepY = Math.max(1, Math.floor(img.height / 64));
+   var acc = 0;
+   for (var y = 0; y < img.height; y += stepY)
+      for (var x = 0; x < img.width; x += stepX)
+         for (var k = 0; k < img.numberOfChannels; ++k)
+            acc += img.sample(x, y, k) * (1 + ((x * 7 + y * 13 + k) % 97));
+   sig.push(acc);
+   return sig;
+}
+
+function sameSignature(a, b) {
+   if (!a || !b || a.length !== b.length) return false;
+   for (var i = 0; i < a.length; ++i)
+      if (a[i] !== b[i]) return false;
+   return true;
+}
+
 function handleRunPixelMath(command) {
    // Fix contributed by Andrei Gusan (PR #2, 2026-08): see the comments below.
    var P = new PixelMath;
@@ -268,8 +296,18 @@ function handleRunPixelMath(command) {
       if (!view) throw new Error("View not found: " + command.targetView);
    }
 
+   // Verification: PixelMath can "succeed" without doing anything -- executeOn()
+   // returning false, an undeclared symbol or a non-existent function in the
+   // expression, or an expression that reproduces its input. Report that instead
+   // of a silent no-op (the same class of bug as ABE running without applying its
+   // correction).
+   var shortExpr = P.expression.length > 120 ? P.expression.substring(0, 120) + "..." : P.expression;
+   var nWindows = ImageWindow.windows.length;
+   var before = (view && !P.createNewImage) ? viewSignature(view) : null;
+   var ok;
+
    if (view) {
-      P.executeOn(view);
+      ok = P.executeOn(view);
    } else {
       // PixelMath cannot execute in the pure global context when its
       // parameters reference specific source views (e.g. combining named
@@ -278,20 +316,42 @@ function handleRunPixelMath(command) {
       // empirically: executeGlobal() throws "Cannot execute instance in the
       // global context" in that case. Fall back to any open window as anchor.
       try {
-         P.executeGlobal();
+         ok = P.executeGlobal();
       } catch (e) {
          var windows = ImageWindow.windows;
          if (windows.length > 0) {
-            P.executeOn(windows[0].mainView);
+            ok = P.executeOn(windows[0].mainView);
          } else {
             throw e;
          }
       }
    }
+
+   if (ok === false)
+      throw new Error("PixelMath returned false (not applied); check the PixInsight console. Expression: " + shortExpr);
+   var verified = "";
+   if (P.createNewImage) {
+      if (command.parameters.newImageId && !findViewById(command.parameters.newImageId))
+         throw new Error("PixelMath did not create the image '" + command.parameters.newImageId + "'. Expression: " + shortExpr);
+      if (!command.parameters.newImageId && ImageWindow.windows.length <= nWindows)
+         throw new Error("PixelMath did not create a new image. Expression: " + shortExpr);
+      verified = " (new image created)";
+   } else if (before) {
+      if (sameSignature(before, viewSignature(view))) {
+         if (!command.parameters.allowNoChange)
+            throw new Error("PixelMath finished without changing " + command.targetView +
+               ". Likely causes: a symbol not declared in 'symbols', a function that does not exist " +
+               "(there is no pow(); use exp(b*ln(a))), or an expression that reproduces its input. " +
+               "Pass allowNoChange=true if this is intended. Expression: " + shortExpr);
+         verified = " (unchanged, allowed)";
+      } else {
+         verified = " (verified: image changed)";
+      }
+   }
    return {
       status: "success",
-      outputs: {},
-      message: "PixelMath executed: " + command.parameters.expression
+      outputs: { verified: verified },
+      message: "PixelMath executed" + verified + ": " + command.parameters.expression
    };
 }
 

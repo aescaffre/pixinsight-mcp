@@ -41,6 +41,11 @@ export function registerProcessingTools(server: McpServer, bridge: BridgeClient)
         "combine), otherwise 'sameAsTarget'. PixelMath does NOT infer this from the expressions " +
         "on its own -- without it, combining 3 mono images silently produces a mono clone."
       ),
+      allowNoChange: z.boolean().default(false).describe(
+        "The watcher checks that an in-place PixelMath actually changed the target and reports an " +
+        "error otherwise (undeclared symbol, non-existent function, identity expression). Set true " +
+        "when an unchanged result is expected."
+      ),
     },
     async (params) => {
       const result = await bridge.sendCommand("run_pixelmath", "PixelMath", {
@@ -51,6 +56,7 @@ export function registerProcessingTools(server: McpServer, bridge: BridgeClient)
         createNewImage: params.createNewImage,
         newImageId: params.newImageId ?? "",
         newImageColorSpace: params.newImageColorSpace,
+        allowNoChange: params.allowNoChange,
       }, {
         executeMethod: params.targetViewId ? "executeOn" : "executeGlobal",
         targetView: params.targetViewId,
