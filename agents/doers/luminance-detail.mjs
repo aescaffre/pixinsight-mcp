@@ -6,6 +6,7 @@
 import { BaseAgent } from './base-agent.mjs';
 import { createLumMask, applyMask, removeMask, closeMask } from '../ops/masks.mjs';
 import { purgeUndoHistory } from '../ops/image-mgmt.mjs';
+import { nativeLheOr } from '../ops/native-process.mjs';
 
 export class LuminanceDetailAgent extends BaseAgent {
   constructor(store, brief) {
@@ -98,17 +99,20 @@ export class LuminanceDetailAgent extends BaseAgent {
     );
 
     if (maskId) {
-      await applyMask(ctx, viewId, maskId);
-      await ctx.pjsr(`
-        var P = new LocalHistogramEqualization;
-        P.radius = ${params.lhe_radius};
-        P.histogramBins = LocalHistogramEqualization.prototype.Bit12;
-        P.slopeLimit = ${params.lhe_slopeLimit};
-        P.amount = ${params.lhe_amount};
-        P.circularKernel = true;
-        P.executeOn(ImageWindow.windowById('${viewId}').mainView);
-      `);
-      await removeMask(ctx, viewId);
+      // native LHE (Rust, exact port of PixInsight's module) through the same mask; PixInsight LHE as fallback
+      await nativeLheOr(ctx, viewId, { radius: params.lhe_radius, bins: 12, slopeLimit: params.lhe_slopeLimit, amount: params.lhe_amount, circular: true }, maskId, async () => {
+        await applyMask(ctx, viewId, maskId);
+        await ctx.pjsr(`
+          var P = new LocalHistogramEqualization;
+          P.radius = ${params.lhe_radius};
+          P.histogramBins = LocalHistogramEqualization.prototype.Bit12;
+          P.slopeLimit = ${params.lhe_slopeLimit};
+          P.amount = ${params.lhe_amount};
+          P.circularKernel = true;
+          P.executeOn(ImageWindow.windowById('${viewId}').mainView);
+        `);
+        await removeMask(ctx, viewId);
+      });
       await closeMask(ctx, maskId);
     }
 

@@ -39,6 +39,7 @@ editor/index.html          — Web UI for pipeline editor
 editor/server.mjs          — Editor backend (Express.js)
 src/                       — MCP server TypeScript source
 native/pixmetrics/         — Rust: XISF reader + all gate metrics (agents/ops/native-metrics.mjs bridges it)
+                             + `process` ops: exact LHE port, adaptive zone masks (agents/ops/native-process.mjs)
 ```
 
 ## Skills

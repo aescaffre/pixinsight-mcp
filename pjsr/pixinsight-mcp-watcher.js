@@ -810,11 +810,19 @@ function runWatcher() {
 
    // Graceful shutdown: check for sentinel file
    var SHUTDOWN_FILE = BRIDGE_DIR + "/shutdown";
+   // Make the Process Console's Pause/Abort button reach the watcher (console.abortRequested is only set when
+   // abortEnabled is true; suggested by Az0te, issue #5).
+   try { console.abortEnabled = true; } catch (eAb) {}
 
+   // Latched (2026-11-11, reported by Az0te in issue #5): the signal file is removed on first sight, so an inner wait
+   // loop used to consume it and the outer loop never stopped. Once seen, every later call returns true.
+   var _shutdownLatched = false;
    function shouldShutdown() {
-      if (console.abortRequested) return true;
+      if (_shutdownLatched) return true;
+      if (console.abortRequested) { _shutdownLatched = true; return true; }
       if (File.exists(SHUTDOWN_FILE)) {
          try { File.remove(SHUTDOWN_FILE); } catch(e) {}
+         _shutdownLatched = true;
          return true;
       }
       return false;

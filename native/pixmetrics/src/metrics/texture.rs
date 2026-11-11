@@ -22,7 +22,7 @@ use crate::image::Image;
 use rayon::prelude::*;
 use serde_json::{json, Value};
 
-pub const NAMES: &[&str] = &["scale_bands", "disc_mottle", "background_noise", "background_floor", "subject_detail", "dust_coverage", "subject_roi"];
+pub const NAMES: &[&str] = &["scale_bands", "disc_mottle", "background_noise", "background_floor", "subject_detail", "dust_coverage", "subject_roi", "sobel_texture"];
 pub fn dispatch(name: &str, ctx: &Ctx, p: &Value) -> Option<Result<Value, String>> {
     Some(match name {
         "scale_bands" => scale_bands(ctx, p),
@@ -32,6 +32,7 @@ pub fn dispatch(name: &str, ctx: &Ctx, p: &Value) -> Option<Result<Value, String
         "subject_detail" => subject_detail(ctx, p),
         "dust_coverage" => dust_coverage(ctx, p),
         "subject_roi" => subject_roi(ctx, p),
+        "sobel_texture" => sobel_texture(ctx, p),
         _ => return None,
     })
 }
@@ -481,4 +482,78 @@ pub fn subject_roi(ctx: &Ctx, _p: &Value) -> Result<Value, String> {
     if confidence == "medium" { radius = js_round(radius * 1.2); }
     Ok(json!({ "cx": cx as i64, "cy": cy as i64, "radius": radius as i64, "confidence": confidence, "subjectPixelCount": count, "subjectFraction": frac,
                "bgMedian": bg_median, "bgMAD": bg_mad, "subjectThreshold": thr }))
+}
+
+// ---------------------------------------------------------------------------------------------- sobel_texture
+
+/// The before/after detail measurements of shellDetailEnhance and multiScaleEnhance (agents/ops/compound-enhance.mjs),
+/// which ran as PJSR sample() loops (~250 s per call at 61 MP).
+/// Params: kSigma (threshold = median + kSigma*1.4826*MAD, PixInsight pooled median/MAD) or threshold (absolute, e.g. the
+/// "before" threshold reused for "after"); upper (optional exclusive upper bound, 0.98 in shellDetailEnhance); step (8);
+/// block (16; 0 = skip the local-std pass) with blockStep 2 and minFrac 0.3; knee + softness (optional: protEngaged).
+/// Sobel on Rec.709 luminance at grid points x,y = 1, 1+step, ... < dim-1. Returns gradientEnergy (mean gx²+gy²), count,
+/// maxLum (max over all grid points, from 0), protEngaged (count with exp(-softness*max(0,l-knee)/oneMinusKnee) < 0.5),
+/// localStd (median of block std devs, sorted[floor(n/2)]), median, mad, threshold.
+pub fn sobel_texture(ctx: &Ctx, p: &Value) -> Result<Value, String> {
+    let img = ctx.img; let (w, h) = (img.w, img.h);
+    let step = opt(p, "step").and_then(|v| v.as_u64()).unwrap_or(8).max(1) as usize;
+    let (median, mad) = match opt(p, "threshold").and_then(|v| v.as_f64()) {
+        Some(_) => (f64::NAN, f64::NAN),
+        None => { let m = img_median(img); (m, img_mad(img, m)) }
+    };
+    let thr = match opt(p, "threshold").and_then(|v| v.as_f64()) { Some(t) => t, None => median + opt(p, "kSigma").and_then(|v| v.as_f64()).unwrap_or(8.0) * 1.4826 * mad };
+    let upper = opt(p, "upper").and_then(|v| v.as_f64());
+    let knee = opt(p, "knee").and_then(|v| v.as_f64());
+    let softness = opt(p, "softness").and_then(|v| v.as_f64()).unwrap_or(4.0);
+    let omk = knee.map(|k| (1.0 - k).max(0.01));
+    let ys: Vec<usize> = (1..h.saturating_sub(1)).step_by(step).collect();
+    // per grid row: (energy, count, max, protEngaged); summed in row order (JS sums sequentially; differences ~1e-15)
+    let rows: Vec<(f64, usize, f64, usize)> = ys.par_iter().map(|&y| {
+        let (mut e, mut n, mut mx, mut pe) = (0f64, 0usize, 0f64, 0usize);
+        let mut x = 1; while x + 1 < w {
+            let l = lum709(img, x, y);
+            if l > mx { mx = l; }
+            if l > thr && upper.map_or(true, |u| l < u) {
+                let (tl, tc, tr) = (lum709(img, x - 1, y - 1), lum709(img, x, y - 1), lum709(img, x + 1, y - 1));
+                let (ml, mr) = (lum709(img, x - 1, y), lum709(img, x + 1, y));
+                let (bl, bc, br) = (lum709(img, x - 1, y + 1), lum709(img, x, y + 1), lum709(img, x + 1, y + 1));
+                let gx = -tl + tr - 2.0 * ml + 2.0 * mr - bl + br;
+                let gy = -tl - 2.0 * tc - tr + bl + 2.0 * bc + br;
+                e += gx * gx + gy * gy; n += 1;
+                if let (Some(k), Some(o)) = (knee, omk) { if (-softness * (l - k).max(0.0) / o).exp() < 0.5 { pe += 1; } }
+            }
+            x += step;
+        }
+        (e, n, mx, pe)
+    }).collect();
+    let (mut energy, mut count, mut maxl, mut prot) = (0f64, 0usize, 0f64, 0usize);
+    for (e, n, mx, pe) in rows { energy += e; count += n; if mx > maxl { maxl = mx; } prot += pe; }
+    // local std over blocks: for (by = 0; by < H - bs; by += bs) ... px/py step blockStep inside the block
+    let bs = opt(p, "block").and_then(|v| v.as_u64()).unwrap_or(16) as usize;
+    let mut local_std = Value::Null;
+    if bs > 0 && w > bs && h > bs {
+        let bstep = opt(p, "blockStep").and_then(|v| v.as_u64()).unwrap_or(2).max(1) as usize;
+        let min_frac = opt(p, "minFrac").and_then(|v| v.as_f64()).unwrap_or(0.3);
+        let bys: Vec<usize> = (0..h - bs).step_by(bs).collect();
+        let mut sds: Vec<f64> = bys.par_iter().flat_map_iter(|&by| {
+            let mut out = Vec::new();
+            let mut bx = 0; while bx < w - bs {
+                let (mut s, mut s2, mut n, mut sh) = (0f64, 0f64, 0usize, 0usize);
+                let mut py = by; while py < by + bs { let mut px = bx; while px < bx + bs {
+                    let l = lum709(img, px, py); s += l; s2 += l * l; n += 1;
+                    if l > thr && upper.map_or(true, |u| l < u) { sh += 1; }
+                    px += bstep; } py += bstep; }
+                if !((sh as f64) < n as f64 * min_frac) {
+                    let mn = s / n as f64; let v = s2 / n as f64 - mn * mn;
+                    if v > 0.0 { out.push(v.sqrt()); }
+                }
+                bx += bs;
+            }
+            out
+        }).collect();
+        sort64(&mut sds);
+        local_std = json!(if sds.is_empty() { 0.0 } else { sds[sds.len() / 2] });
+    }
+    Ok(json!({ "gradientEnergy": if count > 0 { energy / count as f64 } else { 0.0 }, "count": count, "maxLum": maxl, "protEngaged": prot,
+               "localStd": local_std, "median": num(median), "mad": num(mad), "threshold": thr }))
 }

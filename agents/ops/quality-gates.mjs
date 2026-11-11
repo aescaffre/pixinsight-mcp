@@ -8,7 +8,7 @@ import fs from 'fs';
 import path from 'path';
 import { BURN_CLIP, BRIGHT_BLOCK_LEVEL, STAR_CONTRAST, FWHM_HARD, STAR_COUNT_WARN,
   STAR_ELLIPTICITY_WARN, STAR_DARK_RING_WARN, STAR_FWHM_ADVISORY, STAR_CENTER_RADIUS_FRAC, STAR_KNOT_RATIO, STAR_SATURATED } from '../llm/gate-contract.mjs';
-import { nativeOr } from './native-metrics.mjs';
+import { nativeOr, nativeEnabled, nativeNames } from './native-metrics.mjs';
 
 /**
  * Check star quality: FWHM and color diversity.
@@ -1997,7 +1997,9 @@ export async function recordPsfField(ctx, viewId, brief, label, log = () => {}) 
     // automatic GC that aborted PixInsight (8th crash, in a warmed session). The
     // automatic prep diagnostic is skipped above AUTO_PSF_MAX_MP; the agent can still
     // call measure_psf_field on demand (it uses a stride there).
-    const AUTO_PSF_MAX_MP = 30;
+    // 2026-11-11: the guard only applies to the PJSR fallback. The native psf_field (Rust) reads the exported
+    // file outside PixInsight: 2.5 s / 550 MB on the 59 MP PACMAN Ha master, so big frames get their PSF map too.
+    const AUTO_PSF_MAX_MP = (nativeEnabled() && (await nativeNames()).has('psf_field')) ? Infinity : 30;
     const dim = await ctx.pjsr(`var w=ImageWindow.windowById('${viewId}'); w.isNull ? '0' : String(w.mainView.image.width*w.mainView.image.height)`);
     const mp = (parseInt(dim.result, 10) || 0) / 1e6;
     if (mp > AUTO_PSF_MAX_MP) {

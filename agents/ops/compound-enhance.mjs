@@ -1,3 +1,5 @@
+import { nativeEnabled, nativeNames, measureNative } from './native-metrics.mjs';
+import { nativeLheEnabled, nativeLheOr } from './native-process.mjs';
 // ============================================================================
 // Compound Enhancement — multi-scale LHE + HDRMT in a single PJSR call
 //
@@ -44,7 +46,18 @@ export async function multiScaleEnhance(ctx, viewId, opts = {}) {
   const hdrmtLayers = opts.hdrmtLayers ?? 5;
   const hdrmtMedian = opts.hdrmtMedianTransform !== false;
 
-  const r = await ctx.pjsr(`
+  // 2026-11-11: measureDetail (PJSR sample() loops) runs natively (pixmetrics sobel_texture) when available.
+  const useNative = nativeEnabled() && (await nativeNames()).has('sobel_texture');
+  const MP = { kSigma: 8, step: 8, block: 0 };
+  const toDetail = (t) => ({ detailScore: t.gradientEnergy, brightPixels: t.count, bgMedian: t.median, bgMAD: t.mad });
+  let nBefore = null;
+  if (useNative) { try { nBefore = toDetail((await measureNative(ctx, viewId, [{ name: 'sobel_texture', params: MP }])).sobel_texture); } catch (e) { (ctx.log || console.log)(`  [native] sobel_texture failed (${e.message}) — PixInsight loops`); } }
+  const native = !!nBefore;
+  // 2026-11-11: with the native LHE (exact port, 8-bit default bins like PixInsight's), the script is split around the
+  // three LHE passes, which run in Rust through the same mask; otherwise the original single script runs.
+  let r;
+  if (nativeLheEnabled()) {
+    const rA = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}');
     if (w.isNull) throw new Error('View not found: ${viewId}');
     var img = w.mainView.image;
@@ -92,7 +105,208 @@ export async function multiScaleEnhance(ctx, viewId, opts = {}) {
       };
     }
 
-    var before = measureDetail();
+    var before = ${native ? '{ detailScore: 0 }' : 'measureDetail()'};
+
+    // === CREATE LUMINANCE MASK ===
+    var maskId = '__mse_mask';
+    var maskWin = ImageWindow.windowById(maskId);
+    if (!maskWin.isNull) maskWin.forceClose();
+
+    // Extract luminance for mask
+    if (img.isColor) {
+      var CE = new ChannelExtraction;
+      CE.colorSpace = ChannelExtraction.prototype.CIELab;
+      CE.channels = [[true, maskId], [false, ''], [false, '']];
+      CE.executeOn(w.mainView);
+    } else {
+      // Clone for mono — create a new grayscale window and assign pixels
+      var maskW0 = new ImageWindow(img.width, img.height, 1, 32, true, false, maskId);
+      maskW0.mainView.beginProcess();
+      maskW0.mainView.image.assign(img);
+      maskW0.mainView.endProcess();
+      maskW0.show();
+    }
+    processEvents();
+
+    maskWin = ImageWindow.windowById(maskId);
+    if (maskWin.isNull) throw new Error('Failed to create luminance mask');
+
+    // Clip low, apply gamma, blur
+    var PM = new PixelMath;
+    PM.expression = 'max((' + maskId + ' - ${maskClipLow}) / (1 - ${maskClipLow}), 0)';
+    PM.useSingleExpression = true;
+    PM.createNewImage = false;
+    PM.executeOn(maskWin.mainView);
+    processEvents();
+
+    if (${maskGamma} !== 1.0) {
+      var PM2 = new PixelMath;
+      PM2.expression = 'exp(${1.0/maskGamma} * ln(max(' + maskId + ', 0.0001)))';
+      PM2.useSingleExpression = true;
+      PM2.createNewImage = false;
+      PM2.executeOn(maskWin.mainView);
+      processEvents();
+    }
+
+    if (${maskBlur} > 0) {
+      var blur = new Convolution;
+      blur.mode = Convolution.prototype.Parametric;
+      blur.sigma = ${maskBlur};
+      blur.shape = 2;
+      blur.executeOn(maskWin.mainView);
+      processEvents();
+    }
+
+    // Apply mask
+    w.mask = maskWin;
+    w.maskVisible = false;
+    w.maskInverted = false;
+
+    w.removeMask();
+    JSON.stringify({ before: before });
+  `);
+    if (rA.status === 'error') return { error: rA.error?.message || 'PJSR error', details: 'Multi-scale enhancement failed' };
+    const beforeA = JSON.parse(rA.outputs?.consoleOutput || '{}').before;
+    const passes = [[lheLargeR, slopeLimit, lheLargeA], [lheMidR, slopeLimit, lheMidA], [lheFineR, Math.min(slopeLimit, 1.3), lheFineA]];
+    for (const [rad, sl, am] of passes) {
+      await nativeLheOr(ctx, viewId, { radius: rad, bins: 8, slopeLimit: sl, amount: am, circular: true }, '__mse_mask', async () => {
+        const q = await ctx.pjsr(`var w = ImageWindow.windowById('${viewId}'); w.mask = ImageWindow.windowById('__mse_mask'); w.maskInverted = false;
+          var P = new LocalHistogramEqualization; P.radius = ${rad}; P.slopeLimit = ${sl}; P.amount = ${am}; P.circularKernel = true; P.executeOn(w.mainView); w.removeMask(); 'ok';`);
+        if (q.status === 'error') throw new Error(q.error?.message || 'LHE failed');
+      });
+    }
+    r = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}');
+    var img = w.mainView.image;
+    var maskWin = ImageWindow.windowById('__mse_mask');
+    w.mask = maskWin; w.maskVisible = false; w.maskInverted = false;
+    var before = ${JSON.stringify(beforeA)};
+    function measureDetail() {
+      var bgMed = img.median();
+      var bgMAD = img.MAD();
+      var threshold = bgMed + 8 * 1.4826 * bgMAD;
+
+      // Sobel energy in bright regions
+      var totalEnergy = 0;
+      var count = 0;
+      var brightCount = 0;
+      var step = 8;
+
+      function getLum(x, y) {
+        if (img.isColor) {
+          return 0.2126 * img.sample(x, y, 0) + 0.7152 * img.sample(x, y, 1) + 0.0722 * img.sample(x, y, 2);
+        }
+        return img.sample(x, y);
+      }
+
+      for (var y = 1; y < img.height - 1; y += step) {
+        for (var x = 1; x < img.width - 1; x += step) {
+          var lum = getLum(x, y);
+          if (lum > threshold) {
+            brightCount++;
+            var tl = getLum(x-1,y-1), tc = getLum(x,y-1), tr = getLum(x+1,y-1);
+            var ml = getLum(x-1,y),                        mr = getLum(x+1,y);
+            var bl = getLum(x-1,y+1), bc = getLum(x,y+1), br = getLum(x+1,y+1);
+            var gx = -tl + tr - 2*ml + 2*mr - bl + br;
+            var gy = -tl - 2*tc - tr + bl + 2*bc + br;
+            totalEnergy += gx*gx + gy*gy;
+            count++;
+          }
+        }
+      }
+
+      return {
+        detailScore: count > 0 ? totalEnergy / count : 0,
+        brightPixels: brightCount,
+        bgMedian: bgMed,
+        bgMAD: bgMAD
+      };
+    }
+
+    // === HDRMT (optional) ===
+    ${doHDRMT ? `
+    var HDRMT = new HDRMultiscaleTransform;
+    HDRMT.numberOfLayers = ${hdrmtLayers};
+    HDRMT.numberOfIterations = 1;
+    HDRMT.invertedIterations = true;
+    HDRMT.medianTransform = ${hdrmtMedian};
+    HDRMT.toLightness = ${opts.toLightness !== false ? 'true' : 'false'};
+    HDRMT.lightnessMask = true;
+    HDRMT.executeOn(w.mainView);
+    processEvents();
+    ` : ''}
+
+    // Remove mask
+    w.removeMask();
+    maskWin.forceClose();
+    processEvents();
+
+    // === MEASURE AFTER ===
+    var after = ${native ? '{ detailScore: 0 }' : 'measureDetail()'};
+
+    var improvement = before.detailScore > 0 ? ((after.detailScore - before.detailScore) / before.detailScore * 100) : 0;
+
+    JSON.stringify({
+      before: before,
+      after: after,
+      improvement: improvement,
+      params: {
+        mask: { clipLow: ${maskClipLow}, blur: ${maskBlur}, gamma: ${maskGamma} },
+        lhe: { fine: { r: ${lheFineR}, a: ${lheFineA} }, mid: { r: ${lheMidR}, a: ${lheMidA} }, large: { r: ${lheLargeR}, a: ${lheLargeA} }, slope: ${slopeLimit} },
+        hdrmt: { layers: ${hdrmtLayers}, median: ${hdrmtMedian}, applied: ${doHDRMT} }
+      }
+    });
+  `);
+  } else {
+    r = await ctx.pjsr(`
+    var w = ImageWindow.windowById('${viewId}');
+    if (w.isNull) throw new Error('View not found: ${viewId}');
+    var img = w.mainView.image;
+
+    // === MEASURE BEFORE ===
+    function measureDetail() {
+      var bgMed = img.median();
+      var bgMAD = img.MAD();
+      var threshold = bgMed + 8 * 1.4826 * bgMAD;
+
+      // Sobel energy in bright regions
+      var totalEnergy = 0;
+      var count = 0;
+      var brightCount = 0;
+      var step = 8;
+
+      function getLum(x, y) {
+        if (img.isColor) {
+          return 0.2126 * img.sample(x, y, 0) + 0.7152 * img.sample(x, y, 1) + 0.0722 * img.sample(x, y, 2);
+        }
+        return img.sample(x, y);
+      }
+
+      for (var y = 1; y < img.height - 1; y += step) {
+        for (var x = 1; x < img.width - 1; x += step) {
+          var lum = getLum(x, y);
+          if (lum > threshold) {
+            brightCount++;
+            var tl = getLum(x-1,y-1), tc = getLum(x,y-1), tr = getLum(x+1,y-1);
+            var ml = getLum(x-1,y),                        mr = getLum(x+1,y);
+            var bl = getLum(x-1,y+1), bc = getLum(x,y+1), br = getLum(x+1,y+1);
+            var gx = -tl + tr - 2*ml + 2*mr - bl + br;
+            var gy = -tl - 2*tc - tr + bl + 2*bc + br;
+            totalEnergy += gx*gx + gy*gy;
+            count++;
+          }
+        }
+      }
+
+      return {
+        detailScore: count > 0 ? totalEnergy / count : 0,
+        brightPixels: brightCount,
+        bgMedian: bgMed,
+        bgMAD: bgMAD
+      };
+    }
+
+    var before = ${native ? '{ detailScore: 0 }' : 'measureDetail()'};
 
     // === CREATE LUMINANCE MASK ===
     var maskId = '__mse_mask';
@@ -195,7 +409,7 @@ export async function multiScaleEnhance(ctx, viewId, opts = {}) {
     processEvents();
 
     // === MEASURE AFTER ===
-    var after = measureDetail();
+    var after = ${native ? '{ detailScore: 0 }' : 'measureDetail()'};
 
     var improvement = before.detailScore > 0 ? ((after.detailScore - before.detailScore) / before.detailScore * 100) : 0;
 
@@ -210,6 +424,7 @@ export async function multiScaleEnhance(ctx, viewId, opts = {}) {
       }
     });
   `);
+  }
 
   if (r.status === 'error') {
     return {
@@ -223,6 +438,12 @@ export async function multiScaleEnhance(ctx, viewId, opts = {}) {
     data = JSON.parse(r.outputs?.consoleOutput || '{}');
   } catch {
     return { error: 'Failed to parse output' };
+  }
+  if (native) {
+    // the PJSR measured "after" with a FRESH median/MAD threshold: same here (kSigma, not the before threshold)
+    data.before = nBefore;
+    data.after = toDetail((await measureNative(ctx, viewId, [{ name: 'sobel_texture', params: MP }])).sobel_texture);
+    data.improvement = nBefore.detailScore > 0 ? (data.after.detailScore - nBefore.detailScore) / nBefore.detailScore * 100 : 0;
   }
 
   const details = [];
@@ -309,6 +530,13 @@ export async function shellDetailEnhance(ctx, viewId, opts = {}) {
   `);
   const imageIsColor = JSON.parse(colorCheckResult.outputs?.consoleOutput || '{}').isColor;
 
+  // 2026-11-11: the before/after texture loops (PJSR sample() calls, ~250 s per call at 61 MP) run natively
+  // (pixmetrics sobel_texture, ~2 s) when the binary is available; the PixInsight script then only processes.
+  const useNative = nativeEnabled() && (await nativeNames()).has('sobel_texture');
+  const MP = { kSigma: 5, upper: 0.98, step: 8, block: 16, blockStep: 2, minFrac: 0.3 };
+  let nBefore = null;
+  if (useNative) { try { nBefore = (await measureNative(ctx, viewId, [{ name: 'sobel_texture', params: MP }])).sobel_texture; } catch (e) { (ctx.log || console.log)(`  [native] sobel_texture failed (${e.message}) — PixInsight loops`); } }
+  const native = !!nBefore;
   const r = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}');
     if (w.isNull) throw new Error('shellDetailEnhance: view not found: ${viewId}');
@@ -323,6 +551,7 @@ export async function shellDetailEnhance(ctx, viewId, opts = {}) {
       return img.sample(px, py);
     }
 
+${native ? '' : `
     // Measure shell texture before (in shell zone or all bright pixels)
     var bgMedian = img.median();
     var bgMAD = img.MAD();
@@ -372,6 +601,7 @@ export async function shellDetailEnhance(ctx, viewId, opts = {}) {
     bStdDevs.sort(function(a,b){return a-b;});
     var beforeStdDev = bStdDevs.length > 0 ? bStdDevs[Math.floor(bStdDevs.length/2)] : 0;
 
+`}
     // Apply mask if available
     ${hasMask ? `
     var maskW = ImageWindow.windowById('${shellMaskId}');
@@ -470,6 +700,7 @@ export async function shellDetailEnhance(ctx, viewId, opts = {}) {
     // Remove mask
     ${hasMask ? 'w.removeMask();' : ''}
 
+${native ? `JSON.stringify({ native: true });` : `
     // Measure after
     img = w.mainView.image; // re-read
     var afterEnergy = 0, afterCount = 0;
@@ -519,6 +750,8 @@ export async function shellDetailEnhance(ctx, viewId, opts = {}) {
     aStdDevs.sort(function(a,b){return a-b;});
     var afterStdDev = aStdDevs.length > 0 ? aStdDevs[Math.floor(aStdDevs.length/2)] : 0;
 
+`}
+${native ? '' : `
     var improvement = beforeGrad > 0 ? ((afterGrad - beforeGrad) / beforeGrad) * 100 : 0;
 
     JSON.stringify({
@@ -535,6 +768,7 @@ export async function shellDetailEnhance(ctx, viewId, opts = {}) {
         hasMask: ${hasMask}
       }
     });
+`}
   `);
 
   // Clean up auto-created masks
@@ -559,6 +793,17 @@ export async function shellDetailEnhance(ctx, viewId, opts = {}) {
     data = JSON.parse(r.outputs?.consoleOutput || '{}');
   } catch {
     return { error: 'Failed to parse output' };
+  }
+  if (native) {
+    // after: same threshold as before (the PJSR reused subTh), plus maxLum and the protection count
+    const na = (await measureNative(ctx, viewId, [{ name: 'sobel_texture', params: { ...MP, threshold: nBefore.threshold, knee, softness } }])).sobel_texture;
+    const bG = nBefore.gradientEnergy, aG = na.gradientEnergy, bS = nBefore.localStd ?? 0, aS = na.localStd ?? 0;
+    data = {
+      before: { gradientEnergy: bG, shellLocalStdDev: bS }, after: { gradientEnergy: aG, shellLocalStdDev: aS },
+      improvement: bG > 0 ? (aG - bG) / bG * 100 : 0, stddevImprovement: bS > 0 ? (aS - bS) / bS * 100 : 0,
+      maxAfter: na.maxLum, protectionEngaged: na.count > 0 ? na.protEngaged / na.count * 100 : 0,
+      params: { mediumSigma: medSigma, mediumAmount: medAmount, largeSigma: lgSigma, largeAmount: lgAmount, protectKnee: knee, protectSoftness: softness, hasMask },
+    };
   }
 
   return {

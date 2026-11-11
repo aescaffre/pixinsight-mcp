@@ -300,8 +300,8 @@
     },
     "outer_zone": {
       "max_warm_frac": 0.4,
-      "min_rel_brightness": 0.04,
-      "_calibration": "2026-11-10, pixmetrics outer_zone (0.6-1.0 rDet hue; (0.85-1.0)/(0.3-0.5) rDet excess). User refs: warm 0.020-0.110, rel 0.021-0.128 (4/5 >= 0.046). M74 v9 (user best) warm 0.005 rel 0.064; v3 (user: outer arms not visible) rel 0.004; v5 (visible) 0.065; brown-dome runs v3/v5/v10/v11/v12 warm 0.31-0.51; v11/v12 rel 0.031-0.033. | 2026-11-10 RECALIBRATED: the user's best M74 is v5 (not v9), outer warm 0.334 -> limit 0.40 (passes v5; still blocks v10/v12 at 0.51). Warm share alone does not separate v5 from v11 (0.309).",
+      "min_rel_brightness": 0.035,
+      "_calibration": "2026-11-10, pixmetrics outer_zone (0.6-1.0 rDet hue; (0.85-1.0)/(0.3-0.5) rDet excess). User refs: warm 0.020-0.110, rel 0.021-0.128 (4/5 >= 0.046). M74 v9 (user best) warm 0.005 rel 0.064; v3 (user: outer arms not visible) rel 0.004; v5 (visible) 0.065; brown-dome runs v3/v5/v10/v11/v12 warm 0.31-0.51; v11/v12 rel 0.031-0.033. | 2026-11-10 RECALIBRATED: the user's best M74 is v5 (not v9), outer warm 0.334 -> limit 0.40 (passes v5; still blocks v10/v12 at 0.51). Warm share alone does not separate v5 from v11 (0.309). | 2026-11-11: min_rel 0.04 -> 0.035 generic: the user's favourite M81 (KEEP_SUPER, bright grey sky 0.20) measures 0.039. M74 keeps 0.04 per run.",
       "max_blue_p90s": 0.3,
       "max_vivid_blue_frac": 0.02,
       "_blue_calibration": "2026-11-10 outer zone (0.6-1.0 rDet) blue pixels (hue 200-270): p90 saturation user refs 0.158-0.272, v5 (user best) 0.200, v9 0.204, v13-v15 0.169-0.271; v16 0.365 (user: \"really terrible\" violet-blue right outer arm; SHO hue/sat outer_blue boost). Vivid share (S>0.35): refs 0-0.011, v16 0.046."

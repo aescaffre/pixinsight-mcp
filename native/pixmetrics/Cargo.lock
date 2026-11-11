@@ -126,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "pixmetrics"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "jpeg-decoder",
  "lz4_flex",

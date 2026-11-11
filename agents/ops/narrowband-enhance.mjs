@@ -1,3 +1,4 @@
+import { nativeEnabled, binaryPath, exportView } from './native-metrics.mjs';
 // ============================================================================
 // Narrowband Enhancement — extract and process emission signals from broadband
 //
@@ -551,6 +552,13 @@ export async function createAdaptiveZoneMasks(ctx, viewId, opts = {}) {
   const roiR = opts.roi?.radius ?? -1;
   const coreBias = opts.coreBias ?? 0.5;
 
+  // 2026-11-11: thresholds + masks computed natively (pixmetrics process --op zone_masks: 0.4 s vs 185 s of PJSR
+  // sample()/setSample() loops at 61 MP); PixInsight only loads them and applies the sigma 5/10/20 blurs.
+  if (nativeEnabled()) {
+    try { return await nativeZoneMasks(ctx, viewId, { cx: roiCx, cy: roiCy, radius: roiR, coreBias }); }
+    catch (e) { if (/too_few_subject_pixels/.test(e.message)) throw e; (ctx.log || console.log)(`  [native] zone_masks failed (${e.message}) — PixInsight loops`); }
+  }
+
   const r = await ctx.pjsr(`
     var w = ImageWindow.windowById('${viewId}');
     if (w.isNull) throw new Error('createAdaptiveZoneMasks: view not found: ${viewId}');
@@ -677,4 +685,33 @@ export async function createAdaptiveZoneMasks(ctx, viewId, opts = {}) {
   const data = JSON.parse(r.outputs?.consoleOutput || '{}');
   if (data.error) throw new Error('createAdaptiveZoneMasks: ' + data.error + ' (' + data.count + ' pixels)');
   return data;
+}
+
+async function nativeZoneMasks(ctx, viewId, params) {
+  const fs = await import('fs'); const os = await import('os'); const path = await import('path');
+  const { execFile } = await import('child_process');
+  const src = await exportView(ctx, viewId);
+  const dir = path.join(os.homedir(), '.pixinsight-mcp', 'native-export', String(process.pid)); fs.mkdirSync(dir, { recursive: true });
+  const prefix = path.join(dir, 'azone');
+  const j = await new Promise((resolve, reject) => execFile(binaryPath(), ['process', '--op', 'zone_masks', '--image', src, '--out', prefix, '--params', JSON.stringify(params)],
+    { maxBuffer: 16 << 20, timeout: 600000, windowsHide: true }, (err, out) => { try { const o = JSON.parse(out); o.ok ? resolve(o) : reject(new Error(o.error)); } catch { reject(err || new Error('no JSON')); } }));
+  const info = j.result;
+  if (info.error) throw new Error('createAdaptiveZoneMasks: ' + info.error + ' (' + info.count + ' pixels)');
+  const fwd = prefix.replace(/\\/g, '/');
+  const r = await ctx.pjsr(`
+    var ids = ['azone_core', 'azone_shell', 'azone_outer'], names = ['core', 'shell', 'outer'], sigmas = [5, 10, 20];
+    for (var i = 0; i < 3; i++) {
+      var old = ImageWindow.windowById(ids[i]); if (!old.isNull) old.forceClose();
+      var ws = ImageWindow.open('${fwd}_' + names[i] + '.xisf'), m = null;
+      for (var k = 0; k < ws.length; k++) { if (ws[k].mainView.id.indexOf('crop_mask') >= 0) ws[k].forceClose(); else m = ws[k]; }
+      if (m === null) throw new Error('zone mask did not open: ' + names[i]);
+      m.mainView.id = ids[i];
+      var conv = new Convolution; conv.mode = Convolution.prototype.Parametric;
+      conv.sigma = sigmas[i]; conv.shape = 2; conv.aspectRatio = 1; conv.rotationAngle = 0;
+      conv.executeOn(m.mainView); m.show();
+    }
+    'ok';`);
+  for (const n of ['core', 'shell', 'outer']) { try { fs.unlinkSync(`${prefix}_${n}.xisf`); } catch {} }
+  if (r.status === 'error') throw new Error(r.error?.message || 'zone mask load failed');
+  return { coreId: 'azone_core', shellId: 'azone_shell', outerId: 'azone_outer', ...info };
 }

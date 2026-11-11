@@ -1,4 +1,5 @@
 import { nativeOr } from './native-metrics.mjs';
+import { nativeLheOr } from './native-process.mjs';
 // ============================================================================
 // SHO / HOO narrowband palette operations (Hubble palette and variants)
 //
@@ -531,8 +532,25 @@ export async function liftFaintHalo(ctx, viewId, haId, opts = {}) {
     // SHO only: fold yellow/green toward Hubble gold. HOO (R=Ha, G/B=OIII) keeps its own red/teal hues.
     if (${o.palette === 'hoo' ? 'false' : 'true'}) { var HC = new CurvesTransformation; HC.H = [[0,0],[0.06,0.06],[0.16,0.11],[0.25,0.115],[0.33,0.13],[0.40,0.18],[0.50,0.50],[1,1]]; HC.Ht = CurvesTransformation.prototype.AkimaSubsplines; HC.executeOn(V.mainView); }
     if (${o.palette === 'hoo' ? 'false' : 'true'}) { var CS = new ColorSaturation; CS.HS = [[0,0.10],[0.11,0.25],[0.33,-0.2],[0.5,0.1],[0.64,0.1],[0.83,0],[1,0.10]]; CS.HSt = ColorSaturation.prototype.AkimaSubsplines; CS.executeOn(V.mainView); }
-    if (${o.lhe_amount} > 0) { var P = new LocalHistogramEqualization; P.radius = 250; P.histogramBins = LocalHistogramEqualization.prototype.Bit12; P.slopeLimit = 2.0; P.amount = ${o.lhe_amount}; P.circularKernel = true; P.executeOn(V.mainView); }
     V.removeMask();
+    JSON.stringify({ sky: sky, haSky: hsky });
+  `);
+  if (r.status === 'error') throw new Error('liftFaintHalo failed: ' + (r.error?.message || 'unknown'));
+  const part = JSON.parse(r.outputs?.consoleOutput || '{}');
+  // LHE r250 through the halo mask: native (Rust, exact port) when available — PixInsight took ~820 s on 61 MP
+  if (o.lhe_amount > 0) {
+    const lp = { radius: 250, bins: 12, slopeLimit: 2.0, amount: o.lhe_amount, circular: true };
+    await nativeLheOr(ctx, viewId, lp, o.halo_mask_id, async () => {
+      const q = await ctx.pjsr(`var V = ImageWindow.windowById('${viewId}'), M = ImageWindow.windowById('${o.halo_mask_id}');
+        V.mask = M; V.maskInverted = false;
+        var P = new LocalHistogramEqualization; P.radius = 250; P.histogramBins = LocalHistogramEqualization.prototype.Bit12; P.slopeLimit = 2.0; P.amount = ${o.lhe_amount}; P.circularKernel = true; P.executeOn(V.mainView);
+        V.removeMask(); 'ok';`);
+      if (q.status === 'error') throw new Error('liftFaintHalo LHE failed: ' + (q.error?.message || 'unknown'));
+    });
+  }
+  const r2 = await ctx.pjsr(`
+    var V = ImageWindow.windowById('${viewId}'), M = ImageWindow.windowById('${o.halo_mask_id}'), BE = ImageWindow.windowById('${o.body_mask_id}');
+    var sky = ${part.sky}, hsky = ${part.haSky};
     if (${o.nxt} > 0) { var N = new NoiseXTerminator; N.denoise = ${o.nxt}; N.detail = 0.15; N.executeOn(V.mainView); }
     if (${o.color ? 'true' : 'false'}) {
       V.mask = M; V.maskInverted = false;
@@ -543,8 +561,8 @@ export async function liftFaintHalo(ctx, viewId, haId, opts = {}) {
     V.purge();
     JSON.stringify({ sky: sky, haSky: hsky, haloMaskMean: M.mainView.image.mean(), bodyMaskMean: BE.mainView.image.mean(), max: V.mainView.image.maximum() });
   `);
-  if (r.status === 'error') throw new Error('liftFaintHalo failed: ' + (r.error?.message || 'unknown'));
-  return Object.assign(JSON.parse(r.outputs?.consoleOutput || '{}'), { haloMaskId: o.halo_mask_id, bodyMaskId: o.body_mask_id });
+  if (r2.status === 'error') throw new Error('liftFaintHalo failed: ' + (r2.error?.message || 'unknown'));
+  return Object.assign(JSON.parse(r2.outputs?.consoleOutput || '{}'), { haloMaskId: o.halo_mask_id, bodyMaskId: o.body_mask_id });
 }
 
 /**
@@ -554,16 +572,20 @@ export async function liftFaintHalo(ctx, viewId, haId, opts = {}) {
  */
 export async function bodyEdgeContrast(ctx, viewId, opts = {}) {
   const maskId = opts.mask_id || 'BODY_EDGE';
-  const r = await ctx.pjsr(`
-    var V = ImageWindow.windowById('${viewId}'); var M = ImageWindow.windowById('${maskId}');
-    if (V.isNull || M.isNull) throw new Error('bodyEdgeContrast: view or mask missing (${viewId}, ${maskId}) — run lift_faint_halo first');
-    V.mask = M; V.maskInverted = false;
-    var P = new LocalHistogramEqualization; P.radius = ${opts.radius ?? 120}; P.histogramBins = LocalHistogramEqualization.prototype.Bit12;
-    P.slopeLimit = ${opts.slope ?? 1.6}; P.amount = ${opts.amount ?? 0.28}; P.circularKernel = true; P.executeOn(V.mainView);
-    V.removeMask(); V.purge();
-    'max=' + V.mainView.image.maximum().toFixed(3);
-  `);
-  if (r.status === 'error') throw new Error('bodyEdgeContrast failed: ' + (r.error?.message || 'unknown'));
+  const chk = await ctx.pjsr(`(ImageWindow.windowById('${viewId}').isNull || ImageWindow.windowById('${maskId}').isNull) ? 'missing' : 'ok'`);
+  if ((chk.outputs?.consoleOutput || '').trim() !== 'ok') throw new Error(`bodyEdgeContrast: view or mask missing (${viewId}, ${maskId}) — run lift_faint_halo first`);
+  const lp = { radius: opts.radius ?? 120, bins: 12, slopeLimit: opts.slope ?? 1.6, amount: opts.amount ?? 0.28, circular: true };
+  // native LHE (Rust, exact port) when available — PixInsight took ~600 s on 61 MP
+  await nativeLheOr(ctx, viewId, lp, maskId, async () => {
+    const r = await ctx.pjsr(`
+      var V = ImageWindow.windowById('${viewId}'); var M = ImageWindow.windowById('${maskId}');
+      V.mask = M; V.maskInverted = false;
+      var P = new LocalHistogramEqualization; P.radius = ${lp.radius}; P.histogramBins = LocalHistogramEqualization.prototype.Bit12;
+      P.slopeLimit = ${lp.slopeLimit}; P.amount = ${lp.amount}; P.circularKernel = true; P.executeOn(V.mainView);
+      V.removeMask(); 'ok';`);
+    if (r.status === 'error') throw new Error('bodyEdgeContrast failed: ' + (r.error?.message || 'unknown'));
+  });
+  const r = await ctx.pjsr(`var V = ImageWindow.windowById('${viewId}'); V.purge(); 'max=' + V.mainView.image.maximum().toFixed(3);`);
   return { result: r.outputs?.consoleOutput };
 }
 

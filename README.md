@@ -119,6 +119,16 @@ Every measurement behind the quality gates, stage checkpoints and per-step metri
 | full `run_quality_gates` battery in a run | ~350 s | ~6 s |
 | main agent, whole M74 run | 144 min (v11) | 12-24 min (v12-v16) |
 
+**Native processing (v0.5.1).** The slowest PixInsight processes the agents use now also run in the binary (`pixmetrics process`), on the exported view, and the result is loaded back into the same view: LocalHistogramEqualization (an exact port of PixInsight's module, used by `lift_faint_halo`, `body_edge_contrast`, `multi_scale_enhance` and the luminance detail tools) and the adaptive core/shell/outer zone masks. Parity with PixInsight 1.9.5: mono LHE bit-exact, colour and masked LHE within one float ulp, zone masks bit-identical. PixInsight's own process is used as a fallback (`PIXINSIGHT_MCP_NATIVE_LHE=0` disables the native LHE).
+
+| PACMAN SHO, 9576x6388 (61 MP) | PixInsight | Rust |
+|---|---|---|
+| `lift_faint_halo` | 820 s | 184 s |
+| `body_edge_contrast` | 610 s | 63 s |
+| `shell_detail_enhance` | 250 s | 43-49 s |
+| adaptive zone masks | 185 s | 5 s |
+| whole run (same models and brief) | 121 min | 72 min |
+
 **Platforms**: pure Rust with no C dependencies (miniz_oxide, lz4_flex, ruzstd, png, jpeg-decoder), so it builds natively on macOS (arm64, x86_64), Windows (x86_64) and Linux, and cross-compiles to Windows from macOS. Prebuilt binaries are attached to each GitHub release; CI (`.github/workflows/pixmetrics.yml`) builds and tests all four targets.
 
 ### The Claude Max Engine
@@ -461,6 +471,7 @@ agents/
   ops/
     bridge.mjs                  -- File-based IPC with PixInsight (command log, crash detection, safeClose)
     native-metrics.mjs          -- Bridge to pixmetrics: view export + fingerprint cache, nativeOr fallback, nativeBatch
+    native-process.mjs          -- Native processing: export view (+mask), pixmetrics process (LHE, zone masks), load back into the same view; PixInsight fallback
     quality-gates.mjs           -- Star field, ringing, burn, background floor, chroma noise checks (PJSR)
     subject-metrics.mjs         -- Subject brightness/contrast/detail, tonal presence, texture baselines
     stats.mjs                   -- Image statistics, uniformity and color-gradient measurement
@@ -480,7 +491,7 @@ agents/
   processing-profiles.json      -- Per-class defaults + calibrated gate blocks (+ narrowband_palette)
   scoring.mjs, ledger.mjs, artifact-store.mjs -- Scoring model, promotion ledger, per-run artifacts
 native/
-  pixmetrics/                   -- Rust: XISF reader + 42 gate metrics (src/metrics/{colour,core,zones,texture,stars}.rs), README
+  pixmetrics/                   -- Rust: XISF reader + 43 gate metrics (src/metrics/{colour,core,zones,texture,stars}.rs), `process` ops (src/process/: exact LHE port, zone masks), README
 scripts/
   backtest-gates.mjs            -- Gate back-test harness against the approved-image registry
   native-parity.mjs             -- PixInsight vs Rust parity check, metric by metric

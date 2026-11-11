@@ -15,7 +15,12 @@ import { fileURLToPath } from 'url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const EXE = process.platform === 'win32' ? 'pixmetrics.exe' : 'pixmetrics';
-const EXPORT_DIR = path.join(os.homedir(), '.pixinsight-mcp', 'native-export');
+const EXPORT_ROOT = path.join(os.homedir(), '.pixinsight-mcp', 'native-export');
+// One sub-directory per process (the orchestrator and each MCP tool server import this module), removed on exit.
+// Before 2026-11-11 exports were never deleted: 127 files / 14 GB after two runs, enough to fill the disk on a
+// 9576x6388 colour target (734 MB per view).
+const EXPORT_DIR = path.join(EXPORT_ROOT, String(process.pid));
+const MAX_EXPORTS = Math.max(2, Number(process.env.PIXMETRICS_MAX_EXPORTS) || 8);   // LRU cap per process
 
 let _bin;            // resolved binary path, null = unavailable
 let _names = null;   // metric names the binary implements
@@ -60,7 +65,31 @@ export async function nativeNames() {
 // View export, cached per (viewId, fingerprint). The fingerprint is cheap (dimensions + per-channel mean +
 // a 64-point sample grid) and changes whenever a process modifies the image.
 // ---------------------------------------------------------------------------
-const _exports = new Map();   // viewId -> { fp, file }
+const _exports = new Map();   // viewId -> { fp, file }  (Map order = LRU order: re-inserted on every use)
+let _swept = false;
+
+const pidAlive = pid => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+
+/** First use: remove exports left by dead processes (and the pre-2026-11-11 flat files); register exit cleanup. */
+function sweepStale() {
+  if (_swept) return; _swept = true;
+  try {
+    for (const name of fs.readdirSync(EXPORT_ROOT)) {
+      const f = path.join(EXPORT_ROOT, name);
+      if (/^\d+$/.test(name)) { if (Number(name) !== process.pid && !pidAlive(Number(name))) fs.rmSync(f, { recursive: true, force: true }); }
+      else if (/\.(xisf|json)$/.test(name)) fs.rmSync(f, { force: true });
+    }
+  } catch { /* root missing: nothing to sweep */ }
+  process.once('exit', () => { try { fs.rmSync(EXPORT_DIR, { recursive: true, force: true }); } catch {} });
+}
+
+function evictExports() {
+  while (_exports.size > MAX_EXPORTS) {
+    const [vid, ent] = _exports.entries().next().value; const file = ent.file;
+    if (_active && _active.viewId === vid) { _exports.delete(vid); _exports.set(vid, ent); continue; }
+    _exports.delete(vid); try { fs.unlinkSync(file); } catch {}
+  }
+}
 
 /**
  * Write the view to an uncompressed Float32 XISF (no change to the window or its file path), unless the cached
@@ -68,6 +97,7 @@ const _exports = new Map();   // viewId -> { fp, file }
  * it with the one we pass, and only writes when it differs (a 32-bit float copy window -> saveAs -> close).
  */
 export async function exportView(ctx, viewId) {
+  sweepStale();
   fs.mkdirSync(EXPORT_DIR, { recursive: true });
   const file = path.join(EXPORT_DIR, `${String(viewId).replace(/[^A-Za-z0-9_]/g, '_')}.xisf`);
   const hit = _exports.get(viewId);
@@ -91,7 +121,8 @@ export async function exportView(ctx, viewId) {
   let o = null; try { o = JSON.parse(r.outputs?.consoleOutput?.trim() || ''); } catch {}
   if (r.status === 'error' || !o) throw new Error(`native export failed: ${r.error?.message || r.outputs?.consoleOutput}`);
   if (o.wrote) { _stats.exports++; _stats.exportMs += Date.now() - t0; }
-  _exports.set(viewId, { fp: o.fp, file });
+  _exports.delete(viewId); _exports.set(viewId, { fp: o.fp, file });
+  evictExports();
   return file;
 }
 

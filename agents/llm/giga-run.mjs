@@ -39,6 +39,7 @@ import { cleanOldRuns, collectProtectedRuns, cleanOrphanSwap, capPrepCache, capG
 import { writeRunArtifacts, mergeRunSummary, makeAgentRunRecord, formatAgentTable } from './run-artifacts.mjs';
 import { getCritiqueUsage } from './aesthetic-critic.mjs';
 import { buildResumePrompt, loadResumeInfo } from './resume-agent.mjs';
+import { planRgbStars, addRgbStars } from './rgb-stars-step.mjs';
 import { loadBaseRunAsPrep, gradientHash, hasGradientSolution, saveGradientSolution, replayGradientSolution } from './warmstart.mjs';
 
 const home = os.homedir();
@@ -144,6 +145,15 @@ async function main() {
   console.log(`  Target: ${brief.target.name} (${brief.target.classification})`);
   console.log(`  Workflow: ${brief.dataDescription.workflow}`);
   console.log(`  Style: ${brief.aestheticIntent.style}`);
+  // Starless deliverables must end with their RGB stars (files.stars) or opt out explicitly (files.deliverStarless).
+  let starsPlan = null;
+  try { starsPlan = planRgbStars(config, brief); }
+  catch (e) {
+    if (opts.prepOnly || opts.dryRun) console.warn(`  (stars) ${e.message}`);
+    else { console.error(`\n  CONFIG ERROR: ${e.message}`); process.exit(1); }
+  }
+  if (starsPlan?.stars) console.log(`  Stars: RGB stars added after export (${path.basename(starsPlan.stars.rgbConfig)})`);
+  if (starsPlan?.optOut) console.log('  Stars: STARLESS deliverable by explicit opt-out (files.deliverStarless)');
 
   if (opts.dryRun) {
     console.log('\n--- DRY RUN ---');
@@ -731,6 +741,7 @@ RULES:
     finalSelection = pp.finalSelection; exportSource = pp.exportSource;
   }
 
+  let starredPath = null, starsError = null;
   // Export from the artifact
   try {
     if (finalSelection && fs.existsSync(finalSelection.variant_path)) {
@@ -757,6 +768,12 @@ RULES:
       console.log(`  ${r.outputs?.consoleOutput || 'done'}`);
       console.log(`  Saved: ${xisfPath}`);
       console.log(`  Saved: ${pngPath}`);
+      if (starsPlan?.stars) {
+        try {
+          const st = addRgbStars(starsPlan, xisfPath, path.join(outputDir, `${targetName}_giga_RGBstars`));
+          starredPath = st.jpg; console.log(`  Saved (with stars): ${st.xisf}`); console.log(`  Saved (with stars): ${st.jpg}`);
+        } catch (e) { starsError = e.message; console.error(`  [stars] FAILED: ${e.message}`); }
+      }
       if (opts.approve) {
         try { approveExport({ brief, store, xisfPath, variantPath: finalSelection.variant_path, targetName, requestedRunId: opts.approveRunId }); }
         catch (e) { console.error(`  --approve failed (non-fatal): ${e.message}`); }
@@ -806,7 +823,11 @@ RULES:
   console.log(criticalBlock);
   console.log('-'.repeat(60));
   console.log(`  Run finished — review the flaws above; final judgment is yours.`);
-  console.log(`  Final: ${pngPath}`);
+  if (starsPlan?.stars && !starredPath) {
+    console.log(`  RUN INCOMPLETE: the RGB stars were not added (${starsError || 'no export'}). Starless export only: ${pngPath}`);
+    process.exitCode = 3;
+  }
+  console.log(`  Final: ${starredPath || pngPath}`);
   console.log(`  Run: ${store.baseDir}`);
   console.log(`  Duration: ${Math.round(elapsed / 1000)}s (${result.turnCount || 0} turns)`);
   console.log(`  Status: ${runStatus}${exportSource ? ` | export source: ${exportSource}` : ''}`);
