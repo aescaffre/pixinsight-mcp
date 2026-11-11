@@ -574,6 +574,62 @@ function handleRunScript(command) {
    }
 }
 
+// describe_process: the real constants (e.g. IntegerResample.prototype.Average) and
+// the parameters with their default values of any installed process, as they exist
+// in this PixInsight version. Agents guess these names and values otherwise.
+function handleDescribeProcess(command) {
+   var name = String(command.parameters.process || "");
+   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
+      throw new Error("Invalid process name: " + name);
+   var ctor;
+   try { ctor = eval(name); } catch (e) { ctor = undefined; }
+   if (typeof ctor !== "function") {
+      // Common abbreviations -> real class names.
+      var alias = {
+         GHS: "GeneralizedHyperbolicStretch", BXT: "BlurXTerminator", NXT: "NoiseXTerminator",
+         SXT: "StarXTerminator", HT: "HistogramTransformation", Curves: "CurvesTransformation",
+         SPCC: "SpectrophotometricColorCalibration", SPFC: "SpectrophotometricFluxCalibration",
+         MGC: "MultiscaleGradientCorrection", ABE: "AutomaticBackgroundExtractor",
+         DBE: "DynamicBackgroundExtraction", LHE: "LocalHistogramEqualization",
+         HDRMT: "HDRMultiscaleTransform", MLT: "MultiscaleLinearTransform", MMT: "MultiscaleMedianTransform"
+      };
+      var hint = "";
+      if (alias[name]) {
+         var t; try { t = typeof eval(alias[name]); } catch (e2) { t = "undefined"; }
+         hint = (t === "function") ? " Did you mean " + alias[name] + "?" :
+                " The class would be " + alias[name] + ", but it is not installed.";
+      }
+      throw new Error("Unknown process: " + name + "." + hint +
+                      " Note that scripts (ImageSolver, GraXpert, ...) are not processes.");
+   }
+
+   var proto = ctor.prototype;
+   var names = [];
+   try { names = Object.getOwnPropertyNames(proto); } catch (e) {}
+   for (var key in proto)
+      if (names.indexOf(key) < 0) names.push(key);
+   names.sort();
+
+   var constants = {};
+   for (var i = 0; i < names.length; ++i) {
+      var k = names[i];
+      var v;
+      try { v = proto[k]; } catch (e) { continue; }
+      if (typeof v === "number" && /^[A-Z]/.test(k) && k.length > 1)
+         constants[k] = v;
+   }
+   // Process parameters are not enumerable; toSource() of a default instance lists
+   // them all with their default values, as PJSR code.
+   var parameters = "";
+   try { parameters = (new ctor).toSource("JavaScript", "P"); } catch (e) {}
+   if (parameters.length > 8000) parameters = parameters.substring(0, 8000) + "\n...";
+   return {
+      status: "success",
+      outputs: { process: name, constants: constants, parameters: parameters },
+      message: "Described " + name + " (" + Object.keys(constants).length + " constants)"
+   };
+}
+
 // ============================================================================
 // Utility Functions
 // ============================================================================
@@ -622,6 +678,7 @@ function dispatchCommand(command) {
    if (tool === "save_image") return handleSaveImage(command);
    if (tool === "close_image") return handleCloseImage(command);
    if (tool === "get_image_statistics") return handleGetImageStatistics(command);
+   if (tool === "describe_process") return handleDescribeProcess(command);
 
    // Processing commands
    if (tool === "run_pixelmath") return handleRunPixelMath(command);
