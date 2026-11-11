@@ -811,6 +811,14 @@ function runWatcher() {
    // Graceful shutdown: check for sentinel file
    var SHUTDOWN_FILE = BRIDGE_DIR + "/shutdown";
 
+   // Pause: while this sentinel file exists, no command is executed (they stay queued
+   // in commands/ and run on resume). PixInsight stays usable. A pause left over from a
+   // previous session is cleared at start so the watcher never comes up silently paused.
+   // scripts/windows/mcp-pause.bat / mcp-resume.bat create and delete it.
+   var PAUSE_FILE = BRIDGE_DIR + "/pause";
+   try { if (File.exists(PAUSE_FILE)) File.remove(PAUSE_FILE); } catch (eP) {}
+   var wasPaused = false;
+
    function shouldShutdown() {
       if (console.abortRequested) return true;
       if (File.exists(SHUTDOWN_FILE)) {
@@ -830,6 +838,30 @@ function runWatcher() {
       if (shouldShutdown()) {
          console.warningln("[MCP Watcher] Shutdown requested. Stopping.");
          break;
+      }
+
+      // Paused: keep the UI responsive and the shutdown check alive, run nothing.
+      if (File.exists(PAUSE_FILE)) {
+         if (!wasPaused) {
+            console.warningln("[MCP Watcher] Paused. Delete " + PAUSE_FILE + " (or run mcp-resume.bat) to resume.");
+            wasPaused = true;
+         }
+         // shouldShutdown() consumes the sentinel, so a shutdown seen here must stop the
+         // main loop right away (not be re-checked at the top, where it would be gone).
+         var pEnd = Date.now() + 200, pStop = false;
+         do {
+            System.msleep(10); CoreApplication.processEvents();
+            if (shouldShutdown()) { pStop = true; break; }
+         } while (Date.now() < pEnd);
+         if (pStop) {
+            console.warningln("[MCP Watcher] Shutdown requested while paused. Stopping.");
+            break;
+         }
+         continue;
+      }
+      if (wasPaused) {
+         console.noteln("[MCP Watcher] Resumed.");
+         wasPaused = false;
       }
 
       var processed = processNextCommand();
