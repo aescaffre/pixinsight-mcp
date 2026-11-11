@@ -335,6 +335,7 @@ Successfully processed with zero target-specific code changes between runs:
   - **Windows**: the Node <-> PixInsight bridge was validated by a community tester; v0.4.0 fixes the portability issues they reported (Windows paths embedded in PJSR, Unix-only `ps`/`grep`/`awk` memory checks, hard-coded PixInsight install paths in the watcher).
   - **Linux**: same code paths as macOS (process checks via `ps`/`pgrep`); expected to work, untested.
   - `scripts/pi-relaunch.sh` is a macOS convenience script; on Windows/Linux start PixInsight yourself and run the watcher (Quick Start steps 2 and 3a).
+  - On Windows, `scripts/windows/mcp-pause.bat`, `mcp-resume.bat` and `mcp-stop.bat` pause, resume and stop the watcher with a double click (no Node needed). They create or delete the `pause` / `shutdown` sentinel files in `%USERPROFILE%\.pixinsight-mcp\bridge`; while paused, commands stay queued and PixInsight stays usable. Add `/q` to skip the final key press when calling them from another script.
 - At least 20 GB free disk space (checked at startup; under 10 GB the run aborts)
 
 ---
