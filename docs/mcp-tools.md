@@ -335,6 +335,16 @@ Execute arbitrary PJSR code inside PixInsight. Escape hatch for anything not cov
 
 ---
 
+### `describe_process`
+List the real PJSR constants and the parameters (with default values) of an installed process, as they exist in the running PixInsight version. Avoids guessed enum names and values in `run_script` code.
+
+**Parameters**:
+- `process` (string, required) — process class name, e.g. `"IntegerResample"`, `"CurvesTransformation"`. Common abbreviations (GHS, SPCC, BXT, ABE…) return a hint with the real class name.
+
+**Returns**: the numeric constants (e.g. `IntegerResample.Average = 1`; on the V8 engine they live on the constructor, on the legacy engine on the prototype; both are read) and the default instance as PJSR code (`toSource()`).
+
+---
+
 ### `evaluate_subframes`
 Evaluate subframe quality using SubframeSelector.
 
