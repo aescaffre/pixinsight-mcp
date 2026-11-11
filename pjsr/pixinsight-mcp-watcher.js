@@ -603,21 +603,27 @@ function handleDescribeProcess(command) {
                       " Note that scripts (ImageSolver, GraXpert, ...) are not processes.");
    }
 
-   var proto = ctor.prototype;
-   var names = [];
-   try { names = Object.getOwnPropertyNames(proto); } catch (e) {}
-   for (var key in proto)
-      if (names.indexOf(key) < 0) names.push(key);
-   names.sort();
-
+   // Constants: on the V8 engine they live on the constructor (IntegerResample.Average);
+   // on the legacy engine, on the prototype (IntegerResample.prototype.Average). Look at
+   // both and report them as Process.NAME (the form the v8CompatCode rewrite produces).
    var constants = {};
-   for (var i = 0; i < names.length; ++i) {
-      var k = names[i];
-      var v;
-      try { v = proto[k]; } catch (e) { continue; }
-      if (typeof v === "number" && /^[A-Z]/.test(k) && k.length > 1)
-         constants[k] = v;
-   }
+   [ctor, ctor.prototype].forEach(function (obj) {
+      if (!obj) return;
+      var names = [];
+      try { names = Object.getOwnPropertyNames(obj); } catch (e) {}
+      for (var key in obj)
+         if (names.indexOf(key) < 0) names.push(key);
+      for (var i = 0; i < names.length; ++i) {
+         var k = names[i];
+         if (constants[k] !== undefined || !/^[A-Z]/.test(k) || k.length < 2) continue;
+         var v;
+         try { v = obj[k]; } catch (e) { continue; }
+         if (typeof v === "number") constants[k] = v;
+      }
+   });
+   var sorted = {};
+   Object.keys(constants).sort().forEach(function (k) { sorted[k] = constants[k]; });
+   constants = sorted;
    // Process parameters are not enumerable; toSource() of a default instance lists
    // them all with their default values, as PJSR code.
    var parameters = "";

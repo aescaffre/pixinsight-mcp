@@ -341,7 +341,7 @@ List the real PJSR constants and the parameters (with default values) of an inst
 **Parameters**:
 - `process` (string, required) — process class name, e.g. `"IntegerResample"`, `"CurvesTransformation"`. Common abbreviations (GHS, SPCC, BXT, ABE…) return a hint with the real class name.
 
-**Returns**: the numeric constants (e.g. `IntegerResample.prototype.Average = 1`) and the default instance as PJSR code (`toSource()`).
+**Returns**: the numeric constants (e.g. `IntegerResample.Average = 1`; on the V8 engine they live on the constructor, on the legacy engine on the prototype; both are read) and the default instance as PJSR code (`toSource()`).
 
 ---
 

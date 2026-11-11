@@ -326,7 +326,7 @@ export function registerProcessingTools(server: McpServer, bridge: BridgeClient)
   // describe_process
   server.tool(
     "describe_process",
-    "List the real PJSR constants (e.g. IntegerResample.prototype.Average) and the parameters with " +
+    "List the real PJSR constants (e.g. IntegerResample.Average) and the parameters with " +
     "their default values of a PixInsight process, as installed in this PixInsight version. Use it " +
     "before writing run_script code for a process instead of guessing names or enum values.",
     {
@@ -342,7 +342,7 @@ export function registerProcessingTools(server: McpServer, bridge: BridgeClient)
       }
       const out = (result as any).outputs ?? {};
       const constants = Object.entries(out.constants ?? {})
-        .map(([k, v]) => `${process}.prototype.${k} = ${v}`).join("\n");
+        .map(([k, v]) => `${out.process ?? process}.${k} = ${v}`).join("\n");
       const text =
         `# ${out.process ?? process}\n\n## Constants\n${constants || "(none)"}\n\n` +
         `## Parameters (defaults)\n${out.parameters || "(not available)"}`;
