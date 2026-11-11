@@ -149,6 +149,9 @@ Execute a PixelMath expression.
 - `targetViewId` (string, optional) — apply to this view (in-place)
 - `createNewImage` (boolean, default: false)
 - `newImageId` (string, optional) — ID for the new image if creating one
+- `allowNoChange` (boolean, default: false) — the watcher verifies the result: an in-place run that leaves the target unchanged (undeclared symbol, non-existent function such as `pow()`, identity expression), `executeOn()` returning false, or a new image that was not created are reported as errors instead of a silent no-op. Set `true` when an unchanged result is expected.
+
+**Returns**: the message says `(verified: image changed)`, `(new image created)` or `(unchanged, allowed)`.
 
 ---
 
